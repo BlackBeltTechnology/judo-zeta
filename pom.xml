@@ -470,9 +470,8 @@
                 </property>
             </activation>
             <modules>
-                <module>validation-core</module>
-				<module>p2</module>
-				<module>osgi-itest</module>
+                <!-- Modules removed in develop branch - infrastructure only -->
+                <!-- Source code modules are in feature branch -->
             </modules>
         </profile>
 
