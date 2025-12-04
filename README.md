@@ -98,6 +98,43 @@ judo-zeta/
 - **JUnit Jupiter 5.11.3** - Unit testing
 - **Lombok 1.18.34** - Annotation processing
 
+## Documentation
+
+Comprehensive documentation is available in the [docs/](docs/) directory:
+
+### Quick Links
+
+- **[Getting Started Guide](docs/getting-started.md)** - Install and write your first validation rule
+- **[EVL Comparison](docs/evl-comparison/overview.md)** - For developers familiar with Epsilon Validation Language
+- **[Best Practices](docs/best-practices/constants.md)** - Production-ready patterns and conventions
+
+### Complete Documentation
+
+- **[Documentation Hub](docs/index.md)** - Central navigation for all documentation
+- **User Guide** - Core concepts, validation rules, guards, caching, extension methods
+- **Best Practices** - Constants, extension delegation, guard methods, error messages, performance
+- **EVL Comparison** - Overview, syntax mapping, migration guide, feature parity
+- **Examples** - Simple validations, entity types, operations, inheritance, cross-references
+- **Architecture** - System overview, execution flow, parallel execution, dependency resolution
+- **Reference** - Annotations, ValidationResult API, ValidationContext API, troubleshooting
+
+### Key Documentation Highlights
+
+**For New Users:**
+- [Getting Started](docs/getting-started.md) - Installation and first validation in 10 minutes
+- [Core Concepts](docs/user-guide/core-concepts.md) - Understand the framework fundamentals
+- [Simple Examples](docs/examples/simple-validations.md) - Basic patterns to get started
+
+**For EVL Users:**
+- [EVL vs Zeta Overview](docs/evl-comparison/overview.md) - High-level comparison
+- [Syntax Mapping](docs/evl-comparison/syntax-mapping.md) - Side-by-side EVL → Zeta examples
+- [Migration Guide](docs/evl-comparison/migration-guide.md) - Step-by-step migration from EVL
+
+**For Advanced Users:**
+- [Performance Optimization](docs/best-practices/performance.md) - Caching, parallelization, and tuning
+- [Architecture Internals](docs/architecture/overview.md) - How the framework works
+- [Troubleshooting Guide](docs/reference/troubleshooting.md) - Common issues and solutions
+
 ## Installation
 
 ### Maven Dependency
@@ -554,9 +591,10 @@ Log output shows:
 - Cache hit/miss statistics
 - Validation timing
 
-## Documentation
+## Additional Resources
 
-- **[AGENTS.md](AGENTS.md)** - Comprehensive developer documentation
+- **[Comprehensive Documentation](docs/index.md)** - Complete user guide, examples, and reference
+- **[AGENTS.md](AGENTS.md)** - Developer documentation for project contributors
 - **JavaDoc** - Inline API documentation
 - **OpenSpec** - Spec-driven development workflow (`openspec/AGENTS.md`)
 
