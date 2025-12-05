@@ -1,99 +1,148 @@
-# Judo Zeta Validation Framework Documentation
+# Judo Zeta Framework Documentation
 
-Welcome to the comprehensive documentation for the Judo Zeta Validation Framework. This documentation will help you understand, implement, and optimize validation rules for Eclipse Modeling Framework (EMF) models.
+Welcome to the comprehensive documentation for the Judo Zeta Framework. This project provides annotation-based frameworks for Eclipse Modeling Framework (EMF) model processing.
 
-## Quick Navigation
+## Frameworks
 
-### Getting Started
-- **[Getting Started Guide](getting-started.md)** - Install and write your first validation rule
+Judo Zeta consists of two complementary frameworks:
 
-### User Guide
-Learn the core concepts and features:
-- [Core Concepts](user-guide/core-concepts.md) - Annotations, rules, and validation context
-- [Writing Validation Rules](user-guide/validation-rules.md) - Constraints, critiques, and messages
-- [Guards and Dependencies](user-guide/guards-and-dependencies.md) - Conditional validation and rule ordering
-- [Caching](user-guide/caching.md) - Optimize expensive validations
-- [Extension Methods](user-guide/extension-methods.md) - Reusable helper methods
-- [Lifecycle Hooks](user-guide/lifecycle-hooks.md) - Pre/post validation setup
+### Validation Framework
 
-### Best Practices
-Proven patterns for production code:
-- [Constants](best-practices/constants.md) - Constraint and guard method name constants
-- [Extension Delegation](best-practices/extension-delegation.md) - Static utility patterns
-- [Guard Methods](best-practices/guard-methods.md) - Effective guard patterns
-- [Error Messages](best-practices/error-messages.md) - Clear, actionable messages
-- [Performance](best-practices/performance.md) - Optimization and parallelization
+Annotation-based model validation for checking model correctness and quality.
 
-### EVL Comparison
-For developers familiar with Epsilon Validation Language:
-- [Overview](evl-comparison/overview.md) - High-level differences and similarities
-- [Syntax Mapping](evl-comparison/syntax-mapping.md) - EVL constructs to Zeta equivalents
-- [Migration Guide](evl-comparison/migration-guide.md) - Step-by-step migration from EVL
-- [Feature Parity](evl-comparison/feature-parity.md) - What's supported and what's not
+**[Validation Documentation](validation/index.md)**
 
-### Real-World Examples
-Learn from production code:
-- [Simple Validations](examples/simple-validations.md) - Basic constraints and critiques
-- [Entity Type Validations](examples/entity-type-validations.md) - Name uniqueness, mapping checks
-- [Operation Validations](examples/operation-validations.md) - Complex guard/satisfies chains
-- [Inheritance Validations](examples/inheritance-validations.md) - Hierarchy and cyclic detection
-- [Cross-Reference Validations](examples/cross-reference-validations.md) - Multi-element validation
+- Validate EMF models with compile-time type safety
+- Define constraints (`@Constraint`) and warnings (`@Critique`)
+- Conditional validation with guards and dependencies
+- Parallel execution for large models
+- EVL (Epsilon Validation Language) replacement
 
-### Architecture
-Understand the internals:
-- [Overview](architecture/overview.md) - System architecture and components
-- [Execution Flow](architecture/execution-flow.md) - How validation runs
-- [Parallel Execution](architecture/parallel-execution.md) - Work distribution and performance
-- [Dependency Resolution](architecture/dependency-resolution.md) - Topological sorting
+**Quick Start**: [Getting Started with Validation](validation/getting-started.md)
 
-### Reference
-Complete API documentation:
-- [Annotations](reference/annotations.md) - All annotations with parameters
-- [ValidationResult API](reference/validation-result.md) - Creating and handling results
-- [ValidationContext API](reference/validation-context.md) - Context methods and utilities
-- [Troubleshooting](reference/troubleshooting.md) - Common issues and solutions
+### Transformation Framework
+
+Annotation-based model-to-model transformation for converting between metamodels.
+
+**[Transformation Documentation](transformation/index.md)**
+
+- Transform EMF models with compile-time type safety
+- Define rules with `@TransformRule`
+- Lazy evaluation, rule inheritance, greedy matching
+- Parallel execution for large models
+- ETL (Epsilon Transformation Language) replacement
+
+**Quick Start**: [Getting Started with Transformation](transformation/getting-started.md)
+
+## When to Use Which Framework
+
+| Task | Framework |
+|------|-----------|
+| Check if model is valid | Validation |
+| Find errors and warnings in model | Validation |
+| Enforce business rules | Validation |
+| Convert model to different metamodel | Transformation |
+| Generate target model from source model | Transformation |
+| Map ESM to PSM, PSM to ASM | Transformation |
+
+## Shared Concepts
+
+Both frameworks share common concepts:
+
+| Concept | Validation | Transformation |
+|---------|------------|----------------|
+| Context annotation | `@ValidationContext` | `@TransformationContext` |
+| Guard conditions | `@Guard` | `@Guard` |
+| Extension methods | `@ExtensionMethod` | `@ExtensionMethod` |
+| Caching | `@Cached` | `@Cached` |
+| Pre/Post hooks | `@PreValidation`/`@PostValidation` | `@PreExecution`/`@PostExecution` |
+
+## Quick Reference
+
+### Validation
+
+```java
+@ValidationContext(EntityType.class)
+public class EntityTypeValidations {
+    
+    @Constraint(name = "MustHaveName", message = "Entity must have a name")
+    public ValidationRule mustHaveName() {
+        return (element, ctx) -> {
+            EntityType entity = (EntityType) element;
+            return entity.getName() != null 
+                ? ValidationResult.pass()
+                : ValidationResult.fail("Name is required");
+        };
+    }
+}
+```
+
+### Transformation
+
+```java
+@TransformationContext(source = EntityType.class, target = Table.class)
+public class EntityTypeTransformations {
+    
+    @TransformRule(name = "EntityType2Table")
+    public TransformFunction<EntityType, Table> entityType2Table() {
+        return (entity, ctx) -> {
+            Table table = ctx.createTarget(Table.class);
+            table.setName(entity.getName());
+            return table;
+        };
+    }
+}
+```
+
+## Key Benefits
+
+Both frameworks provide:
+
+- **Type Safety** - Compile-time type checking catches errors early
+- **IDE Support** - Full autocomplete, refactoring, and debugging
+- **Performance** - No interpretation overhead, automatic parallelization
+- **Testability** - Standard unit testing with JUnit
+- **Maintainability** - Familiar Java code, no DSL to learn
 
 ## Documentation Structure
 
-This documentation follows a **progressive disclosure** approach:
+Each framework has parallel documentation:
 
-1. **Start Simple** - Getting Started guide gets you up and running quickly
-2. **Build Understanding** - User Guide explains core concepts with examples
-3. **Learn Patterns** - Best Practices show proven production patterns
-4. **Migrate Smoothly** - EVL Comparison helps transition from Epsilon
-5. **See It In Action** - Examples demonstrate real-world usage
-6. **Go Deep** - Architecture docs explain internals for advanced use
-7. **Look It Up** - Reference provides comprehensive API documentation
+```
+docs/
+├── index.md                 # This page
+├── validation/
+│   ├── index.md             # Validation hub
+│   ├── getting-started.md
+│   ├── user-guide/
+│   ├── best-practices/
+│   ├── evl-comparison/
+│   ├── examples/
+│   ├── architecture/
+│   └── reference/
+└── transformation/
+    ├── index.md             # Transformation hub
+    ├── getting-started.md
+    ├── user-guide/
+    ├── best-practices/
+    ├── etl-comparison/
+    ├── examples/
+    ├── architecture/
+    └── reference/
+```
 
-## Search Tips
+## Getting Help
 
-- Use your browser's search (Ctrl+F / Cmd+F) to find specific topics
-- Check the [Troubleshooting Guide](reference/troubleshooting.md) for error messages
-- Look at [Examples](examples/simple-validations.md) for code patterns
-- See [EVL Comparison](evl-comparison/syntax-mapping.md) for EVL → Zeta mapping
-
-## Quick Reference Card
-
-| Task | Annotation | Example |
-|------|------------|---------|
-| Define error-level rule | `@Constraint` | `@Constraint(name = "MustHaveName", message = "...")` |
-| Define warning-level rule | `@Critique` | `@Critique(name = "ShouldHaveDesc", message = "...")` |
-| Add conditional guard | `@Guard` | `@Guard(method = "isNotAbstract")` |
-| Declare dependencies | `@Satisfies` | `@Satisfies(constraints = {"MustHaveName"})` |
-| Cache expensive results | `@Cached` | `@Cached` |
-| Define helper method | `@ExtensionMethod` | `@ExtensionMethod(elementType = MyType.class)` |
-
-## Contributing to Documentation
-
-Found an error or want to improve the documentation? Please:
-1. Open an issue at https://github.com/BlackBeltTechnology/judo-zeta/issues
-2. Submit a pull request with your improvements
-3. Follow the existing documentation style and structure
+- **Validation Issues**: [Troubleshooting Guide](validation/reference/troubleshooting.md)
+- **Transformation Issues**: [Troubleshooting Guide](transformation/reference/troubleshooting.md)
+- **Bug Reports**: https://github.com/BlackBeltTechnology/judo-zeta/issues
 
 ## License
 
-This documentation is part of the Judo Zeta Validation Framework, licensed under the Eclipse Public License 2.0 (EPL-2.0).
+This documentation is part of the Judo Zeta Framework, licensed under the Eclipse Public License 2.0 (EPL-2.0).
 
 ---
 
-**Need help?** Start with the [Getting Started Guide](getting-started.md) or jump directly to the [Examples](examples/simple-validations.md).
+**Start Here**: 
+- [Validation Getting Started](validation/getting-started.md)
+- [Transformation Getting Started](transformation/getting-started.md)
