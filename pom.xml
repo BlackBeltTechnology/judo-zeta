@@ -470,7 +470,10 @@
                 </property>
             </activation>
             <modules>
+                <module>zeta-common</module>
+                <module>zeta-annotations</module>
                 <module>validation-core</module>
+                <module>transformation-core</module>
 				<module>p2</module>
 				<module>osgi-itest</module>
             </modules>

@@ -3,12 +3,33 @@
    <description>
       To install these features, point Eclipse at this site.
    </description>
+
+   <!-- Common Feature -->
+   <feature id="hu.blackbelt.judo.zeta.common.feature">
+      <category name="judo_zeta_common"/>
+   </feature>
+   <category-def name="judo_zeta_common" label="JUDO Zeta Common">
+      <description>
+         JUDO Zeta Common utilities and annotations.
+      </description>
+   </category-def>
+
+   <feature id="hu.blackbelt.judo.zeta.common.feature.source">
+      <category name="judo_zeta_common_source"/>
+   </feature>
+   <category-def name="judo_zeta_common_source" label="JUDO Zeta Common Source">
+      <description>
+         JUDO Zeta Common source code
+      </description>
+   </category-def>
+
+   <!-- Validation Feature -->
    <feature id="hu.blackbelt.judo.zeta.validation.feature">
       <category name="judo_zeta_validation"/>
    </feature>
    <category-def name="judo_zeta_validation" label="JUDO Zeta Validation">
       <description>
-         JUDO Zeta Validation.
+         JUDO Zeta Validation framework.
       </description>
    </category-def>
 
@@ -18,6 +39,25 @@
    <category-def name="judo_zeta_validation_source" label="JUDO Zeta Validation Source">
       <description>
          JUDO Zeta Validation source code
+      </description>
+   </category-def>
+
+   <!-- Transformation Feature -->
+   <feature id="hu.blackbelt.judo.zeta.transformation.feature">
+      <category name="judo_zeta_transformation"/>
+   </feature>
+   <category-def name="judo_zeta_transformation" label="JUDO Zeta Transformation">
+      <description>
+         JUDO Zeta Transformation framework (ETL replacement).
+      </description>
+   </category-def>
+
+   <feature id="hu.blackbelt.judo.zeta.transformation.feature.source">
+      <category name="judo_zeta_transformation_source"/>
+   </feature>
+   <category-def name="judo_zeta_transformation_source" label="JUDO Zeta Transformation Source">
+      <description>
+         JUDO Zeta Transformation source code
       </description>
    </category-def>
 </site>

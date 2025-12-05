@@ -8,11 +8,11 @@
 		<artifactId>hu.blackbelt.judo.zeta</artifactId>
         <version>${revision}</version>
 	</parent>
-	<artifactId>hu.blackbelt.judo.zeta.validation-core</artifactId>
+	<artifactId>hu.blackbelt.judo.zeta.transformation-core</artifactId>
 	<packaging>bundle</packaging>
 
-	<name>Judo :: Zeta :: Validation Core</name>
-	<description>Reusable Java validation framework for EMF metamodels</description>
+	<name>Judo :: Zeta :: Transformation Core</name>
+	<description>Annotation-based transformation framework for EMF metamodels (ETL replacement)</description>
 
 	<build>
 		<plugins>
@@ -28,8 +28,7 @@
 							*
 						</Import-Package>
 						<Export-Package>
-                            hu.blackbelt.judo.zeta.validation.core;version=${project.version},
-                            hu.blackbelt.judo.zeta.validation.util;version=${project.version},
+                            hu.blackbelt.judo.zeta.transformation.core;version=${project.version},
                         </Export-Package>
 					</instructions>
 				</configuration>
@@ -72,6 +71,12 @@
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>com.google.code.gson</groupId>
+            <artifactId>gson</artifactId>
+            <version>2.10.1</version>
         </dependency>
 
         <!-- Test Dependencies -->

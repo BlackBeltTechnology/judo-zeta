@@ -20,7 +20,7 @@ package hu.blackbelt.judo.zeta.validation;
  * #L%
  */
 
-import hu.blackbelt.judo.zeta.validation.core.ExtensionMethodRegistry;
+import hu.blackbelt.judo.zeta.common.ExtensionMethodRegistry;
 import hu.blackbelt.judo.zeta.validation.core.ValidationContext;
 import hu.blackbelt.judo.zeta.validation.core.ValidationRegistry;
 import org.eclipse.emf.common.util.URI;

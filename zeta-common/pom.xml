@@ -8,11 +8,11 @@
 		<artifactId>hu.blackbelt.judo.zeta</artifactId>
         <version>${revision}</version>
 	</parent>
-	<artifactId>hu.blackbelt.judo.zeta.validation-core</artifactId>
+	<artifactId>hu.blackbelt.judo.zeta.common</artifactId>
 	<packaging>bundle</packaging>
 
-	<name>Judo :: Zeta :: Validation Core</name>
-	<description>Reusable Java validation framework for EMF metamodels</description>
+	<name>Judo :: Zeta :: Common</name>
+	<description>Shared utilities for Zeta validation and transformation frameworks</description>
 
 	<build>
 		<plugins>
@@ -28,8 +28,7 @@
 							*
 						</Import-Package>
 						<Export-Package>
-                            hu.blackbelt.judo.zeta.validation.core;version=${project.version},
-                            hu.blackbelt.judo.zeta.validation.util;version=${project.version},
+                            hu.blackbelt.judo.zeta.common;version=${project.version},
                         </Export-Package>
 					</instructions>
 				</configuration>
@@ -38,19 +37,6 @@
 	</build>
 
     <dependencies>
-        <!-- Shared modules -->
-        <dependency>
-            <groupId>hu.blackbelt.judo.zeta</groupId>
-            <artifactId>hu.blackbelt.judo.zeta.common</artifactId>
-            <version>${project.version}</version>
-        </dependency>
-
-        <dependency>
-            <groupId>hu.blackbelt.judo.zeta</groupId>
-            <artifactId>hu.blackbelt.judo.zeta.annotations</artifactId>
-            <version>${project.version}</version>
-        </dependency>
-
         <dependency>
             <groupId>org.eclipse.emf</groupId>
             <artifactId>org.eclipse.emf.ecore</artifactId>

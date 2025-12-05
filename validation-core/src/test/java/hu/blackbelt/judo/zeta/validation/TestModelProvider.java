@@ -33,7 +33,7 @@ import java.util.List;
  * Simple model provider for tests.
  * Provides basic model traversal operations needed by ValidationContext.
  */
-public class TestModelProvider implements hu.blackbelt.judo.zeta.validation.ModelProvider {
+public class TestModelProvider implements hu.blackbelt.judo.zeta.common.ModelProvider {
 
     @Override
     public <T extends EObject> Collection<T> getAllContents(ResourceSet resourceSet, Class<T> type) {

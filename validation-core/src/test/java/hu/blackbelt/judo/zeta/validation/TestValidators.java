@@ -20,7 +20,7 @@ package hu.blackbelt.judo.zeta.validation;
  * #L%
  */
 
-import hu.blackbelt.judo.zeta.validation.annotation.*;
+import hu.blackbelt.judo.zeta.annotation.*;
 import hu.blackbelt.judo.zeta.validation.core.Severity;
 import hu.blackbelt.judo.zeta.validation.core.ValidationContext;
 import hu.blackbelt.judo.zeta.validation.core.ValidationResult;
@@ -41,7 +41,7 @@ public class TestValidators {
     /**
      * Simple validator for EClass elements.
      */
-    @hu.blackbelt.judo.zeta.validation.annotation.ValidationContext(EClass.class)
+    @hu.blackbelt.judo.zeta.annotation.ValidationContext(EClass.class)
     public static class EClassValidator {
 
         @Constraint(
@@ -86,7 +86,7 @@ public class TestValidators {
     /**
      * Validator for EPackage elements.
      */
-    @hu.blackbelt.judo.zeta.validation.annotation.ValidationContext(EPackage.class)
+    @hu.blackbelt.judo.zeta.annotation.ValidationContext(EPackage.class)
     public static class EPackageValidator {
 
         @Constraint(
@@ -111,7 +111,7 @@ public class TestValidators {
     /**
      * Validator that always passes (for testing passing results).
      */
-    @hu.blackbelt.judo.zeta.validation.annotation.ValidationContext(EObject.class)
+    @hu.blackbelt.judo.zeta.annotation.ValidationContext(EObject.class)
     public static class AlwaysPassValidator {
 
         @Constraint(name = "AlwaysPasses", message = "Always passes")
@@ -125,7 +125,7 @@ public class TestValidators {
      * Note: Uses EObject.class which will match all EMF objects, causing duplicate
      * registrations in the validator hierarchy (known issue in ValidationRegistry).
      */
-    @hu.blackbelt.judo.zeta.validation.annotation.ValidationContext(EObject.class)
+    @hu.blackbelt.judo.zeta.annotation.ValidationContext(EObject.class)
     public static class AlwaysFailValidator {
 
         @Constraint(name = "AlwaysFails", message = "Always fails")
@@ -144,7 +144,7 @@ public class TestValidators {
      * EClass-specific validator that always fails.
      * Used to avoid duplicate registration issues when testing parallel validation.
      */
-    @hu.blackbelt.judo.zeta.validation.annotation.ValidationContext(EClass.class)
+    @hu.blackbelt.judo.zeta.annotation.ValidationContext(EClass.class)
     public static class EClassAlwaysFailValidator {
 
         @Constraint(name = "EClassAlwaysFails", message = "EClass always fails")
@@ -162,7 +162,7 @@ public class TestValidators {
     /**
      * Validator with guard condition.
      */
-    @hu.blackbelt.judo.zeta.validation.annotation.ValidationContext(EClass.class)
+    @hu.blackbelt.judo.zeta.annotation.ValidationContext(EClass.class)
     public static class GuardedValidator {
 
         @Constraint(name = "GuardedConstraint", message = "Guarded constraint")
@@ -181,7 +181,7 @@ public class TestValidators {
      * Validator with counting for cache testing.
      * Note: Uses EObject.class which causes duplicate registrations.
      */
-    @hu.blackbelt.judo.zeta.validation.annotation.ValidationContext(EObject.class)
+    @hu.blackbelt.judo.zeta.annotation.ValidationContext(EObject.class)
     public static class CountingValidator {
 
         public static final AtomicInteger callCount = new AtomicInteger(0);
@@ -199,7 +199,7 @@ public class TestValidators {
      * EClass-specific validator with counting for cache testing.
      * Avoids duplicate registration issues.
      */
-    @hu.blackbelt.judo.zeta.validation.annotation.ValidationContext(EClass.class)
+    @hu.blackbelt.judo.zeta.annotation.ValidationContext(EClass.class)
     public static class EClassCountingValidator {
 
         public static final AtomicInteger callCount = new AtomicInteger(0);
@@ -216,18 +216,18 @@ public class TestValidators {
     /**
      * Validator with pre and post-validation hooks.
      */
-    @hu.blackbelt.judo.zeta.validation.annotation.ValidationContext(EObject.class)
+    @hu.blackbelt.judo.zeta.annotation.ValidationContext(EObject.class)
     public static class HookValidator {
 
         public static final AtomicBoolean preHookCalled = new AtomicBoolean(false);
         public static final AtomicBoolean postHookCalled = new AtomicBoolean(false);
 
-        @PreValidation
+        @PreExecution
         public void preHook(ValidationContext ctx) {
             preHookCalled.set(true);
         }
 
-        @PostValidation
+        @PostExecution
         public void postHook(ValidationContext ctx) {
             postHookCalled.set(true);
         }
@@ -241,7 +241,7 @@ public class TestValidators {
     /**
      * Validator with @Satisfies dependencies.
      */
-    @hu.blackbelt.judo.zeta.validation.annotation.ValidationContext(EClass.class)
+    @hu.blackbelt.judo.zeta.annotation.ValidationContext(EClass.class)
     public static class DependentValidator {
 
         @Constraint(name = "BaseConstraint", message = "Base constraint")
@@ -255,7 +255,7 @@ public class TestValidators {
         }
 
         @Constraint(name = "DependentConstraint", message = "Dependent constraint")
-        @Satisfies(constraints = "BaseConstraint")
+        @Satisfies("BaseConstraint")
         public ValidationRule dependentConstraint() {
             return (element, ctx) -> {
                 EClass eClass = (EClass) element;
