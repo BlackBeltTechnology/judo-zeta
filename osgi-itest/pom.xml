@@ -104,6 +104,13 @@
 
         <dependency>
             <groupId>hu.blackbelt.judo.zeta</groupId>
+            <artifactId>hu.blackbelt.judo.zeta.transformation-core</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>hu.blackbelt.judo.zeta</groupId>
             <artifactId>hu.blackbelt.judo.zeta.annotations</artifactId>
             <version>${project.version}</version>
             <scope>test</scope>
