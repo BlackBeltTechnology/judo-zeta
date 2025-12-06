@@ -76,7 +76,7 @@ public class ZetaLoadITest {
 
                 mavenBundle(maven()
                         .groupId("hu.blackbelt.judo.zeta")
-                        .artifactId("hu.blackbelt.judo.zeta.tranasformation-core")
+                        .artifactId("hu.blackbelt.judo.zeta.transformation-core")
                         .versionAsInProject()));
 
     }
