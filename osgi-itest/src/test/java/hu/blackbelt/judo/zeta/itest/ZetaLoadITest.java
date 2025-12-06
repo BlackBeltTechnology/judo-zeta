@@ -61,8 +61,24 @@ public class ZetaLoadITest {
         return combine(karafConfig(this.getClass()),
                 mavenBundle(maven()
                         .groupId("hu.blackbelt.judo.zeta")
+                        .artifactId("hu.blackbelt.judo.zeta.annotations")
+                        .versionAsInProject()),
+
+                mavenBundle(maven()
+                        .groupId("hu.blackbelt.judo.zeta")
+                        .artifactId("hu.blackbelt.judo.zeta.common")
+                        .versionAsInProject()),
+
+                mavenBundle(maven()
+                        .groupId("hu.blackbelt.judo.zeta")
                         .artifactId("hu.blackbelt.judo.zeta.validation-core")
+                        .versionAsInProject()),
+
+                mavenBundle(maven()
+                        .groupId("hu.blackbelt.judo.zeta")
+                        .artifactId("hu.blackbelt.judo.zeta.tranasformation-core")
                         .versionAsInProject()));
+
     }
 
     @Test
