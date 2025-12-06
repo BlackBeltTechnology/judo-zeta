@@ -20,7 +20,7 @@ package hu.blackbelt.judo.zeta.validation.core;
  * #L%
  */
 
-import hu.blackbelt.judo.zeta.validation.annotation.*;
+import hu.blackbelt.judo.zeta.annotation.*;
 import java.lang.reflect.Method;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -56,10 +56,9 @@ public class ValidationRegistry {
      * @param validatorClass the class containing validation rules
      */
     public void register(Class<?> validatorClass) {
-        hu.blackbelt.judo.zeta.validation.annotation.ValidationContext contextAnnotation =
+        hu.blackbelt.judo.zeta.annotation.ValidationContext contextAnnotation =
             validatorClass.getAnnotation(
-                hu.blackbelt.judo.zeta.validation.annotation
-                    .ValidationContext.class
+                hu.blackbelt.judo.zeta.annotation.ValidationContext.class
             );
         if (contextAnnotation == null) {
             log.warn(
@@ -102,13 +101,13 @@ public class ValidationRegistry {
                 }
 
                 // Scan for hooks
-                if (method.isAnnotationPresent(PreValidation.class)) {
+                if (method.isAnnotationPresent(PreExecution.class)) {
                     preValidationHooks.add(method);
                     hookInstances.put(method, instance);
                     method.setAccessible(true);
                 }
 
-                if (method.isAnnotationPresent(PostValidation.class)) {
+                if (method.isAnnotationPresent(PostExecution.class)) {
                     postValidationHooks.add(method);
                     hookInstances.put(method, instance);
                     method.setAccessible(true);
@@ -141,9 +140,9 @@ public class ValidationRegistry {
         Class<? extends EObject> contextType
     ) {
         // Find guard method if specified
-        hu.blackbelt.judo.zeta.validation.annotation.Guard guardAnnotation =
+        hu.blackbelt.judo.zeta.annotation.Guard guardAnnotation =
             ruleMethod.getAnnotation(
-                hu.blackbelt.judo.zeta.validation.annotation.Guard.class
+                hu.blackbelt.judo.zeta.annotation.Guard.class
             );
         Method guardMethod = null;
         if (guardAnnotation != null) {
@@ -153,8 +152,7 @@ public class ValidationRegistry {
                     .getDeclaredMethod(
                         guardAnnotation.method(),
                         EObject.class,
-                        hu.blackbelt.judo.zeta.validation.core
-                            .ValidationContext.class
+                        ValidationContext.class
                     );
             } catch (NoSuchMethodException e) {
                 throw new RuntimeException(
@@ -172,7 +170,7 @@ public class ValidationRegistry {
             Satisfies.class
         );
         List<String> dependencies = satisfiesAnnotation != null
-            ? Arrays.asList(satisfiesAnnotation.constraints())
+            ? Arrays.asList(satisfiesAnnotation.value())
             : Collections.emptyList();
 
         ValidatorDescriptor descriptor = new ValidatorDescriptor(

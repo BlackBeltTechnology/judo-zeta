@@ -1,28 +1,38 @@
-# Judo Zeta Validation Framework
+# Judo Zeta Framework
 
 [![Build Status](https://github.com/BlackBeltTechnology/judo-zeta/actions/workflows/build.yml/badge.svg)](https://github.com/BlackBeltTechnology/judo-zeta/actions/workflows/build.yml)
 
-A lightweight, standalone validation framework for Eclipse Modeling Framework (EMF) metamodels. Provides annotation-based validation rules with parallel execution, dependency resolution, and comprehensive caching support.
+A lightweight, standalone framework for Eclipse Modeling Framework (EMF) metamodels providing:
+
+- **Validation Framework** - Annotation-based validation rules with parallel execution, dependency resolution, and comprehensive caching support
+- **Transformation Framework** - Annotation-based model-to-model transformations replacing Epsilon ETL with type-safe Java implementations
 
 ## Features
 
+### Validation Framework
 - **Annotation-Driven Rules** - Define validation rules using Java annotations instead of Epsilon Validation Language (EVL)
 - **Parallel Execution** - Automatic parallelization for large models (5000+ elements)
 - **Dependency Resolution** - Topological sorting of rules based on `@Satisfies` dependencies
 - **Caching Support** - Built-in result caching for expensive validations
-- **Extension Methods** - Custom helper methods accessible from validation rules
-- **Lifecycle Hooks** - Pre/post-validation hooks for setup and cleanup
+
+### Transformation Framework
+- **Type-Safe Transformations** - Replace ETL scripts with Java-based transformation rules
+- **Element Resolution** - `equivalent()`, `equivalents()`, and `equivalentDiscriminated()` for target lookup
+- **Rule Inheritance** - `@Abstract`, `@Extends` for reusable transformation hierarchies
+- **Lazy Evaluation** - On-demand transformation execution with `@Lazy` annotation
+- **Greedy Matching** - Type hierarchy matching with `@Greedy` annotation
+
+### Shared Features
+- **Extension Methods** - Custom helper methods accessible from rules
+- **Lifecycle Hooks** - Pre/post-execution hooks for setup and cleanup
 - **OSGi Compatible** - Works as OSGi bundle or standalone library
 - **Eclipse P2 Distribution** - Available as Eclipse plugin via P2 update site
 
 ## Quick Start
 
-```java
-import hu.blackbelt.judo.meta.validation.*;
-import hu.blackbelt.judo.meta.validation.annotation.*;
-import hu.blackbelt.judo.meta.validation.core.*;
+### Validation Example
 
-// 1. Define validation rules
+```java
 @ValidationContext(EntityType.class)
 public class EntityValidations {
     
@@ -35,37 +45,41 @@ public class EntityValidations {
                 : ValidationResult.fail("Name is required");
         };
     }
+}
+
+// Execute validation
+ValidationRegistry registry = new ValidationRegistry();
+registry.register(EntityValidations.class);
+ValidationExecutor executor = ValidationExecutor.builder().registry(registry).build();
+List<ValidationResult> results = executor.validate(modelElements);
+```
+
+### Transformation Example
+
+```java
+@TransformationContext(source = EntityType.class, target = Table.class)
+public class EntityTransformations {
     
-    @Satisfies(constraints = {"MustHaveName"})
-    @Constraint(name = "NameMustBeUnique", message = "Name must be unique")
-    public ValidationRule nameMustBeUnique() {
-        return (element, ctx) -> {
-            EntityType entity = (EntityType) element;
-            List<EntityType> all = ctx.getAll(EntityType.class);
-            long count = all.stream()
-                .filter(e -> entity.getName().equals(e.getName()))
-                .count();
-            return count == 1 
-                ? ValidationResult.pass() 
-                : ValidationResult.fail("Duplicate name: " + entity.getName());
+    @TransformRule(name = "EntityType2Table")
+    public TransformFunction<EntityType, Table> entityType2Table() {
+        return (entity, ctx) -> {
+            Table table = ctx.createTarget(Table.class);
+            table.setName(entity.getName());
+            // Transform attributes to columns
+            entity.getAttributes().forEach(attr -> {
+                Column col = ctx.equivalent(attr, Column.class);
+                table.getColumns().add(col);
+            });
+            return table;
         };
     }
 }
 
-// 2. Execute validation
-ValidationRegistry registry = new ValidationRegistry();
-registry.register(EntityValidations.class);
-
-ValidationExecutor executor = ValidationExecutor.builder()
-    .registry(registry)
-    .build();
-
-List<ValidationResult> results = executor.validate(modelElements);
-
-// 3. Process results
-results.stream()
-    .filter(r -> !r.isValid())
-    .forEach(r -> System.err.println(r.getSeverity() + ": " + r.getMessage()));
+// Execute transformation
+TransformationRegistry registry = new TransformationRegistry();
+registry.register(EntityTransformations.class);
+TransformationExecutor executor = TransformationExecutor.builder().registry(registry).build();
+TransformationResult result = executor.transform(sourceModel);
 ```
 
 ## Project Structure
@@ -97,6 +111,33 @@ judo-zeta/
 - **Pax Exam 4.13.5** - OSGi integration testing
 - **JUnit Jupiter 5.11.3** - Unit testing
 - **Lombok 1.18.34** - Annotation processing
+
+## Documentation
+
+Comprehensive documentation is available in the [docs/](docs/) directory:
+
+### Documentation Hub
+
+- **[Documentation Index](docs/index.md)** - Central navigation for all documentation
+
+### Validation Framework
+
+- **[Getting Started](docs/validation/getting-started.md)** - Install and write your first validation rule
+- **[User Guide](docs/validation/user-guide/core-concepts.md)** - Core concepts, rules, guards, caching
+- **[EVL Comparison](docs/validation/evl-comparison/overview.md)** - Migration from Epsilon EVL
+- **[Best Practices](docs/validation/best-practices/constants.md)** - Production patterns
+- **[Examples](docs/validation/examples/simple-validations.md)** - Working examples
+- **[Reference](docs/validation/reference/annotations.md)** - API reference
+
+### Transformation Framework
+
+- **[Getting Started](docs/transformation/getting-started.md)** - Install and write your first transformation
+- **[User Guide](docs/transformation/user-guide/core-concepts.md)** - Core concepts, rules, element resolution
+- **[ETL Comparison](docs/transformation/etl-comparison/overview.md)** - Migration from Epsilon ETL
+- **[Best Practices](docs/transformation/best-practices/rule-naming.md)** - Production patterns
+- **[Examples](docs/transformation/examples/simple-transformations.md)** - Working examples
+- **[Architecture](docs/transformation/architecture/overview.md)** - System internals
+- **[Reference](docs/transformation/reference/annotations.md)** - API reference
 
 ## Installation
 
@@ -554,9 +595,10 @@ Log output shows:
 - Cache hit/miss statistics
 - Validation timing
 
-## Documentation
+## Additional Resources
 
-- **[AGENTS.md](AGENTS.md)** - Comprehensive developer documentation
+- **[Comprehensive Documentation](docs/index.md)** - Complete user guide, examples, and reference
+- **[AGENTS.md](AGENTS.md)** - Developer documentation for project contributors
 - **JavaDoc** - Inline API documentation
 - **OpenSpec** - Spec-driven development workflow (`openspec/AGENTS.md`)
 

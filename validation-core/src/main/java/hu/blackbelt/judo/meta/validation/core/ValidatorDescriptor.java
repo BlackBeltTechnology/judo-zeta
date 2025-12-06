@@ -20,10 +20,7 @@ package hu.blackbelt.judo.zeta.validation.core;
  * #L%
  */
 
-import hu.blackbelt.judo.zeta.validation.annotation.*;
 import java.lang.reflect.Method;
-import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 import org.eclipse.emf.ecore.EObject;
 

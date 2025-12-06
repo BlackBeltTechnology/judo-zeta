@@ -20,7 +20,8 @@ package hu.blackbelt.judo.zeta.validation.core;
  * #L%
  */
 
-import hu.blackbelt.judo.zeta.validation.ModelProvider;
+import hu.blackbelt.judo.zeta.common.ExtensionMethodRegistry;
+import hu.blackbelt.judo.zeta.common.ModelProvider;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import org.eclipse.emf.ecore.EObject;
