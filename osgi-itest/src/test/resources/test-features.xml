@@ -37,6 +37,7 @@
         <feature prerequisite="true">scr</feature>
         <feature>eclipse-emf</feature>
         <feature>osgi-utils</feature>
+        <feature>google-gson</feature>
     </feature>
 
 </features>
