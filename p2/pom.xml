@@ -38,17 +38,56 @@
                             <categoryFileURL>${basedir}/category.xml</categoryFileURL>
                             <featureDefinitions>
                                 <feature>
+                                    <id>hu.blackbelt.judo.zeta.common.feature</id>
+                                    <version>${project.version}</version>
+                                    <label>JUDO Zeta Common feature</label>
+                                    <providerName>${project.groupId}</providerName>
+                                    <description>JUDO Zeta Common utilities</description>
+                                    <copyright>BlackBelt Technology</copyright>
+                                    <license>Eclipse Public License - v 2.0 (https://www.eclipse.org/org/documents/epl-2.0/EPL-2.0.txt)</license>
+                                    <generateSourceFeature>true</generateSourceFeature>
+                                    <artifacts>
+                                        <artifact>
+                                            <id>hu.blackbelt.judo.zeta:hu.blackbelt.judo.zeta.common:${project.version}</id>
+                                            <transitive>false</transitive>
+                                            <source>true</source>
+                                        </artifact>
+                                        <artifact>
+                                            <id>hu.blackbelt.judo.zeta:hu.blackbelt.judo.zeta.annotations:${project.version}</id>
+                                            <transitive>false</transitive>
+                                            <source>true</source>
+                                        </artifact>
+                                    </artifacts>
+                                </feature>
+                                <feature>
                                     <id>hu.blackbelt.judo.zeta.validation.feature</id>
                                     <version>${project.version}</version>
-                                    <label>JUDO Zeta Validaton feature</label>
+                                    <label>JUDO Zeta Validation feature</label>
                                     <providerName>${project.groupId}</providerName>
-                                    <description>${project.description}</description>
+                                    <description>JUDO Zeta Validation framework</description>
                                     <copyright>BlackBelt Technology</copyright>
                                     <license>Eclipse Public License - v 2.0 (https://www.eclipse.org/org/documents/epl-2.0/EPL-2.0.txt)</license>
                                     <generateSourceFeature>true</generateSourceFeature>
                                     <artifacts>
                                         <artifact>
                                             <id>hu.blackbelt.judo.zeta:hu.blackbelt.judo.zeta.validation-core:${project.version}</id>
+                                            <transitive>false</transitive>
+                                            <source>true</source>
+                                        </artifact>
+                                    </artifacts>
+                                </feature>
+                                <feature>
+                                    <id>hu.blackbelt.judo.zeta.transformation.feature</id>
+                                    <version>${project.version}</version>
+                                    <label>JUDO Zeta Transformation feature</label>
+                                    <providerName>${project.groupId}</providerName>
+                                    <description>JUDO Zeta Transformation framework (ETL replacement)</description>
+                                    <copyright>BlackBelt Technology</copyright>
+                                    <license>Eclipse Public License - v 2.0 (https://www.eclipse.org/org/documents/epl-2.0/EPL-2.0.txt)</license>
+                                    <generateSourceFeature>true</generateSourceFeature>
+                                    <artifacts>
+                                        <artifact>
+                                            <id>hu.blackbelt.judo.zeta:hu.blackbelt.judo.zeta.transformation-core:${project.version}</id>
                                             <transitive>false</transitive>
                                             <source>true</source>
                                         </artifact>
