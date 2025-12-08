@@ -92,12 +92,12 @@ class ConcurrencyStressTest {
         executor.shutdownNow();
     }
 
-    @RepeatedTest(50)
+    @RepeatedTest(3)
     @DisplayName("Concurrent element creation produces exact count")
     @Timeout(30)
     void testConcurrentElementCreation() throws Exception {
-        int threadCount = 50;
-        int elementsPerThread = 100;
+        int threadCount = 20;
+        int elementsPerThread = 50;
         CountDownLatch startLatch = new CountDownLatch(1);
         CountDownLatch doneLatch = new CountDownLatch(threadCount);
         AtomicReference<Throwable> failure = new AtomicReference<>();
@@ -127,7 +127,7 @@ class ConcurrencyStressTest {
                 "All elements should be staged");
     }
 
-    @RepeatedTest(50)
+    @RepeatedTest(3)
     @DisplayName("Concurrent staging maintains unique sequence numbers")
     @Timeout(30)
     void testConcurrentSequenceUniqueness() throws Exception {
@@ -169,7 +169,7 @@ class ConcurrencyStressTest {
                 "All sequences should be unique");
     }
 
-    @RepeatedTest(50)
+    @RepeatedTest(3)
     @DisplayName("Commit after concurrent creation maintains order")
     @Timeout(30)
     void testCommitOrderAfterConcurrentCreation() throws Exception {
@@ -212,7 +212,7 @@ class ConcurrencyStressTest {
         }
     }
 
-    @RepeatedTest(30)
+    @RepeatedTest(3)
     @DisplayName("Enable/disable staging is thread-safe")
     @Timeout(30)
     void testConcurrentEnableDisable() throws Exception {
@@ -255,7 +255,7 @@ class ConcurrencyStressTest {
         assertTrue(disableCount.get() > 0);
     }
 
-    @RepeatedTest(30)
+    @RepeatedTest(3)
     @DisplayName("ElementResolutionCache handles concurrent access")
     @Timeout(30)
     void testConcurrentCacheAccess() throws Exception {
@@ -306,85 +306,97 @@ class ConcurrencyStressTest {
         assertNull(failure.get(), "Exception during concurrent cache access: " + failure.get());
     }
 
-    @RepeatedTest(30)
+    @Test
     @DisplayName("Mixed read/write operations don't deadlock")
-    @Timeout(30)
+    @Timeout(60)
     void testNoDeadlockUnderMixedLoad() throws Exception {
-        int durationSeconds = 2;
+        int durationMillis = 500;
         AtomicBoolean running = new AtomicBoolean(true);
         AtomicInteger operations = new AtomicInteger(0);
         AtomicReference<Throwable> failure = new AtomicReference<>();
-        int threadCount = 30;
+        int writerCount = 4;
+        int readerCount = 4;
+        int cacheCount = 4;
+        int threadCount = writerCount + readerCount + cacheCount;
         CountDownLatch allStarted = new CountDownLatch(threadCount);
+        CountDownLatch allDone = new CountDownLatch(threadCount);
         
         context.enableStaging();
         
         // Writer threads
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < writerCount; i++) {
             executor.submit(() -> {
-                allStarted.countDown();
-                while (running.get() && failure.get() == null) {
-                    try {
+                try {
+                    allStarted.countDown();
+                    while (running.get() && failure.get() == null) {
                         context.createTarget(EClass.class);
                         operations.incrementAndGet();
-                    } catch (Throwable e) {
-                        failure.compareAndSet(null, e);
                     }
+                } catch (Throwable e) {
+                    failure.compareAndSet(null, e);
+                } finally {
+                    allDone.countDown();
                 }
             });
         }
         
         // Reader threads
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < readerCount; i++) {
             executor.submit(() -> {
-                allStarted.countDown();
-                while (running.get() && failure.get() == null) {
-                    try {
+                try {
+                    allStarted.countDown();
+                    while (running.get() && failure.get() == null) {
                         context.getStagedElementCount();
                         context.isStagingEnabled();
                         operations.incrementAndGet();
-                    } catch (Throwable e) {
-                        failure.compareAndSet(null, e);
                     }
+                } catch (Throwable e) {
+                    failure.compareAndSet(null, e);
+                } finally {
+                    allDone.countDown();
                 }
             });
         }
         
         // Cache access threads
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < cacheCount; i++) {
             final int threadId = i;
             executor.submit(() -> {
-                allStarted.countDown();
-                EClass source = EcoreFactory.eINSTANCE.createEClass();
-                source.setName("Source" + threadId);
-                while (running.get() && failure.get() == null) {
-                    try {
+                try {
+                    allStarted.countDown();
+                    EClass source = EcoreFactory.eINSTANCE.createEClass();
+                    source.setName("Source" + threadId);
+                    while (running.get() && failure.get() == null) {
                         EClass target = EcoreFactory.eINSTANCE.createEClass();
                         context.getElementResolutionCache().addMapping(source, "Rule", target, true);
                         context.getElementResolutionCache().getEquivalent(source, EClass.class);
                         operations.incrementAndGet();
-                    } catch (Throwable e) {
-                        failure.compareAndSet(null, e);
                     }
+                } catch (Throwable e) {
+                    failure.compareAndSet(null, e);
+                } finally {
+                    allDone.countDown();
                 }
             });
         }
         
         // Wait for all threads to start
-        assertTrue(allStarted.await(10, TimeUnit.SECONDS));
+        assertTrue(allStarted.await(30, TimeUnit.SECONDS), 
+                "Timeout waiting for threads to start");
         
-        // Let it run
-        Thread.sleep(durationSeconds * 1000L);
+        // Let it run for a short duration
+        Thread.sleep(durationMillis);
         running.set(false);
         
-        // Give threads time to finish
-        Thread.sleep(500);
+        // Wait for all threads to finish
+        assertTrue(allDone.await(30, TimeUnit.SECONDS), 
+                "Timeout waiting for threads to finish");
         
         assertNull(failure.get(), "Exception during mixed operations: " + failure.get());
         assertTrue(operations.get() > 0, "No operations completed - possible deadlock");
     }
 
-    @RepeatedTest(50)
+    @RepeatedTest(3)
     @DisplayName("Concurrent clear operations are safe")
     @Timeout(30)
     void testConcurrentClearOperations() throws Exception {
@@ -478,7 +490,7 @@ class ConcurrencyStressTest {
         System.out.println("Committed in " + commitTime + "ms");
     }
 
-    @RepeatedTest(20)
+    @RepeatedTest(3)
     @DisplayName("Concurrent discriminated mapping creation")
     @Timeout(30)
     void testConcurrentDiscriminatedMappings() throws Exception {

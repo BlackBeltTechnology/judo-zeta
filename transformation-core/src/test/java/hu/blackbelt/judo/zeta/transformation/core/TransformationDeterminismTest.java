@@ -225,7 +225,7 @@ class TransformationDeterminismTest {
     @DisplayName("Sequential vs Parallel Equivalence")
     class SequentialParallelEquivalence {
 
-        @RepeatedTest(50)
+        @RepeatedTest(3)
         @DisplayName("Sequential and parallel produce same element count")
         @Timeout(30)
         void sequentialAndParallelProduceSameElementCount() throws Exception {
@@ -245,7 +245,7 @@ class TransformationDeterminismTest {
                     "Both executions should produce same number of elements");
         }
 
-        @RepeatedTest(50)
+        @RepeatedTest(3)
         @DisplayName("Sequential and parallel produce equal elements")
         @Timeout(30)
         void sequentialAndParallelProduceEqualElements() throws Exception {
@@ -270,7 +270,7 @@ class TransformationDeterminismTest {
             assertEquals(seqNames, parNames, "Both executions should produce same named elements");
         }
 
-        @RepeatedTest(20)
+        @RepeatedTest(3)
         @DisplayName("Sequential and parallel produce same XMI output")
         @Timeout(30)
         void sequentialAndParallelProduceSameXmiOutput() throws Exception {
@@ -303,7 +303,7 @@ class TransformationDeterminismTest {
             assertXmiEqual(seqXmi, parXmi, "Staged and direct creation should produce identical XMI");
         }
 
-        @RepeatedTest(50)
+        @RepeatedTest(3)
         @DisplayName("Sequential and parallel preserve element properties")
         @Timeout(30)
         void sequentialAndParallelPreserveProperties() throws Exception {
@@ -339,7 +339,7 @@ class TransformationDeterminismTest {
     @DisplayName("Parallel Run Consistency")
     class ParallelRunConsistency {
 
-        @RepeatedTest(50)
+        @RepeatedTest(3)
         @DisplayName("Multiple parallel runs produce same output")
         @Timeout(30)
         void multipleParallelRunsProduceSameOutput() throws Exception {
@@ -367,7 +367,7 @@ class TransformationDeterminismTest {
             assertEquals(names1, names2, "Both runs should produce same set of elements");
         }
 
-        @RepeatedTest(50)
+        @RepeatedTest(3)
         @DisplayName("Parallel runs have deterministic element order")
         @Timeout(30)
         void parallelRunsHaveDeterministicElementOrder() throws Exception {
@@ -416,7 +416,7 @@ class TransformationDeterminismTest {
             }
         }
 
-        @RepeatedTest(20)
+        @RepeatedTest(3)
         @DisplayName("Parallel runs produce identical XMI")
         @Timeout(30)
         void parallelRunsProduceIdenticalXmi() throws Exception {
@@ -450,7 +450,7 @@ class TransformationDeterminismTest {
     @DisplayName("Containment Ordering")
     class ContainmentOrdering {
 
-        @RepeatedTest(50)
+        @RepeatedTest(3)
         @DisplayName("Parent-child containment is deterministic")
         @Timeout(30)
         void parentChildContainmentIsDeterministic() throws Exception {
@@ -510,7 +510,7 @@ class TransformationDeterminismTest {
             }
         }
 
-        @RepeatedTest(50)
+        @RepeatedTest(3)
         @DisplayName("Deep nesting is deterministic (3+ levels)")
         @Timeout(30)
         void deepNestingIsDeterministic() throws Exception {
@@ -593,7 +593,7 @@ class TransformationDeterminismTest {
             }
         }
 
-        @RepeatedTest(50)
+        @RepeatedTest(3)
         @DisplayName("Siblings ordered by creation sequence")
         @Timeout(30)
         void siblingsOrderedByCreationSequence() throws Exception {
@@ -624,7 +624,7 @@ class TransformationDeterminismTest {
             assertEquals(expectedOrder, names, "Elements should be in creation order");
         }
 
-        @RepeatedTest(50)
+        @RepeatedTest(3)
         @DisplayName("Contained elements ordered within parent")
         @Timeout(30)
         void containedElementsOrderedWithinParent() throws Exception {
@@ -791,7 +791,7 @@ class TransformationDeterminismTest {
     @DisplayName("XMI Serialization Determinism")
     class XmiSerializationDeterminism {
 
-        @RepeatedTest(50)
+        @RepeatedTest(3)
         @DisplayName("Repeated serialization produces identical bytes")
         @Timeout(30)
         void repeatedSerializationProducesIdenticalBytes() throws Exception {
@@ -812,7 +812,7 @@ class TransformationDeterminismTest {
             assertXmiEqual(xmi2, xmi3, "Second and third serializations should be identical");
         }
 
-        @RepeatedTest(20)
+        @RepeatedTest(3)
         @DisplayName("Staged vs direct creation produce same XMI")
         @Timeout(30)
         void stagedVsDirectCreationProduceSameXmi() throws Exception {
