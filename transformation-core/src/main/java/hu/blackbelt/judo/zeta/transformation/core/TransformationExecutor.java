@@ -26,6 +26,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 /**
@@ -42,24 +43,109 @@ public class TransformationExecutor {
     private static final Logger log = LoggerFactory.getLogger(TransformationExecutor.class);
 
     /**
-     * Minimum number of elements required for parallel execution to be beneficial.
+     * Default minimum number of elements required for parallel execution.
      */
-    private static final int PARALLEL_THRESHOLD = 5000;
-    private static final int CHUNK_SIZE = 100;
+    public static final int DEFAULT_PARALLEL_THRESHOLD = 1000;
+    private static final int DEFAULT_CHUNK_SIZE = 100;
 
     private final TransformationRegistry registry;
     private final TransformationContext context;
     private final boolean parallel;
+    private final int parallelThreshold;
+    private final int chunkSize;
     private volatile ExecutorService executor;
 
+    /**
+     * Shared exception holder for fail-fast error handling.
+     * Reset for each transform() call.
+     */
+    private final AtomicReference<Throwable> firstError = new AtomicReference<>();
+
+    /**
+     * Create executor with default settings.
+     *
+     * @deprecated Use {@link Builder} instead for better configuration control.
+     */
+    @Deprecated
     public TransformationExecutor(
             TransformationRegistry registry,
             TransformationContext context,
             boolean parallel
     ) {
-        this.registry = registry;
-        this.context = context;
+        this.registry = Objects.requireNonNull(registry, "registry is required");
+        this.context = Objects.requireNonNull(context, "context is required");
         this.parallel = parallel;
+        this.parallelThreshold = DEFAULT_PARALLEL_THRESHOLD;
+        this.chunkSize = DEFAULT_CHUNK_SIZE;
+    }
+
+    private TransformationExecutor(Builder builder) {
+        this.registry = Objects.requireNonNull(builder.registry, "registry is required");
+        this.context = Objects.requireNonNull(builder.context, "context is required");
+        this.parallel = builder.parallel;
+        this.parallelThreshold = builder.parallelThreshold;
+        this.chunkSize = builder.chunkSize;
+    }
+
+    /**
+     * Create a new builder for TransformationExecutor.
+     *
+     * @return a new builder instance
+     */
+    public static Builder builder() {
+        return new Builder();
+    }
+
+    /**
+     * Builder for TransformationExecutor.
+     */
+    public static class Builder {
+        private TransformationRegistry registry;
+        private TransformationContext context;
+        private boolean parallel = true;
+        private int parallelThreshold = DEFAULT_PARALLEL_THRESHOLD;
+        private int chunkSize = DEFAULT_CHUNK_SIZE;
+
+        public Builder registry(TransformationRegistry registry) {
+            this.registry = registry;
+            return this;
+        }
+
+        public Builder context(TransformationContext context) {
+            this.context = context;
+            return this;
+        }
+
+        public Builder parallel(boolean parallel) {
+            this.parallel = parallel;
+            return this;
+        }
+
+        public Builder parallelThreshold(int threshold) {
+            this.parallelThreshold = threshold;
+            return this;
+        }
+
+        public Builder chunkSize(int size) {
+            this.chunkSize = size;
+            return this;
+        }
+
+        public TransformationExecutor build() {
+            return new TransformationExecutor(this);
+        }
+    }
+
+    /**
+     * Reset executor state for reuse.
+     * Called at the start of each transform() invocation.
+     */
+    private void reset() {
+        firstError.set(null);
+        context.clearStagedElements();
+        context.clearElementOrder();
+        context.clearPendingXmiIds();
+        context.clearExecutingLazyRules();
     }
 
     /**
@@ -79,10 +165,16 @@ public class TransformationExecutor {
     /**
      * Transform all source elements.
      *
+     * <p>Executor is reusable - state is reset at the start of each call.</p>
+     *
      * @param sourceElements elements to transform
      * @return the transformation result
+     * @throws TransformationException if transformation fails (fail-fast behavior)
      */
     public TransformationResult transform(Collection<? extends EObject> sourceElements) {
+        // Reset state for reuse
+        reset();
+
         long startTime = System.currentTimeMillis();
 
         // Invoke pre-transformation hooks
@@ -90,21 +182,33 @@ public class TransformationExecutor {
 
         try {
             // Use parallel only if requested AND element count exceeds threshold
-            boolean useParallel = parallel && sourceElements.size() >= PARALLEL_THRESHOLD;
+            boolean useParallel = parallel && sourceElements.size() >= parallelThreshold;
 
             if (useParallel) {
-                transformParallel(sourceElements);
+                transformWithStaging(sourceElements);
             } else {
                 transformSequential(sourceElements);
             }
 
+            // Check for errors (fail-fast)
+            Throwable error = firstError.get();
+            if (error != null) {
+                if (error instanceof TransformationException) {
+                    throw (TransformationException) error;
+                }
+                throw new TransformationException("Transformation failed", error);
+            }
+
             long duration = System.currentTimeMillis() - startTime;
-            log.info("Transformation completed in {}ms, processed {} elements",
-                    duration, sourceElements.size());
+            log.info("Transformation completed in {}ms, processed {} elements{}",
+                    duration, sourceElements.size(), useParallel ? " (parallel)" : "");
 
             return new TransformationResult(context, duration);
 
         } finally {
+            // Always disable staging and cleanup
+            context.disableStaging();
+
             // Invoke post-transformation hooks
             registry.invokePostTransformationHooks(context);
 
@@ -113,8 +217,35 @@ public class TransformationExecutor {
         }
     }
 
+    /**
+     * Transform with staging enabled for thread-safe parallel execution.
+     */
+    private void transformWithStaging(Collection<? extends EObject> sourceElements) {
+        try {
+            // Phase 1: Enable staging and transform in parallel
+            context.enableStaging();
+            transformParallel(sourceElements);
+
+            // Check for errors before commit
+            if (firstError.get() != null) {
+                return;
+            }
+
+            // Phase 2: Commit staged elements to Resource (single-threaded)
+            context.commitStagedElements();
+
+        } finally {
+            context.disableStaging();
+            context.clearStagedElements();
+        }
+    }
+
     private void transformSequential(Collection<? extends EObject> sourceElements) {
         for (EObject source : sourceElements) {
+            // Check for fail-fast
+            if (firstError.get() != null) {
+                return;
+            }
             try {
                 context.setCurrentSource(source);
                 executeEagerRulesFor(source);
@@ -128,11 +259,11 @@ public class TransformationExecutor {
         List<EObject> elementList = new ArrayList<>(sourceElements);
         int numProcessors = Runtime.getRuntime().availableProcessors();
 
-        // Calculate chunk size
-        int chunkSize = Math.max(CHUNK_SIZE, (elementList.size() + numProcessors - 1) / numProcessors);
+        // Calculate chunk size (use configured value as minimum)
+        int effectiveChunkSize = Math.max(chunkSize, (elementList.size() + numProcessors - 1) / numProcessors);
 
         // Partition elements
-        List<List<EObject>> chunks = partitionList(elementList, chunkSize);
+        List<List<EObject>> chunks = partitionList(elementList, effectiveChunkSize);
 
         // Process chunks in parallel
         ExecutorService exec = getOrCreateExecutor();
@@ -146,6 +277,10 @@ public class TransformationExecutor {
 
     private void transformChunk(List<EObject> chunk) {
         for (EObject source : chunk) {
+            // Check for fail-fast - stop if another thread encountered an error
+            if (firstError.get() != null) {
+                return;
+            }
             try {
                 context.setCurrentSource(source);
                 executeEagerRulesFor(source);
@@ -159,6 +294,11 @@ public class TransformationExecutor {
         Collection<TransformRuleDescriptor> rules = registry.getRulesForSource(source.getClass());
 
         for (TransformRuleDescriptor rule : rules) {
+            // Check for fail-fast
+            if (firstError.get() != null) {
+                return;
+            }
+
             // Skip lazy rules - they execute on-demand via equivalent()
             if (rule.isLazy()) continue;
 
@@ -185,6 +325,12 @@ public class TransformationExecutor {
             } catch (Exception e) {
                 log.error("Error executing rule '{}' on {}: {}",
                         rule.getName(), source, e.getMessage(), e);
+                // Set first error for fail-fast (only first error is captured)
+                TransformationException transformException = new TransformationException(
+                        "Error executing rule '" + rule.getName() + "': " + e.getMessage(),
+                        e, source, rule.getName());
+                firstError.compareAndSet(null, transformException);
+                return; // Stop processing this element
             }
         }
     }

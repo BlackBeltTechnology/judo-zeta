@@ -52,6 +52,8 @@ List<Table> allTables = ctx.equivalents(entity, Table.class);
 
 ### equivalentDiscriminated()
 
+> **Zeta-specific**: This method is a Zeta extension, not part of the original ETL specification. It provides a workaround for creating multiple target elements from a single source element.
+
 Returns a discriminated target for multiple outputs from same source.
 
 ```java
