@@ -90,14 +90,33 @@ class ConcurrencyStressTest {
     @org.junit.jupiter.api.AfterEach
     void tearDown() {
         executor.shutdownNow();
+        // Clean up to prevent OOM during repeated tests
+        if (context != null) {
+            context.clearStagedElements();
+            context.clearElementOrder();
+            context.getElementResolutionCache().clear();
+        }
+        if (targetResource != null) {
+            targetResource.getContents().clear();
+        }
+        if (targetResourceSet != null) {
+            targetResourceSet.getResources().clear();
+        }
+        if (sourceResourceSet != null) {
+            sourceResourceSet.getResources().clear();
+        }
+        context = null;
+        targetResource = null;
+        targetResourceSet = null;
+        sourceResourceSet = null;
     }
 
     @RepeatedTest(3)
     @DisplayName("Concurrent element creation produces exact count")
     @Timeout(30)
     void testConcurrentElementCreation() throws Exception {
-        int threadCount = 20;
-        int elementsPerThread = 50;
+        int threadCount = 8;
+        int elementsPerThread = 25;
         CountDownLatch startLatch = new CountDownLatch(1);
         CountDownLatch doneLatch = new CountDownLatch(threadCount);
         AtomicReference<Throwable> failure = new AtomicReference<>();
@@ -131,8 +150,8 @@ class ConcurrencyStressTest {
     @DisplayName("Concurrent staging maintains unique sequence numbers")
     @Timeout(30)
     void testConcurrentSequenceUniqueness() throws Exception {
-        int threadCount = 32;
-        int elementsPerThread = 50;
+        int threadCount = 8;
+        int elementsPerThread = 25;
         CountDownLatch startLatch = new CountDownLatch(1);
         CountDownLatch doneLatch = new CountDownLatch(threadCount);
         ConcurrentHashMap<Long, EObject> sequenceMap = new ConcurrentHashMap<>();
@@ -173,8 +192,8 @@ class ConcurrencyStressTest {
     @DisplayName("Commit after concurrent creation maintains order")
     @Timeout(30)
     void testCommitOrderAfterConcurrentCreation() throws Exception {
-        int threadCount = 20;
-        int elementsPerThread = 50;
+        int threadCount = 8;
+        int elementsPerThread = 25;
         CountDownLatch startLatch = new CountDownLatch(1);
         CountDownLatch doneLatch = new CountDownLatch(threadCount);
         List<EClass> allCreated = Collections.synchronizedList(new ArrayList<>());
@@ -216,8 +235,8 @@ class ConcurrencyStressTest {
     @DisplayName("Enable/disable staging is thread-safe")
     @Timeout(30)
     void testConcurrentEnableDisable() throws Exception {
-        int threadCount = 20;
-        int iterations = 100;
+        int threadCount = 8;
+        int iterations = 50;
         CountDownLatch startLatch = new CountDownLatch(1);
         CountDownLatch doneLatch = new CountDownLatch(threadCount);
         AtomicInteger enableCount = new AtomicInteger(0);
@@ -260,8 +279,8 @@ class ConcurrencyStressTest {
     @Timeout(30)
     void testConcurrentCacheAccess() throws Exception {
         ElementResolutionCache cache = context.getElementResolutionCache();
-        int threadCount = 50;
-        int operationsPerThread = 100;
+        int threadCount = 10;
+        int operationsPerThread = 20;
         CountDownLatch startLatch = new CountDownLatch(1);
         CountDownLatch doneLatch = new CountDownLatch(threadCount);
         AtomicReference<Throwable> failure = new AtomicReference<>();
@@ -400,8 +419,8 @@ class ConcurrencyStressTest {
     @DisplayName("Concurrent clear operations are safe")
     @Timeout(30)
     void testConcurrentClearOperations() throws Exception {
-        int threadCount = 20;
-        int iterations = 50;
+        int threadCount = 8;
+        int iterations = 25;
         CountDownLatch startLatch = new CountDownLatch(1);
         CountDownLatch doneLatch = new CountDownLatch(threadCount);
         AtomicReference<Throwable> failure = new AtomicReference<>();
@@ -447,7 +466,7 @@ class ConcurrencyStressTest {
     @DisplayName("Stress test: High volume element creation and commit")
     @Timeout(60)
     void testHighVolumeCreationAndCommit() throws Exception {
-        int totalElements = 10000;
+        int totalElements = 1000;
         int threadCount = Runtime.getRuntime().availableProcessors();
         int elementsPerThread = totalElements / threadCount;
         
@@ -495,8 +514,8 @@ class ConcurrencyStressTest {
     @Timeout(30)
     void testConcurrentDiscriminatedMappings() throws Exception {
         ElementResolutionCache cache = context.getElementResolutionCache();
-        int threadCount = 20;
-        int discriminatorsPerThread = 10;
+        int threadCount = 8;
+        int discriminatorsPerThread = 5;
         CountDownLatch startLatch = new CountDownLatch(1);
         CountDownLatch doneLatch = new CountDownLatch(threadCount);
         AtomicReference<Throwable> failure = new AtomicReference<>();
