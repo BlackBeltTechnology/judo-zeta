@@ -6,6 +6,8 @@ Annotation-based model transformation framework for EMF metamodels. This module 
 
 - **Annotation-based Rules**: Define transformation rules using Java annotations
 - **Type-safe Transformations**: Compile-time type checking for source and target types
+- **Resource Aliases**: Work with multiple EMF ResourceSets via `@Transform` and `@To` annotations
+- **Multi-Source Rules**: Cartesian product execution for rules with multiple source types
 - **Lazy Evaluation**: Rules can be marked for on-demand execution via `@Lazy`
 - **Rule Inheritance**: Support for abstract rules and inheritance via `@Extends`
 - **Greedy Type Matching**: Match source types and all subtypes with `@Greedy`
@@ -200,6 +202,68 @@ private boolean isAbstract(EObject element, TransformationContext ctx) {
 }
 ```
 
+### Resource Aliases and Multi-Model Transformations
+
+The framework supports working with multiple EMF ResourceSets through resource aliases, similar to ETL's model binding. This enables complex transformation scenarios involving multiple input models.
+
+#### Registering Resources
+
+```java
+TransformationContext ctx = new TransformationContext(
+    modelProvider, sourceResourceSet, targetResourceSet, extensionRegistry);
+
+// Register additional resources with aliases
+ctx.registerResource("asm", asmResourceSet);
+ctx.registerResource("mapping", mappingResourceSet);
+ctx.registerResource("rdbms", rdbmsResourceSet);
+
+// Access registered resources
+ResourceSet mapping = ctx.getResource("mapping");
+```
+
+#### Using @Transform and @To Annotations
+
+```java
+@TransformRule(name = "Entity2Table")
+@Transform(alias = "asm", type = EntityType.class)
+@To(alias = "rdbms", type = Table.class)
+public TransformFunction<EntityType, Table> entity2Table() {
+    return (entity, ctx) -> {
+        Table table = ctx.create(Table.class);
+        table.setName(entity.getName());
+        return table;
+    };
+}
+```
+
+#### Multi-Source Rules (Cartesian Product)
+
+When specifying multiple `@Transform` annotations with different aliases, the executor generates a Cartesian product of all source elements:
+
+```java
+@TransformRule(name = "EntityMappingToTable")
+@Transform(alias = "asm", type = EntityType.class)
+@Transform(alias = "mapping", type = TypeMapping.class)
+@To(alias = "rdbms", type = Table.class)
+public MultiSourceTransformFunction<Table> entityMappingToTable() {
+    return (sources, ctx) -> {
+        EntityType entity = (EntityType) sources[0];
+        TypeMapping mapping = (TypeMapping) sources[1];
+        
+        // Skip non-matching combinations
+        if (!mapping.getSourceTypeName().equals(entity.getName())) {
+            return null;
+        }
+        
+        Table table = ctx.create(Table.class);
+        table.setName(mapping.getTargetTableName());
+        return table;
+    };
+}
+```
+
+For detailed documentation on resource aliases and multi-source transformations, see [Resource Aliases User Guide](../docs/transformation/user-guide/resource-aliases.md).
+
 ### Transformation Trace
 
 The framework automatically tracks all source-to-target mappings:
@@ -369,6 +433,9 @@ TransformationResult result2 = executor.transform(sourceElements2);
 | `e.equivalents()` | `ctx.equivalents(e, TargetType.class)` |
 | `pre { ... }` | `@PreExecution` |
 | `post { ... }` | `@PostExecution` |
+| `rule R transform a: ASM!Entity...` (model binding) | `@Transform(alias = "asm", type = Entity.class)` |
+| `rule R ... to t: RDBMS!Table` (model binding) | `@To(alias = "rdbms", type = Table.class)` |
+| Multiple sources (Cartesian product) | Multiple `@Transform` annotations + `MultiSourceTransformFunction` |
 
 ## Dependencies
 

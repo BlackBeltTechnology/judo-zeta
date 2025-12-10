@@ -59,6 +59,12 @@ public class TransformationContext {
     private final Map<String, Object> attributes;
 
     /**
+     * Registry mapping aliases to ResourceSets.
+     * "source" and "target" are registered by default.
+     */
+    private final Map<String, ResourceSet> resourceRegistry = new ConcurrentHashMap<>();
+
+    /**
      * Thread-local current source element for parallel transformation support.
      */
     private final ThreadLocal<EObject> currentSource = new ThreadLocal<>();
@@ -151,6 +157,10 @@ public class TransformationContext {
         this.extensionRegistry = extensionRegistry;
         this.resolutionCache = new ElementResolutionCache();
         this.attributes = new ConcurrentHashMap<>();
+
+        // Register default aliases
+        resourceRegistry.put("source", sourceResourceSet);
+        resourceRegistry.put("target", targetResourceSet);
     }
 
     /**
@@ -406,7 +416,91 @@ public class TransformationContext {
      * @return collection of instances
      */
     public <T extends EObject> Collection<T> getAllSource(Class<T> sourceType) {
-        return modelProvider.getAllContents(sourceResourceSet, sourceType);
+        return all("source", sourceType);
+    }
+
+    // ==================== Resource Alias Support ====================
+
+    /**
+     * Register a ResourceSet with an alias.
+     * This allows accessing multiple models during transformation.
+     *
+     * @param alias the alias name (e.g., "mapping", "rules")
+     * @param resourceSet the ResourceSet to register
+     */
+    public void registerResource(String alias, ResourceSet resourceSet) {
+        if (alias == null) {
+            throw new IllegalArgumentException("Resource alias cannot be null");
+        }
+        if (resourceSet == null) {
+            throw new IllegalArgumentException("ResourceSet cannot be null for alias: " + alias);
+        }
+        resourceRegistry.put(alias, resourceSet);
+    }
+
+    /**
+     * Get a ResourceSet by its alias.
+     *
+     * @param alias the alias name
+     * @return the ResourceSet
+     * @throws IllegalArgumentException if alias is not registered
+     */
+    public ResourceSet getResource(String alias) {
+        ResourceSet rs = resourceRegistry.get(alias);
+        if (rs == null) {
+            throw new IllegalArgumentException(
+                    "Unknown resource alias: '" + alias + "'. " +
+                    "Available aliases: " + resourceRegistry.keySet()
+            );
+        }
+        return rs;
+    }
+
+    /**
+     * Get all instances of a type from an aliased resource.
+     *
+     * @param alias the resource alias
+     * @param type the element type
+     * @param <T> the element type
+     * @return collection of instances
+     */
+    public <T extends EObject> Collection<T> all(String alias, Class<T> type) {
+        return modelProvider.getAllContents(getResource(alias), type);
+    }
+
+    /**
+     * Create a new element without adding it to any resource.
+     * This matches ETL behavior where created elements must be explicitly
+     * added to containment references.
+     *
+     * @param type the element type to create
+     * @param <T> the element type
+     * @return the new element (not contained anywhere)
+     */
+    @SuppressWarnings("unchecked")
+    public <T extends EObject> T create(Class<T> type) {
+        if (targetPackage == null) {
+            throw new IllegalStateException("Target package not set. Call setTargetPackage() first.");
+        }
+
+        String typeName = type.getSimpleName();
+        EClass eClass = (EClass) targetPackage.getEClassifier(typeName);
+
+        if (eClass == null) {
+            throw new IllegalArgumentException("EClass not found in target package: " + typeName);
+        }
+
+        EObject instance = targetPackage.getEFactoryInstance().create(eClass);
+
+        // Track for ordering but do NOT add to any resource
+        if (stagingEnabled.get()) {
+            long sequence = creationSequence.getAndIncrement();
+            elementOrder.put(instance, sequence);
+            // Stage as non-root element (won't be added to Resource.contents during commit)
+            stagedElements.offer(new StagedElement(instance, false, sequence));
+        }
+
+        return (T) instance;
     }
 
     /**

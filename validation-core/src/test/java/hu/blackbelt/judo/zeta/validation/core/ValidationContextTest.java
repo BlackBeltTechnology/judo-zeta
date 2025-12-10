@@ -442,4 +442,131 @@ class ValidationContextTest extends AbstractValidationTest {
             assertSame(resourceSet, context.getResourceSet());
         }
     }
+
+    @Nested
+    @DisplayName("Resource Alias Tests")
+    class ResourceAliasTests {
+
+        @Test
+        @DisplayName("Should have default source alias registered")
+        void shouldHaveDefaultSourceAliasRegistered() {
+            // When
+            org.eclipse.emf.ecore.resource.ResourceSet sourceResource = context.getResource("source");
+
+            // Then
+            assertNotNull(sourceResource, "Default 'source' alias should be registered");
+            assertSame(resourceSet, sourceResource, "Source alias should point to the main resource set");
+        }
+
+        @Test
+        @DisplayName("Should register and retrieve custom alias")
+        void shouldRegisterAndRetrieveCustomAlias() {
+            // Given
+            org.eclipse.emf.ecore.resource.ResourceSet customResourceSet = 
+                new org.eclipse.emf.ecore.resource.impl.ResourceSetImpl();
+
+            // When
+            context.registerResource("mapping", customResourceSet);
+            org.eclipse.emf.ecore.resource.ResourceSet retrieved = context.getResource("mapping");
+
+            // Then
+            assertNotNull(retrieved, "Custom alias should be retrievable");
+            assertSame(customResourceSet, retrieved, "Should return the registered resource set");
+        }
+
+        @Test
+        @DisplayName("Should overwrite existing alias")
+        void shouldOverwriteExistingAlias() {
+            // Given
+            org.eclipse.emf.ecore.resource.ResourceSet newResourceSet = 
+                new org.eclipse.emf.ecore.resource.impl.ResourceSetImpl();
+
+            // When
+            context.registerResource("source", newResourceSet);
+            org.eclipse.emf.ecore.resource.ResourceSet retrieved = context.getResource("source");
+
+            // Then
+            assertSame(newResourceSet, retrieved, "Should overwrite the default source alias");
+        }
+
+        @Test
+        @DisplayName("Should throw exception for unknown alias")
+        void shouldThrowExceptionForUnknownAlias() {
+            // When/Then
+            IllegalArgumentException exception = assertThrows(
+                IllegalArgumentException.class,
+                () -> context.getResource("unknown")
+            );
+            assertTrue(exception.getMessage().contains("unknown"), 
+                "Exception message should mention the unknown alias");
+        }
+
+        @Test
+        @DisplayName("Should get all instances from specific alias")
+        void shouldGetAllInstancesFromSpecificAlias() {
+            // Given
+            EClass class1 = TestModelFactory.createEClass("Class1");
+            EClass class2 = TestModelFactory.createEClass("Class2");
+            addToModel(class1);
+            addToModel(class2);
+
+            // When
+            Collection<EClass> instances = context.all("source", EClass.class);
+
+            // Then
+            assertEquals(2, instances.size(), "Should find all EClass instances from source");
+            assertTrue(instances.contains(class1));
+            assertTrue(instances.contains(class2));
+        }
+
+        @Test
+        @DisplayName("getAllInstances should delegate to all with source alias")
+        void getAllInstancesShouldDelegateToAllWithSourceAlias() {
+            // Given
+            EClass class1 = TestModelFactory.createEClass("Class1");
+            addToModel(class1);
+
+            // When
+            Collection<EClass> fromGetAllInstances = context.getAllInstances(EClass.class);
+            Collection<EClass> fromAll = context.all("source", EClass.class);
+
+            // Then
+            assertEquals(fromGetAllInstances.size(), fromAll.size(), 
+                "Both methods should return the same number of elements");
+            assertTrue(fromGetAllInstances.containsAll(fromAll), 
+                "Both methods should return the same elements");
+        }
+
+        @Test
+        @DisplayName("Should get instances from multiple aliases independently")
+        void shouldGetInstancesFromMultipleAliasesIndependently() {
+            // Given
+            EClass sourceClass = TestModelFactory.createEClass("SourceClass");
+            addToModel(sourceClass);
+
+            // Create a separate resource set for mapping
+            org.eclipse.emf.ecore.resource.ResourceSet mappingResourceSet = 
+                new org.eclipse.emf.ecore.resource.impl.ResourceSetImpl();
+            mappingResourceSet.getResourceFactoryRegistry().getProtocolToFactoryMap().put(
+                "test",
+                new org.eclipse.emf.ecore.xmi.impl.XMIResourceFactoryImpl()
+            );
+            org.eclipse.emf.ecore.resource.Resource mappingResource = 
+                mappingResourceSet.createResource(org.eclipse.emf.common.util.URI.createURI("test://mapping-model"));
+            EClass mappingClass = TestModelFactory.createEClass("MappingClass");
+            mappingResource.getContents().add(mappingClass);
+
+            context.registerResource("mapping", mappingResourceSet);
+
+            // When
+            Collection<EClass> sourceInstances = context.all("source", EClass.class);
+            Collection<EClass> mappingInstances = context.all("mapping", EClass.class);
+
+            // Then
+            assertEquals(1, sourceInstances.size(), "Source should have 1 EClass");
+            assertEquals(1, mappingInstances.size(), "Mapping should have 1 EClass");
+            assertTrue(sourceInstances.contains(sourceClass), "Source should contain sourceClass");
+            assertTrue(mappingInstances.contains(mappingClass), "Mapping should contain mappingClass");
+        }
+    }
 }

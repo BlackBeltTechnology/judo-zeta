@@ -87,7 +87,8 @@ public class ValidationRegistry {
                         constraint.name(),
                         constraint.message(),
                         Severity.ERROR,
-                        contextType
+                        contextType,
+                        constraint.resourceAlias()
                     );
                 } else if (critique != null) {
                     registerRule(
@@ -96,7 +97,8 @@ public class ValidationRegistry {
                         critique.name(),
                         critique.message(),
                         Severity.WARNING,
-                        contextType
+                        contextType,
+                        critique.resourceAlias()
                     );
                 }
 
@@ -137,7 +139,8 @@ public class ValidationRegistry {
         String name,
         String message,
         Severity severity,
-        Class<? extends EObject> contextType
+        Class<? extends EObject> contextType,
+        String resourceAlias
     ) {
         // Find guard method if specified
         hu.blackbelt.judo.zeta.annotation.Guard guardAnnotation =
@@ -181,7 +184,8 @@ public class ValidationRegistry {
             severity,
             contextType,
             guardMethod,
-            dependencies
+            dependencies,
+            resourceAlias
         );
 
         validators
