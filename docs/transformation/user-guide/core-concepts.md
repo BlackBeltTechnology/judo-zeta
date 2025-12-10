@@ -113,6 +113,7 @@ public interface TransformationContext {
     <T extends EObject> List<T> equivalents(EObject source, Class<T> targetClass);
     
     // Get discriminated equivalent (multiple outputs from same source)
+    // NOTE: This is a Zeta-specific workaround, not part of ETL specification
     <T extends EObject> T equivalentDiscriminated(
         EObject source, Class<T> targetClass, String ruleName, String discriminator
     );

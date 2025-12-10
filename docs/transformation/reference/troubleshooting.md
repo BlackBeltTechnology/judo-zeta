@@ -181,4 +181,61 @@ result.getTrace().saveToJson(new File("debug-trace.json"));
 
 ---
 
+## Known Limitations
+
+The Zeta Transformation Framework has the following known limitations compared to Epsilon ETL:
+
+### 1. EMF Proxy Objects Not Supported
+
+**Description**: EMF proxy objects (unresolved cross-references) are not automatically resolved during element iteration. If your model contains unresolved proxies, they may not be correctly typed or may be skipped during transformation.
+
+**Impact**: 
+- `all(SomeType.class)` may not find elements that are still proxies
+- `instanceof` checks may fail for unresolved proxy objects
+- Type casting may throw unexpected `ClassCastException`
+
+**Workaround**: Ensure all proxies are resolved before transformation:
+```java
+// Resolve all proxies in the resource set before transformation
+EcoreUtil.resolveAll(resourceSet);
+```
+
+### 2. Cross-Resource References Not Supported
+
+**Description**: The transformation framework assumes all source elements are in a single EMF Resource or properly connected ResourceSet. Elements spread across multiple disconnected resources may not be discovered by `all()` iteration.
+
+**Impact**:
+- Elements in external resources may be missed during iteration
+- Cross-resource references may not resolve correctly
+- `equivalent()` lookups may fail for elements in different resources
+
+**Workaround**: Load all related resources into a single ResourceSet before transformation:
+```java
+// Ensure all resources are in the same ResourceSet
+ResourceSet resourceSet = new ResourceSetImpl();
+resourceSet.getResource(uri1, true);
+resourceSet.getResource(uri2, true);
+// All resources now share the same ResourceSet
+```
+
+### 3. Dynamic EMF Not Fully Supported
+
+**Description**: The framework is optimized for generated EMF models (with Java interfaces). Dynamic EMF (models created at runtime without generated code) may have limited support.
+
+**Impact**:
+- Java `instanceof` checks won't work with dynamic EObjects
+- Type-safe transformation rules require generated interfaces
+
+**Workaround**: Use EClass-based type checking for dynamic models:
+```java
+// Instead of: element instanceof MyType
+// Use: myTypeEClass.isInstance(element)
+EClass myTypeEClass = (EClass) ePackage.getEClassifier("MyType");
+if (myTypeEClass.isInstance(element)) {
+    // Handle element
+}
+```
+
+---
+
 **Previous**: [TransformationTrace](transformation-trace.md)

@@ -104,26 +104,79 @@ public class TransformationRegistry {
         String name = ruleAnnotation.name();
         String description = ruleAnnotation.description();
 
-        // Determine source and target types
+        // Extract @Transform annotations (new API)
+        List<TransformDefinition> transforms = new ArrayList<>();
+        Transform[] transformAnnotations = ruleMethod.getAnnotationsByType(Transform.class);
+        for (Transform t : transformAnnotations) {
+            transforms.add(new TransformDefinition(t.alias(), t.type()));
+        }
+
+        // Extract @To annotations (new API)
+        List<ToDefinition> tos = new ArrayList<>();
+        To[] toAnnotations = ruleMethod.getAnnotationsByType(To.class);
+        for (To t : toAnnotations) {
+            tos.add(new ToDefinition(t.alias(), t.type()));
+        }
+
+        // Determine source and target types (backward compatibility)
         Class<? extends EObject>[] sourceTypes = ruleAnnotation.sourceTypes();
         Class<? extends EObject>[] targetTypes = ruleAnnotation.targetTypes();
 
-        Class<? extends EObject> sourceType = sourceTypes.length > 0 ? sourceTypes[0] : defaultSourceType;
-        Class<? extends EObject> targetType = targetTypes.length > 0 ? targetTypes[0] : defaultTargetType;
+        Class<? extends EObject> sourceType;
+        Class<? extends EObject> targetType;
+
+        // Priority: @Transform annotations > sourceTypes attribute > default from @TransformationContext
+        if (!transforms.isEmpty()) {
+            sourceType = transforms.get(0).getType();
+        } else if (sourceTypes.length > 0) {
+            sourceType = sourceTypes[0];
+            // Convert sourceTypes to TransformDefinitions with default alias
+            for (Class<? extends EObject> st : sourceTypes) {
+                transforms.add(new TransformDefinition("source", st));
+            }
+        } else {
+            sourceType = defaultSourceType;
+            transforms.add(new TransformDefinition("source", defaultSourceType));
+        }
+
+        // Priority: @To annotations > targetTypes attribute > default from @TransformationContext
+        if (!tos.isEmpty()) {
+            targetType = tos.get(0).getType();
+        } else if (targetTypes.length > 0) {
+            targetType = targetTypes[0];
+            // Convert targetTypes to ToDefinitions with default alias
+            for (Class<? extends EObject> tt : targetTypes) {
+                tos.add(new ToDefinition("target", tt));
+            }
+        } else {
+            targetType = defaultTargetType;
+            tos.add(new ToDefinition("target", defaultTargetType));
+        }
 
         // Find guard method if specified
         Guard guardAnnotation = ruleMethod.getAnnotation(Guard.class);
         Method guardMethod = null;
         if (guardAnnotation != null) {
+            // Try multi-source guard signature first (EObject[], TransformationContext)
             try {
                 guardMethod = instance.getClass().getDeclaredMethod(
                         guardAnnotation.method(),
-                        EObject.class,
+                        EObject[].class,
                         TransformationContext.class
                 );
             } catch (NoSuchMethodException e) {
-                throw new RuntimeException(
-                        "Guard method not found: " + guardAnnotation.method() + " for rule: " + name, e);
+                // Fall back to single-source guard signature (EObject, TransformationContext)
+                try {
+                    guardMethod = instance.getClass().getDeclaredMethod(
+                            guardAnnotation.method(),
+                            EObject.class,
+                            TransformationContext.class
+                    );
+                } catch (NoSuchMethodException e2) {
+                    throw new RuntimeException(
+                            "Guard method not found: " + guardAnnotation.method() + " for rule: " + name + 
+                            ". Expected signature: (EObject, TransformationContext) or (EObject[], TransformationContext)", e2);
+                }
             }
         }
 
@@ -151,13 +204,17 @@ public class TransformationRegistry {
                 isAbstract,
                 isPrimary,
                 isGreedy,
-                extendsRules
+                extendsRules,
+                transforms,
+                tos
         );
 
         rulesBySourceType.computeIfAbsent(sourceType, k -> new ArrayList<>()).add(descriptor);
         rulesByName.put(name, descriptor);
 
-        log.debug("Registered rule: {} ({} -> {})", name, sourceType.getSimpleName(), targetType.getSimpleName());
+        log.debug("Registered rule: {} ({} -> {}) with {} transforms, {} tos", 
+                name, sourceType.getSimpleName(), targetType.getSimpleName(), 
+                transforms.size(), tos.size());
     }
 
     /**
@@ -172,12 +229,17 @@ public class TransformationRegistry {
         // Get rules for this exact type
         result.addAll(rulesBySourceType.getOrDefault(sourceType, Collections.emptyList()));
 
-        // Get greedy rules from supertypes
+        // Get rules from supertypes/interfaces that apply to this type
+        // For greedy rules: always include if supertype matches
+        // For non-greedy rules: include if the rule's sourceType is assignable from the element type
         for (Map.Entry<Class<? extends EObject>, List<TransformRuleDescriptor>> entry : rulesBySourceType.entrySet()) {
             Class<? extends EObject> ruleSourceType = entry.getKey();
             if (ruleSourceType.isAssignableFrom(sourceType) && !ruleSourceType.equals(sourceType)) {
                 for (TransformRuleDescriptor rule : entry.getValue()) {
-                    if (rule.isGreedy() && !result.contains(rule)) {
+                    // Include all rules whose sourceType matches (via isAssignableFrom)
+                    // This handles cases where rules are defined on interfaces (EClass)
+                    // but elements are implementation classes (EClassImpl)
+                    if (!result.contains(rule)) {
                         result.add(rule);
                     }
                 }
