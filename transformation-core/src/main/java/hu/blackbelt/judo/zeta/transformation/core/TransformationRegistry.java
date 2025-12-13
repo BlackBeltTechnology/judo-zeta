@@ -26,7 +26,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Method;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
@@ -39,11 +45,13 @@ public class TransformationRegistry {
 
     private static final Logger log = LoggerFactory.getLogger(TransformationRegistry.class);
 
-    private final Map<Class<? extends EObject>, List<TransformRuleDescriptor>> rulesBySourceType = new HashMap<>();
-    private final Map<String, TransformRuleDescriptor> rulesByName = new HashMap<>();
+    // Use LinkedHashMap to preserve registration order for deterministic rule execution
+    // This ensures rules execute in the same order as they are defined in the source class
+    private final Map<Class<? extends EObject>, List<TransformRuleDescriptor>> rulesBySourceType = new LinkedHashMap<>();
+    private final Map<String, TransformRuleDescriptor> rulesByName = new LinkedHashMap<>();
     private final List<Method> preTransformationHooks = new ArrayList<>();
     private final List<Method> postTransformationHooks = new ArrayList<>();
-    private final Map<Method, Object> hookInstances = new HashMap<>();
+    private final Map<Method, Object> hookInstances = new LinkedHashMap<>();
 
     /**
      * Register a transformation context class.

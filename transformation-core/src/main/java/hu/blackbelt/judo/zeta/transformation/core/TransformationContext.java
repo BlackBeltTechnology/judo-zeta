@@ -101,6 +101,12 @@ public class TransformationContext {
      */
     private final ConcurrentHashMap<LazyRuleKey, EObject> executingLazyRules = new ConcurrentHashMap<>();
 
+    /**
+     * ThreadLocal set to track lazy rule keys currently being executed in this thread.
+     * Used to detect and handle recursive equivalent() calls.
+     */
+    private final ThreadLocal<Set<LazyRuleKey>> inProgressRules = ThreadLocal.withInitial(HashSet::new);
+
     private TransformationRegistry transformationRegistry;
     private EPackage targetPackage;
 
@@ -267,12 +273,13 @@ public class TransformationContext {
         return (T) instance;
     }
 
+
     /**
      * Get the equivalent target for a source element.
      * If not already transformed, triggers lazy transformation if a matching rule exists.
      *
-     * <p>Thread-safe: Uses computeIfAbsent to prevent duplicate lazy rule execution
-     * when multiple threads call equivalent() for the same source concurrently.</p>
+     * <p>Thread-safe: Uses a combination of ThreadLocal for recursion detection
+     * and ConcurrentHashMap for cross-thread duplicate prevention.</p>
      *
      * @param source the source element
      * @param targetType the expected target type
@@ -293,19 +300,41 @@ public class TransformationContext {
             for (TransformRuleDescriptor rule : rules) {
                 if (rule.appliesTo(source) && targetType.isAssignableFrom(rule.getTargetType())) {
                     if (rule.evaluateGuard(source, this)) {
-                        // Use computeIfAbsent to prevent concurrent duplicate execution
                         LazyRuleKey key = new LazyRuleKey(source, targetType);
-                        EObject target = executingLazyRules.computeIfAbsent(key, k -> {
-                            // Double-check cache inside computeIfAbsent
-                            T existing = resolutionCache.getEquivalent(source, targetType);
-                            if (existing != null) {
-                                return existing;
+                        
+                        // Check if already executed (from cache or concurrent execution)
+                        EObject existing = executingLazyRules.get(key);
+                        if (existing != null) {
+                            return (T) existing;
+                        }
+                        
+                        // Check if this key is currently being executed in this thread (recursion)
+                        Set<LazyRuleKey> inProgress = inProgressRules.get();
+                        if (inProgress.contains(key)) {
+                            // Recursive call detected - return null to break the cycle
+                            // The caller should handle null gracefully
+                            return null;
+                        }
+                        
+                        // Mark as in-progress for this thread
+                        inProgress.add(key);
+                        try {
+                            // Double-check cache after marking in-progress
+                            T cachedAgain = resolutionCache.getEquivalent(source, targetType);
+                            if (cachedAgain != null) {
+                                return cachedAgain;
                             }
+                            
+                            // Execute the rule
                             EObject result = rule.execute(source, this);
-                            resolutionCache.addMapping(source, rule.getName(), result, rule.isPrimary());
-                            return result;
-                        });
-                        return (T) target;
+                            if (result != null) {
+                                resolutionCache.addMapping(source, rule.getName(), result, rule.isPrimary());
+                                executingLazyRules.put(key, result);
+                            }
+                            return (T) result;
+                        } finally {
+                            inProgress.remove(key);
+                        }
                     }
                 }
             }
@@ -313,7 +342,6 @@ public class TransformationContext {
 
         return null;
     }
-
     /**
      * Get all equivalent targets for a source element.
      *
@@ -388,6 +416,11 @@ public class TransformationContext {
     /**
      * Execute a parent rule (for @Extends inheritance).
      *
+     * <p>This method is idempotent - if the parent rule has already been executed
+     * for the given source element, the cached result is returned. This ensures
+     * that when multiple child rules extend the same parent, the parent's
+     * transformation logic only executes once per source element.</p>
+     *
      * @param parentRuleName the parent rule name
      * @param source the source element
      * @param <T> the target type
@@ -404,8 +437,19 @@ public class TransformationContext {
             throw new IllegalArgumentException("Parent rule not found: " + parentRuleName);
         }
 
-        // Execute parent rule directly (allows abstract rules to execute when explicitly called)
-        return (T) parentRule.execute(source, this);
+        // Check cache first to ensure idempotency
+        // This prevents duplicate execution when multiple child rules extend the same parent
+        EObject cached = resolutionCache.getByRule(source, parentRuleName);
+        if (cached != null) {
+            return (T) cached;
+        }
+
+        // Execute parent rule and cache the result
+        EObject result = parentRule.execute(source, this);
+        if (result != null) {
+            resolutionCache.addMapping(source, parentRuleName, result, parentRule.isPrimary());
+        }
+        return (T) result;
     }
 
     /**

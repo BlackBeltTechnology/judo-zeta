@@ -200,15 +200,52 @@ public class TransformRuleDescriptor {
 
     /**
      * Check if this rule applies to the given source element.
+     *
+     * <p>ETL semantics:</p>
+     * <ul>
+     *   <li><b>Non-greedy (default)</b>: Rule matches ONLY elements whose type is exactly
+     *       the declared sourceType. For interfaces, uses isInstance since EMF generates
+     *       implementation classes (e.g., EClassImpl for EClass interface).</li>
+     *   <li><b>Greedy (@Greedy)</b>: Rule matches elements whose type is the declared
+     *       sourceType OR any subtype (kind-of semantics).</li>
+     * </ul>
+     *
+     * @param source the source element to check
+     * @return true if this rule should transform the source element
      */
     public boolean appliesTo(EObject source) {
         if (isGreedy) {
-            // Kind-of semantics: check if source is instance of sourceType or subtype
+            // Greedy: Kind-of semantics - matches sourceType and all subtypes
             return sourceType.isInstance(source);
         } else {
-            // Type-of semantics: exact type match only
-            return sourceType.equals(source.getClass()) || 
-                   sourceType.isInstance(source) && source.getClass().getSuperclass() != null;
+            // Non-greedy: Type-of semantics - matches ONLY the exact declared type
+            // For interfaces (like EClass), we check if source implements the interface
+            // but NOT if source implements a MORE SPECIFIC subinterface
+            if (sourceType.isInterface()) {
+                // Get all interfaces the source's class directly implements
+                // The source must implement sourceType but NOT a more specific subtype
+                Class<?> sourceClass = source.getClass();
+                
+                // Check if source is an instance of sourceType
+                if (!sourceType.isInstance(source)) {
+                    return false;
+                }
+                
+                // For EMF, we need to check the EClass, not the Java class
+                // EMF implementation classes (EClassImpl) implement the interface (EClass)
+                // We should match based on the EMF type, not Java inheritance
+                org.eclipse.emf.ecore.EClass sourceEClass = source.eClass();
+                
+                // Get the expected EClass name from the sourceType interface
+                String expectedTypeName = sourceType.getSimpleName();
+                String actualTypeName = sourceEClass.getName();
+                
+                // Match if the EMF type name matches exactly
+                return expectedTypeName.equals(actualTypeName);
+            } else {
+                // For concrete classes, exact class match
+                return sourceType.equals(source.getClass());
+            }
         }
     }
 

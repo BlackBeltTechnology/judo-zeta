@@ -418,6 +418,91 @@ TransformationResult result2 = executor.transform(sourceElements2);
 | Thread pool | ForkJoinPool (work-stealing) |
 | Expected speedup | 2-4x on 8-core CPU |
 
+## ETL Semantics Compatibility
+
+The Zeta framework faithfully implements Epsilon ETL semantics for the following behaviors:
+
+### Type Matching
+
+**Non-greedy rules (default)**: Match ONLY the exact declared source type.
+
+```java
+// This rule matches ONLY EClass elements, not EDataType 
+// (even though both extend EClassifier)
+@TransformRule(name = "EClassOnly")
+@Transform(type = EClass.class)
+public TransformFunction<EClass, Table> eClassOnly() { ... }
+```
+
+**Greedy rules (@Greedy)**: Match the declared type AND all subtypes (kind-of semantics).
+
+```java
+// This rule matches EClassifier AND all subtypes (EClass, EDataType, etc.)
+@TransformRule(name = "AllClassifiers")
+@Transform(type = EClassifier.class)
+@Greedy
+public TransformFunction<EClassifier, Type> allClassifiers() { ... }
+```
+
+### Rule Execution Order
+
+Rules execute in **deterministic declaration order**:
+- Rules are registered in the order they appear in the transformation class
+- Multiple runs with the same input produce identical output ordering
+- Use `LinkedHashMap` internally to preserve registration order
+
+### Multiple Rules for Same Source
+
+When multiple rules match the same source element (with different target types), **ALL matching rules execute**:
+
+```java
+// Both rules execute for each EClass element
+@TransformRule(name = "Entity2Table")
+@Transform(type = EClass.class)
+public TransformFunction<EClass, Table> entity2Table() { ... }
+
+@TransformRule(name = "Entity2Audit")
+@Transform(type = EClass.class)
+public TransformFunction<EClass, AuditLog> entity2Audit() { ... }
+```
+
+### Parent Rule Idempotency (@Extends)
+
+When multiple child rules extend the same parent, the parent rule executes **only once** per source element:
+
+```java
+@TransformRule(name = "BaseEntity")
+@Abstract
+public TransformFunction<EClass, Table> baseEntity() {
+    return (source, ctx) -> {
+        // This code executes ONCE, even if multiple children call executeParentRule
+        Table table = ctx.createTarget(Table.class);
+        table.setName(source.getName());
+        return table;
+    };
+}
+
+@TransformRule(name = "ChildA")
+@Extends("BaseEntity")
+public TransformFunction<EClass, Table> childA() {
+    return (source, ctx) -> {
+        Table table = ctx.executeParentRule("BaseEntity", source); // First call executes parent
+        table.setSchema("A");
+        return table;
+    };
+}
+
+@TransformRule(name = "ChildB")
+@Extends("BaseEntity")
+public TransformFunction<EClass, Table> childB() {
+    return (source, ctx) -> {
+        Table table = ctx.executeParentRule("BaseEntity", source); // Returns SAME cached instance
+        // table is the SAME object as in ChildA
+        return table;
+    };
+}
+```
+
 ## ETL to Java Migration
 
 | ETL Concept | Java Equivalent |
