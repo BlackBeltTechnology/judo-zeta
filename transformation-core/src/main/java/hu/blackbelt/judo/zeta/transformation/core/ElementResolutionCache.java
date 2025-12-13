@@ -99,6 +99,10 @@ public class ElementResolutionCache {
      * Get the equivalent target for a source element.
      * Returns the primary target if available, otherwise the first target of the type.
      *
+     * <p>This method supports type hierarchy lookups. If an EDataType is cached
+     * and EClassifier is requested, the EDataType will be returned since
+     * EDataType extends EClassifier.</p>
+     *
      * @param source the source element
      * @param targetType the target type class
      * @param <T> the target type
@@ -107,21 +111,37 @@ public class ElementResolutionCache {
     public <T extends EObject> T getEquivalent(EObject source, Class<T> targetType) {
         String typeName = getTypeName(targetType);
 
-        // Check primary cache first
+        // Check primary cache first (exact match)
         Map<String, EObject> primaryMap = primaryCache.get(source);
         if (primaryMap != null) {
             EObject primary = primaryMap.get(typeName);
             if (primary != null) {
                 return targetType.cast(primary);
             }
+            // Fall back to assignable type check in primary cache
+            for (EObject primary2 : primaryMap.values()) {
+                if (targetType.isInstance(primary2)) {
+                    return targetType.cast(primary2);
+                }
+            }
         }
 
-        // Fall back to first from type cache
+        // Check for assignable types in type cache (e.g., EDataType when requesting EClassifier)
+        // This handles cases where EDataType is cached but EClassifier is requested
         Map<String, List<EObject>> typeMap = typeCache.get(source);
         if (typeMap != null) {
-            List<EObject> targets = typeMap.get(typeName);
-            if (targets != null && !targets.isEmpty()) {
-                return targetType.cast(targets.get(0));
+            // First try exact type match
+            List<EObject> exactTargets = typeMap.get(typeName);
+            if (exactTargets != null && !exactTargets.isEmpty()) {
+                return targetType.cast(exactTargets.get(0));
+            }
+            // Fall back to assignable type check
+            for (List<EObject> targets : typeMap.values()) {
+                for (EObject target : targets) {
+                    if (targetType.isInstance(target)) {
+                        return targetType.cast(target);
+                    }
+                }
             }
         }
 
@@ -131,29 +151,34 @@ public class ElementResolutionCache {
     /**
      * Get all equivalent targets for a source element of a given type.
      *
+     * <p>This method supports type hierarchy lookups. If an EDataType is cached
+     * and EClassifier is requested, the EDataType will be returned since
+     * EDataType extends EClassifier.</p>
+     *
      * @param source the source element
      * @param targetType the target type class
      * @param <T> the target type
-     * @return list of equivalent targets
+     * @return list of equivalent targets (includes subtypes)
      */
-    @SuppressWarnings("unchecked")
     public <T extends EObject> List<T> getEquivalents(EObject source, Class<T> targetType) {
-        String typeName = getTypeName(targetType);
         Map<String, List<EObject>> typeMap = typeCache.get(source);
 
         if (typeMap == null) {
             return Collections.emptyList();
         }
 
-        List<EObject> targets = typeMap.get(typeName);
-        if (targets == null) {
-            return Collections.emptyList();
+        List<T> result = new ArrayList<>();
+        
+        // Check all cached targets for type assignability
+        // This handles cases where EDataType is cached but EClassifier is requested
+        for (List<EObject> targets : typeMap.values()) {
+            for (EObject target : targets) {
+                if (targetType.isInstance(target)) {
+                    result.add(targetType.cast(target));
+                }
+            }
         }
-
-        List<T> result = new ArrayList<>(targets.size());
-        for (EObject target : targets) {
-            result.add((T) target);
-        }
+        
         return result;
     }
 

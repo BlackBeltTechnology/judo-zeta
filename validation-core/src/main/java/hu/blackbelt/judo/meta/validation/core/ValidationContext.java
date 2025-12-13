@@ -57,6 +57,12 @@ public class ValidationContext {
     private final Map<String, Object> attributes;
 
     /**
+     * Registry mapping aliases to ResourceSets.
+     * "source" is registered by default.
+     */
+    private final Map<String, ResourceSet> resourceRegistry = new ConcurrentHashMap<>();
+
+    /**
      * Thread-local current element for parallel validation support.
      * Each thread has its own current element, avoiding race conditions.
      */
@@ -73,6 +79,9 @@ public class ValidationContext {
         this.extensionRegistry = extensionRegistry;
         this.satisfiesCache = new ConcurrentHashMap<>();
         this.attributes = new ConcurrentHashMap<>();
+
+        // Register default alias
+        resourceRegistry.put("source", resourceSet);
     }
 
     /**
@@ -241,7 +250,56 @@ public class ValidationContext {
      * @return collection of instances
      */
     public <T extends EObject> Collection<T> getAllInstances(Class<T> eClass) {
-        return modelProvider.getAllContents(resourceSet, eClass);
+        return all("source", eClass);
+    }
+
+    // ==================== Resource Alias Support ====================
+
+    /**
+     * Register a ResourceSet with an alias.
+     * This allows accessing multiple models during validation.
+     *
+     * @param alias the alias name (e.g., "mapping", "rules")
+     * @param resourceSet the ResourceSet to register
+     */
+    public void registerResource(String alias, ResourceSet resourceSet) {
+        if (alias == null) {
+            throw new IllegalArgumentException("Resource alias cannot be null");
+        }
+        if (resourceSet == null) {
+            throw new IllegalArgumentException("ResourceSet cannot be null for alias: " + alias);
+        }
+        resourceRegistry.put(alias, resourceSet);
+    }
+
+    /**
+     * Get a ResourceSet by its alias.
+     *
+     * @param alias the alias name
+     * @return the ResourceSet
+     * @throws IllegalArgumentException if alias is not registered
+     */
+    public ResourceSet getResource(String alias) {
+        ResourceSet rs = resourceRegistry.get(alias);
+        if (rs == null) {
+            throw new IllegalArgumentException(
+                    "Unknown resource alias: '" + alias + "'. " +
+                    "Available aliases: " + resourceRegistry.keySet()
+            );
+        }
+        return rs;
+    }
+
+    /**
+     * Get all instances of a type from an aliased resource.
+     *
+     * @param alias the resource alias
+     * @param type the element type
+     * @param <T> the element type
+     * @return collection of instances
+     */
+    public <T extends EObject> Collection<T> all(String alias, Class<T> type) {
+        return modelProvider.getAllContents(getResource(alias), type);
     }
 
     /**
