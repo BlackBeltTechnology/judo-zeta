@@ -23,6 +23,7 @@ package hu.blackbelt.judo.zeta.transformation.core;
 import hu.blackbelt.judo.zeta.common.ExtensionMethodRegistry;
 import hu.blackbelt.judo.zeta.common.ModelProvider;
 import org.eclipse.emf.ecore.EClass;
+import org.eclipse.emf.ecore.EClassifier;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EPackage;
 import org.eclipse.emf.ecore.EStructuralFeature;
@@ -31,11 +32,15 @@ import org.eclipse.emf.ecore.resource.ResourceSet;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.emf.ecore.xmi.XMIResource;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
 
 /**
  * Runtime context for transformation execution.
@@ -108,7 +113,18 @@ public class TransformationContext {
     private final ThreadLocal<Set<LazyRuleKey>> inProgressRules = ThreadLocal.withInitial(HashSet::new);
 
     private TransformationRegistry transformationRegistry;
-    private EPackage targetPackage;
+
+    /**
+     * List of registered target EPackages for element creation (for dynamic models).
+     * Thread-safe for parallel transformation support.
+     */
+    private final List<EPackage> targetPackages = new CopyOnWriteArrayList<>();
+
+    /**
+     * Cache for auto-discovered EPackages from generated Java classes.
+     * Maps Java class to its discovered EPackage.
+     */
+    private final ConcurrentHashMap<Class<?>, EPackage> discoveredPackageCache = new ConcurrentHashMap<>();
 
     /**
      * Wrapper for staged elements with ordering metadata.
@@ -177,10 +193,232 @@ public class TransformationContext {
     }
 
     /**
-     * Set the target EPackage for creating target elements.
+     * Set the target EPackage for dynamic EMF models.
+     * Clears any previously registered packages.
+     *
+     * <p><b>Not needed for generated metamodels</b> - the framework auto-discovers
+     * EPackages from generated Java classes.</p>
+     *
+     * @param targetPackage the target EPackage (for dynamic EMF)
      */
     public void setTargetPackage(EPackage targetPackage) {
-        this.targetPackage = targetPackage;
+        this.targetPackages.clear();
+        if (targetPackage != null) {
+            this.targetPackages.add(targetPackage);
+        }
+    }
+
+    /**
+     * Register a target EPackage for dynamic EMF models.
+     *
+     * <p><b>Not needed for generated metamodels</b> - the framework auto-discovers
+     * EPackages from generated Java classes.</p>
+     *
+     * @param targetPackage the target EPackage (for dynamic EMF)
+     * @throws IllegalArgumentException if targetPackage is null
+     */
+    public void registerTargetPackage(EPackage targetPackage) {
+        if (targetPackage == null) {
+            throw new IllegalArgumentException("Target package cannot be null");
+        }
+        this.targetPackages.add(targetPackage);
+    }
+
+    /**
+     * Register a target EPackage for dynamic EMF models with sub-package control.
+     *
+     * <p><b>Not needed for generated metamodels</b> - the framework auto-discovers
+     * EPackages from generated Java classes.</p>
+     *
+     * @param targetPackage the target EPackage (for dynamic EMF)
+     * @param includeSubpackages if true, recursively include all sub-packages
+     * @throws IllegalArgumentException if targetPackage is null
+     */
+    public void registerTargetPackage(EPackage targetPackage, boolean includeSubpackages) {
+        if (targetPackage == null) {
+            throw new IllegalArgumentException("Target package cannot be null");
+        }
+        if (includeSubpackages) {
+            addPackageWithSubpackages(targetPackage);
+        } else {
+            this.targetPackages.add(targetPackage);
+        }
+    }
+
+    /**
+     * Recursively add a package and all its sub-packages.
+     */
+    private void addPackageWithSubpackages(EPackage pkg) {
+        this.targetPackages.add(pkg);
+        for (EPackage subPkg : pkg.getESubpackages()) {
+            addPackageWithSubpackages(subPkg);
+        }
+    }
+
+    /**
+     * Get all registered target packages.
+     *
+     * @return unmodifiable list of registered target packages
+     */
+    public List<EPackage> getTargetPackages() {
+        return Collections.unmodifiableList(new ArrayList<>(targetPackages));
+    }
+
+    /**
+     * Resolve the EPackage for a target type.
+     *
+     * <p>Resolution order:</p>
+     * <ol>
+     *   <li>Auto-discover from generated Java class (for generated metamodels)</li>
+     *   <li>Fall back to registered packages (for dynamic EMF models)</li>
+     * </ol>
+     *
+     * @param targetType the target type to resolve
+     * @return the EPackage containing the type
+     * @throws IllegalArgumentException if type's EPackage cannot be discovered or found
+     */
+    private EPackage resolvePackageForType(Class<?> targetType) {
+        // Try auto-discovery first (works for generated metamodels)
+        EPackage discovered = discoverPackageForType(targetType);
+        if (discovered != null) {
+            return discovered;
+        }
+
+        // Fall back to registered packages (for dynamic EMF)
+        return resolveFromRegisteredPackages(targetType);
+    }
+
+    /**
+     * Auto-discover the EPackage from a generated EMF Java class.
+     *
+     * <p>For generated EMF interfaces like {@code com.example.schema.Table},
+     * this finds the corresponding {@code SchemaPackage.eINSTANCE} in the same
+     * Java package.</p>
+     *
+     * @param targetType the EMF interface class
+     * @return the discovered EPackage, or null if not a generated class
+     */
+    private EPackage discoverPackageForType(Class<?> targetType) {
+        // Check cache first
+        EPackage cached = discoveredPackageCache.get(targetType);
+        if (cached != null) {
+            return cached;
+        }
+
+        String typeName = targetType.getSimpleName();
+        String javaPackageName = targetType.getPackage() != null ? targetType.getPackage().getName() : null;
+
+        if (javaPackageName == null) {
+            return null;
+        }
+
+        // Look for *Package class in the same Java package
+        // EMF convention: SchemaPackage, DataPackage, etc.
+        try {
+            // Try common naming patterns for EMF package classes
+            for (String suffix : Arrays.asList("Package", "")) {
+                String basePackageName = derivePackageClassName(javaPackageName, suffix);
+                if (basePackageName != null) {
+                    EPackage pkg = tryLoadPackage(basePackageName, typeName);
+                    if (pkg != null) {
+                        discoveredPackageCache.put(targetType, pkg);
+                        return pkg;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // Auto-discovery failed, will fall back to registered packages
+        }
+
+        return null;
+    }
+
+    /**
+     * Derive potential EPackage class names from the Java package.
+     */
+    private String derivePackageClassName(String javaPackageName, String suffix) {
+        // Extract last segment of package name and capitalize
+        // e.g., "com.example.schema" -> "Schema" -> "SchemaPackage"
+        String[] parts = javaPackageName.split("\\.");
+        if (parts.length == 0) {
+            return null;
+        }
+        String lastPart = parts[parts.length - 1];
+        String capitalized = Character.toUpperCase(lastPart.charAt(0)) + lastPart.substring(1);
+        return javaPackageName + "." + capitalized + suffix;
+    }
+
+    /**
+     * Try to load an EPackage class and verify it contains the target type.
+     */
+    private EPackage tryLoadPackage(String packageClassName, String typeName) {
+        try {
+            Class<?> packageClass = Class.forName(packageClassName);
+
+            // Look for static eINSTANCE field
+            Field eInstanceField = packageClass.getField("eINSTANCE");
+            if (Modifier.isStatic(eInstanceField.getModifiers())
+                    && EPackage.class.isAssignableFrom(eInstanceField.getType())) {
+
+                EPackage pkg = (EPackage) eInstanceField.get(null);
+                if (pkg != null) {
+                    // Verify package contains the type
+                    EClassifier classifier = pkg.getEClassifier(typeName);
+                    if (classifier instanceof EClass) {
+                        return pkg;
+                    }
+                }
+            }
+        } catch (ClassNotFoundException | NoSuchFieldException | IllegalAccessException e) {
+            // Expected for non-existent or non-EMF classes
+        }
+        return null;
+    }
+
+    /**
+     * Resolve type from registered packages (fallback for dynamic EMF).
+     */
+    private EPackage resolveFromRegisteredPackages(Class<?> targetType) {
+        String typeName = targetType.getSimpleName();
+
+        if (targetPackages.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "Cannot resolve EPackage for type '" + typeName + "'. " +
+                    "For generated metamodels, ensure the package is initialized (e.g., MyPackage.eINSTANCE). " +
+                    "For dynamic EMF, call registerTargetPackage() first.");
+        }
+
+        // Fast path: single package
+        if (targetPackages.size() == 1) {
+            EPackage pkg = targetPackages.get(0);
+            if (pkg.getEClassifier(typeName) instanceof EClass) {
+                return pkg;
+            }
+            throw new IllegalArgumentException(
+                    "EClass '" + typeName + "' not found in registered package: " + pkg.getNsURI());
+        }
+
+        // Multi-package: find matching package(s)
+        List<EPackage> matchingPackages = targetPackages.stream()
+                .filter(pkg -> pkg.getEClassifier(typeName) instanceof EClass)
+                .collect(Collectors.toList());
+
+        if (matchingPackages.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "EClass '" + typeName + "' not found in any registered package. " +
+                    "Registered packages: " + targetPackages.stream()
+                            .map(EPackage::getNsURI)
+                            .collect(Collectors.toList()));
+        }
+
+        if (matchingPackages.size() > 1) {
+            throw new IllegalArgumentException(
+                    "EClass '" + typeName + "' found in multiple packages: " +
+                    matchingPackages.stream().map(EPackage::getNsURI).collect(Collectors.toList()) +
+                    ". Use createTarget(Class, EPackage) to specify which package to use.");
+        }
+
+        return matchingPackages.get(0);
     }
 
     /**
@@ -235,27 +473,50 @@ public class TransformationContext {
     /**
      * Create a new target element of the specified type.
      *
-     * <p>If staging is enabled (parallel transformation), the element is queued
-     * for later addition to the Resource. Otherwise, it is added immediately.</p>
+     * <p>For generated metamodels, the EPackage is auto-discovered from the Java class.
+     * No package registration is needed.</p>
      *
-     * @param targetType the target EObject interface
+     * @param targetType the target EObject interface (e.g., {@code Table.class})
      * @param <T> the target type
      * @return the new target element
      */
-    @SuppressWarnings("unchecked")
     public <T extends EObject> T createTarget(Class<T> targetType) {
-        if (targetPackage == null) {
-            throw new IllegalStateException("Target package not set. Call setTargetPackage() first.");
-        }
+        EPackage pkg = resolvePackageForType(targetType);
+        return createTargetInPackage(targetType, pkg);
+    }
 
+    /**
+     * Create a new target element in a specific package (for dynamic EMF).
+     *
+     * <p><b>Not needed for generated metamodels</b> - use {@link #createTarget(Class)} instead,
+     * which auto-discovers the EPackage.</p>
+     *
+     * @param targetType the target EObject interface
+     * @param pkg the EPackage containing the type (for dynamic EMF)
+     * @param <T> the target type
+     * @return the new target element
+     */
+    public <T extends EObject> T createTarget(Class<T> targetType, EPackage pkg) {
+        if (pkg == null) {
+            throw new IllegalArgumentException("Package cannot be null");
+        }
+        return createTargetInPackage(targetType, pkg);
+    }
+
+    /**
+     * Internal method to create a target element in a specific package.
+     */
+    @SuppressWarnings("unchecked")
+    private <T extends EObject> T createTargetInPackage(Class<T> targetType, EPackage pkg) {
         String typeName = targetType.getSimpleName();
-        EClass eClass = (EClass) targetPackage.getEClassifier(typeName);
+        EClass eClass = (EClass) pkg.getEClassifier(typeName);
 
         if (eClass == null) {
-            throw new IllegalArgumentException("EClass not found in target package: " + typeName);
+            throw new IllegalArgumentException(
+                    "EClass '" + typeName + "' not found in package: " + pkg.getNsURI());
         }
 
-        EObject instance = targetPackage.getEFactoryInstance().create(eClass);
+        EObject instance = pkg.getEFactoryInstance().create(eClass);
 
         if (stagingEnabled.get()) {
             // Parallel mode: stage for later commit with ordering
@@ -514,27 +775,52 @@ public class TransformationContext {
 
     /**
      * Create a new element without adding it to any resource.
-     * This matches ETL behavior where created elements must be explicitly
-     * added to containment references.
+     * The element must be explicitly added to a containment reference.
      *
-     * @param type the element type to create
+     * <p>For generated metamodels, the EPackage is auto-discovered from the Java class.
+     * No package registration is needed.</p>
+     *
+     * @param type the element type to create (e.g., {@code Column.class})
      * @param <T> the element type
      * @return the new element (not contained anywhere)
      */
-    @SuppressWarnings("unchecked")
     public <T extends EObject> T create(Class<T> type) {
-        if (targetPackage == null) {
-            throw new IllegalStateException("Target package not set. Call setTargetPackage() first.");
-        }
+        EPackage pkg = resolvePackageForType(type);
+        return createWithoutContainment(type, pkg);
+    }
 
+    /**
+     * Create a new element in a specific package without containment (for dynamic EMF).
+     *
+     * <p><b>Not needed for generated metamodels</b> - use {@link #create(Class)} instead,
+     * which auto-discovers the EPackage.</p>
+     *
+     * @param type the element type to create
+     * @param pkg the EPackage containing the type (for dynamic EMF)
+     * @param <T> the element type
+     * @return the new element (not contained anywhere)
+     */
+    public <T extends EObject> T create(Class<T> type, EPackage pkg) {
+        if (pkg == null) {
+            throw new IllegalArgumentException("Package cannot be null");
+        }
+        return createWithoutContainment(type, pkg);
+    }
+
+    /**
+     * Internal method to create an element without containment in a specific package.
+     */
+    @SuppressWarnings("unchecked")
+    private <T extends EObject> T createWithoutContainment(Class<T> type, EPackage pkg) {
         String typeName = type.getSimpleName();
-        EClass eClass = (EClass) targetPackage.getEClassifier(typeName);
+        EClass eClass = (EClass) pkg.getEClassifier(typeName);
 
         if (eClass == null) {
-            throw new IllegalArgumentException("EClass not found in target package: " + typeName);
+            throw new IllegalArgumentException(
+                    "EClass '" + typeName + "' not found in package: " + pkg.getNsURI());
         }
 
-        EObject instance = targetPackage.getEFactoryInstance().create(eClass);
+        EObject instance = pkg.getEFactoryInstance().create(eClass);
 
         // Track for ordering but do NOT add to any resource
         if (stagingEnabled.get()) {

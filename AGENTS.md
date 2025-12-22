@@ -261,10 +261,25 @@ TransformationExecutor executor = TransformationExecutor.builder()
 TransformationResult result = executor.transform(sourceElements);
 ```
 
+### Package Resolution
+
+**Generated Metamodels** - No registration needed, EPackage is auto-discovered:
+```java
+Table table = ctx.createTarget(Table.class);  // Auto-discovers SchemaPackage
+Column col = ctx.create(Column.class);        // Auto-discovers SchemaPackage
+```
+
+**Dynamic EMF** - Register packages explicitly:
+```java
+ctx.registerTargetPackage(dynamicPackage);
+EObject obj = ctx.createTarget(dynamicType, dynamicPackage);
+```
+
 ### Thread-Safety in Transformation Rules
 
 **Safe Operations:**
 - `ctx.createTarget()` - Creates staged elements
+- `ctx.createTarget(Class, EPackage)` - Creates in specific package
 - `ctx.equivalent()` - Thread-safe lazy rule execution via `computeIfAbsent`
 - `ctx.equivalentDiscriminated()` - Thread-safe discriminated equivalence
 - Setting properties on elements you created

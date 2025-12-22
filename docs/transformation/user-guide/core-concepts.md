@@ -103,35 +103,46 @@ Provides access to transformation operations during rule execution:
 
 ```java
 public interface TransformationContext {
-    // Create a new target element
+    // Create a new target element (auto-resolves package)
     <T extends EObject> T createTarget(Class<T> targetClass);
-    
+
+    // Create a new target element in a specific package
+    <T extends EObject> T createTarget(Class<T> targetClass, EPackage targetPackage);
+
     // Get the transformed equivalent of a source element
     <T extends EObject> T equivalent(EObject source, Class<T> targetClass);
-    
+
     // Get all transformed equivalents (when multiple rules transform same source)
     <T extends EObject> List<T> equivalents(EObject source, Class<T> targetClass);
-    
+
     // Get discriminated equivalent (multiple outputs from same source)
     // NOTE: This is a Zeta-specific workaround, not part of ETL specification
     <T extends EObject> T equivalentDiscriminated(
         EObject source, Class<T> targetClass, String ruleName, String discriminator
     );
-    
+
     // Execute a parent rule (for inheritance)
     <T extends EObject> T executeParentRule(String parentRuleName, EObject source);
-    
+
     // Query source model
     <T extends EObject> Collection<T> getAllSource(Class<T> type);
-    
+
     // Query target model
     <T extends EObject> Collection<T> getAllTarget(Class<T> type);
-    
+
+    // Package management
+    void setTargetPackage(EPackage pkg);                              // Single package
+    void registerTargetPackage(EPackage pkg);                         // Add package
+    void registerTargetPackage(EPackage pkg, boolean includeSubpkgs); // With sub-packages
+    List<EPackage> getTargetPackages();                               // Get all packages
+
     // Custom attributes (for passing data between rules)
     void setAttribute(String key, Object value);
     Object getAttribute(String key);
 }
 ```
+
+**Package Resolution**: For generated metamodels, the EPackage is auto-discovered from the Java class - no registration needed. For dynamic EMF, use `registerTargetPackage()` and `createTarget(Class, EPackage)`.
 
 **Common Usage**:
 
