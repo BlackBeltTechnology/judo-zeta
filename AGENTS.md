@@ -213,6 +213,106 @@ ValidationExecutor executor = ValidationExecutor.builder()
 List<ValidationResult> results = executor.validate(modelElements);
 ```
 
+## Transformation Framework
+
+### Transformation Core Architecture
+
+The `transformation-core` module provides annotation-based model-to-model transformations:
+
+```
+transformation-core/src/main/java/hu/blackbelt/judo/zeta/transformation/core/
+├── TransformationExecutor.java        # Parallel execution engine with staging
+├── TransformationContext.java         # Execution context with staging infrastructure
+├── TransformationRegistry.java        # Rule registration and discovery
+├── TransformationResult.java          # Result wrapper
+├── TransformationTrace.java           # Source-to-target mapping export
+├── TransformationException.java       # Fail-fast error handling
+├── TransformRuleDescriptor.java       # Rule metadata
+├── ElementResolutionCache.java        # Thread-safe source→target cache
+└── RuleInheritanceGraph.java          # Rule dependency resolution
+```
+
+### Parallel Transformation Execution
+
+The transformation framework uses a **two-phase staging approach** for thread-safe parallel execution:
+
+**Phase 1 (Parallel):**
+- Elements are created in parallel threads
+- Created elements are staged in `ConcurrentLinkedQueue`
+- Element ordering tracked via `AtomicLong` sequence numbers
+- XMI IDs stored in `ConcurrentHashMap` for deferred assignment
+
+**Phase 2 (Sequential):**
+- Staged elements sorted by creation sequence
+- Elements committed to target Resource (single-threaded)
+- XMI IDs applied after elements added to Resource
+
+```java
+// Configure parallel transformation
+TransformationExecutor executor = TransformationExecutor.builder()
+    .registry(registry)
+    .context(context)
+    .parallel(true)                    // Enable parallel (default: true)
+    .parallelThreshold(1000)           // Min elements for parallel (default: 1000)
+    .chunkSize(100)                    // Elements per work unit (default: 100)
+    .build();
+
+// Execute - executor is reusable
+TransformationResult result = executor.transform(sourceElements);
+```
+
+### Package Resolution
+
+**Generated Metamodels** - No registration needed, EPackage is auto-discovered:
+```java
+Table table = ctx.createTarget(Table.class);  // Auto-discovers SchemaPackage
+Column col = ctx.create(Column.class);        // Auto-discovers SchemaPackage
+```
+
+**Dynamic EMF** - Register packages explicitly:
+```java
+ctx.registerTargetPackage(dynamicPackage);
+EObject obj = ctx.createTarget(dynamicType, dynamicPackage);
+```
+
+### Thread-Safety in Transformation Rules
+
+**Safe Operations:**
+- `ctx.createTarget()` - Creates staged elements
+- `ctx.createTarget(Class, EPackage)` - Creates in specific package
+- `ctx.equivalent()` - Thread-safe lazy rule execution via `computeIfAbsent`
+- `ctx.equivalentDiscriminated()` - Thread-safe discriminated equivalence
+- Setting properties on elements you created
+- Reading from source elements
+
+**Unsafe Operations (avoid):**
+- Modifying source elements
+- Modifying target elements created by other rules
+- Shared mutable state between rules
+
+### Fail-Fast Error Handling
+
+```java
+try {
+    TransformationResult result = executor.transform(sourceElements);
+} catch (TransformationException e) {
+    EObject failedElement = e.getFailedElement();
+    String ruleName = e.getRuleName();
+    Throwable cause = e.getCause();
+    // Handle error with full context
+}
+```
+
+### Key Classes
+
+| Class | Purpose |
+|-------|---------|
+| `TransformationExecutor` | Parallel execution engine with Builder pattern |
+| `TransformationContext` | Execution context with staging infrastructure |
+| `TransformationException` | RuntimeException with element/rule context |
+| `ElementResolutionCache` | Thread-safe ConcurrentHashMap-based cache |
+| `TransformationTrace` | JSON-exportable source→target mapping |
+
 ### Dependency Resolution
 
 The framework topologically sorts rules based on `@Satisfies` annotations:
