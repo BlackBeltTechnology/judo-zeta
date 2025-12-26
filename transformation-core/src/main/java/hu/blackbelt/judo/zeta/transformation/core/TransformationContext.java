@@ -639,19 +639,21 @@ public class TransformationContext {
     /**
      * Get a discriminated equivalent (for multiple transformations of the same source).
      *
-     * <p>Like {@link #equivalent(EObject, Class)}, this method DOES trigger @Lazy rules
-     * if no existing equivalent is found. This matches Epsilon ETL semantics.</p>
+     * <p>When ruleName is provided, this method finds and executes that SPECIFIC @Lazy rule,
+     * matching Epsilon ETL's equivalent("RuleName") semantics. If no ruleName is provided,
+     * falls back to generic equivalent() lookup.</p>
      *
      * <p>If staging is enabled, the cloned element is staged for later commit
      * and its XMI ID is stored for deferred assignment.</p>
      *
      * @param source the source element
      * @param targetType the expected target type
-     * @param ruleName the rule name (for discriminated cache key)
+     * @param ruleName the rule name (triggers this specific rule, not just any matching rule)
      * @param discriminator the discriminator value
      * @param <T> the target type
      * @return the discriminated target, or null if no matching rule found
      */
+    @SuppressWarnings("unchecked")
     public <T extends EObject> T equivalentDiscriminated(
             EObject source,
             Class<T> targetType,
@@ -664,14 +666,38 @@ public class TransformationContext {
             return cached;
         }
 
-        // Get or create base equivalent (triggers @Lazy rules if needed - Epsilon semantics)
-        T original = equivalent(source, targetType);
+        // If ruleName is specified, find and execute that specific rule
+        T original = null;
+        if (ruleName != null && transformationRegistry != null) {
+            TransformRuleDescriptor rule = transformationRegistry.getRuleByName(ruleName);
+            if (rule != null && rule.appliesTo(source) && rule.evaluateGuard(source, this)) {
+                // Check if already in cache by rule name
+                EObject existing = resolutionCache.getByRule(source, ruleName);
+                if (existing != null && targetType.isInstance(existing)) {
+                    original = (T) existing;
+                } else {
+                    // Execute the specific rule
+                    EObject result = rule.execute(source, this);
+                    if (result != null) {
+                        resolutionCache.addMapping(source, ruleName, result, rule.isPrimary());
+                        if (targetType.isInstance(result)) {
+                            original = (T) result;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fall back to generic equivalent() only if no ruleName or rule not found
+        if (original == null) {
+            original = equivalent(source, targetType);
+        }
+
         if (original == null) {
             return null;
         }
 
         // Clone for discriminated version
-        @SuppressWarnings("unchecked")
         T clone = (T) EcoreUtil.copy(original);
 
         // Set discriminated ID (works for both staged and non-staged)
