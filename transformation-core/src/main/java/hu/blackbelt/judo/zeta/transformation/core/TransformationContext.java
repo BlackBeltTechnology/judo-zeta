@@ -42,6 +42,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
+import static java.util.Optional.ofNullable;
+
 /**
  * Runtime context for transformation execution.
  *
@@ -61,7 +63,12 @@ public class TransformationContext {
     private final ResourceSet targetResourceSet;
     private final ExtensionMethodRegistry extensionRegistry;
     private final ElementResolutionCache resolutionCache;
-    private final Map<String, Object> attributes;
+
+    /**
+     * Custom attributes map.
+     * Uses Optional to allow null values (ConcurrentHashMap doesn't allow null).
+     */
+    private final Map<String, Optional<Object>> attributes;
 
     /**
      * Registry mapping aliases to ResourceSets.
@@ -869,17 +876,24 @@ public class TransformationContext {
 
     /**
      * Set a custom attribute.
+     *
+     * @param key the attribute key
+     * @param value the attribute value (null is allowed)
      */
     public void setAttribute(String key, Object value) {
-        attributes.put(key, value);
+        attributes.put(key, ofNullable(value));
     }
 
     /**
      * Get a custom attribute.
+     *
+     * @param key the attribute key
+     * @return the attribute value, or null if not set
      */
     @SuppressWarnings("unchecked")
     public <T> T getAttribute(String key) {
-        return (T) attributes.get(key);
+        Optional<Object> opt = attributes.get(key);
+        return opt != null ? (T) opt.orElse(null) : null;
     }
 
     /**

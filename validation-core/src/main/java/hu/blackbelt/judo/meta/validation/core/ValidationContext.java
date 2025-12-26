@@ -27,6 +27,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.resource.ResourceSet;
 
+import static java.util.Optional.ofNullable;
+
 /**
  * Runtime context for validation execution.
  *
@@ -54,7 +56,12 @@ public class ValidationContext {
     private final ResourceSet resourceSet;
     private final ExtensionMethodRegistry extensionRegistry;
     private final Map<CacheKey, SatisfiesState> satisfiesCache;
-    private final Map<String, Object> attributes;
+
+    /**
+     * Custom attributes map.
+     * Uses Optional to allow null values (ConcurrentHashMap doesn't allow null).
+     */
+    private final Map<String, Optional<Object>> attributes;
 
     /**
      * Registry mapping aliases to ResourceSets.
@@ -329,10 +336,10 @@ public class ValidationContext {
      * Set a custom attribute (for use in pre/post hooks).
      *
      * @param key the attribute key
-     * @param value the attribute value
+     * @param value the attribute value (null is allowed)
      */
     public void setAttribute(String key, Object value) {
-        attributes.put(key, value);
+        attributes.put(key, ofNullable(value));
     }
 
     /**
@@ -343,7 +350,8 @@ public class ValidationContext {
      */
     @SuppressWarnings("unchecked")
     public <T> T getAttribute(String key) {
-        return (T) attributes.get(key);
+        Optional<Object> opt = attributes.get(key);
+        return opt != null ? (T) opt.orElse(null) : null;
     }
 
     /**
