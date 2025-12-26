@@ -2,6 +2,8 @@
 
 **Navigation**: [Documentation Hub](../../index.md) > [Transformation](../index.md) > [User Guide](core-concepts.md) > Discriminated Equivalence
 
+> **Note**: Discriminated equivalence is a **Zeta-specific extension**, not part of the original Epsilon ETL specification. It was designed as a workaround for scenarios where multiple target elements need to be created from a single source element, which ETL handles differently using multiple target declarations in a single rule.
+
 Discriminated equivalence allows creating multiple distinct target elements from the same source element.
 
 ## equivalentDiscriminated()
