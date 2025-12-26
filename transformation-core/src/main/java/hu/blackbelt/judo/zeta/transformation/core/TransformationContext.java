@@ -637,11 +637,52 @@ public class TransformationContext {
     }
 
     /**
+     * Get the equivalent target by executing a specific named rule.
+     *
+     * <p>This matches Epsilon ETL's equivalent("RuleName") semantics:
+     * <ul>
+     *   <li>Finds the rule by name</li>
+     *   <li>Executes WITHOUT guard check (guards are only for automatic execution)</li>
+     *   <li>Caches the result</li>
+     * </ul></p>
+     *
+     * @param source the source element
+     * @param ruleName the rule name to execute
+     * @param <T> the target type
+     * @return the equivalent target, or null if rule not found or doesn't apply
+     */
+    @SuppressWarnings("unchecked")
+    public <T extends EObject> T equivalent(EObject source, String ruleName) {
+        if (ruleName == null || transformationRegistry == null) {
+            return null;
+        }
+
+        // Check cache first by rule name
+        EObject cached = resolutionCache.getByRule(source, ruleName);
+        if (cached != null) {
+            return (T) cached;
+        }
+
+        // Find the specific rule
+        TransformRuleDescriptor rule = transformationRegistry.getRuleByName(ruleName);
+        if (rule == null || !rule.appliesTo(source)) {
+            return null;
+        }
+
+        // Execute WITHOUT guard check (ETL semantics - guards are for automatic execution only)
+        EObject result = rule.execute(source, this);
+        if (result != null) {
+            resolutionCache.addMapping(source, ruleName, result, rule.isPrimary());
+        }
+        return (T) result;
+    }
+
+    /**
      * Get a discriminated equivalent (for multiple transformations of the same source).
      *
-     * <p>When ruleName is provided, this method finds and executes that SPECIFIC @Lazy rule,
-     * matching Epsilon ETL's equivalent("RuleName") semantics. If no ruleName is provided,
-     * falls back to generic equivalent() lookup.</p>
+     * <p>When ruleName is provided, this method finds and executes that SPECIFIC @Lazy rule
+     * WITHOUT guard check, matching Epsilon ETL's equivalent("RuleName") semantics.
+     * If no ruleName is provided, falls back to generic equivalent() lookup.</p>
      *
      * <p>If staging is enabled, the cloned element is staged for later commit
      * and its XMI ID is stored for deferred assignment.</p>
@@ -666,26 +707,10 @@ public class TransformationContext {
             return cached;
         }
 
-        // If ruleName is specified, find and execute that specific rule
+        // If ruleName is specified, use equivalent(source, ruleName) - no guard check (ETL semantics)
         T original = null;
-        if (ruleName != null && transformationRegistry != null) {
-            TransformRuleDescriptor rule = transformationRegistry.getRuleByName(ruleName);
-            if (rule != null && rule.appliesTo(source) && rule.evaluateGuard(source, this)) {
-                // Check if already in cache by rule name
-                EObject existing = resolutionCache.getByRule(source, ruleName);
-                if (existing != null && targetType.isInstance(existing)) {
-                    original = (T) existing;
-                } else {
-                    // Execute the specific rule
-                    EObject result = rule.execute(source, this);
-                    if (result != null) {
-                        resolutionCache.addMapping(source, ruleName, result, rule.isPrimary());
-                        if (targetType.isInstance(result)) {
-                            original = (T) result;
-                        }
-                    }
-                }
-            }
+        if (ruleName != null) {
+            original = equivalent(source, ruleName);
         }
 
         // Fall back to generic equivalent() only if no ruleName or rule not found
