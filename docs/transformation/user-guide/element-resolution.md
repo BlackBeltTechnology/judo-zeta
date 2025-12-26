@@ -190,6 +190,8 @@ public TransformFunction<EntityType, Table> entity2Table() {
 
 ## equivalentDiscriminated() - Multiple Outputs from Same Source
 
+> **Note**: Discriminated equivalence is a **Zeta-specific workaround**, not part of the original Epsilon ETL specification. In ETL, you can create multiple targets using `to t1, t2, t3` syntax in a single rule. Since Zeta follows a single-source-single-target pattern, `equivalentDiscriminated()` provides an alternative mechanism for creating multiple related target elements from a single source element.
+
 Create multiple distinct targets from the same source using discriminators:
 
 ```java
