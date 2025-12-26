@@ -639,6 +639,9 @@ public class TransformationContext {
     /**
      * Get a discriminated equivalent (for multiple transformations of the same source).
      *
+     * <p>Unlike {@link #equivalent(EObject, Class)}, this method does NOT trigger
+     * @Lazy rules. It only looks up already-created equivalences.</p>
+     *
      * <p>If staging is enabled, the cloned element is staged for later commit
      * and its XMI ID is stored for deferred assignment.</p>
      *
@@ -647,7 +650,7 @@ public class TransformationContext {
      * @param ruleName the rule name
      * @param discriminator the discriminator value
      * @param <T> the target type
-     * @return the discriminated target
+     * @return the discriminated target, or null if no existing equivalent found
      */
     public <T extends EObject> T equivalentDiscriminated(
             EObject source,
@@ -661,8 +664,8 @@ public class TransformationContext {
             return cached;
         }
 
-        // Get or create base transformation
-        T original = equivalent(source, targetType);
+        // Look up already-created equivalent (does NOT trigger @Lazy rules)
+        T original = resolutionCache.getEquivalent(source, targetType);
         if (original == null) {
             return null;
         }
