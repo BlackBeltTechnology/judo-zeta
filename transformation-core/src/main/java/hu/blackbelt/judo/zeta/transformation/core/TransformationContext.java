@@ -526,6 +526,10 @@ public class TransformationContext {
 
     /**
      * Internal method to create a target element in a specific package.
+     *
+     * <p>ETL semantics: Elements are NOT added to resource root automatically.
+     * They become part of the model when assigned to containment references.
+     * Only true root elements should be explicitly added via {@link #addToResource(EObject)}.</p>
      */
     @SuppressWarnings("unchecked")
     private <T extends EObject> T createTargetInPackage(Class<T> targetType, EPackage pkg) {
@@ -539,20 +543,38 @@ public class TransformationContext {
 
         EObject instance = pkg.getEFactoryInstance().create(eClass);
 
+        // ETL semantics: do NOT add to resource root automatically
+        // Elements become part of the model when assigned to containment references
+        // Use addToResource() explicitly for true root elements
+
+        return (T) instance;
+    }
+
+    /**
+     * Add an element to the target resource as a root element.
+     *
+     * <p>Use this for elements that should be root elements in the target model,
+     * not contained by other elements.</p>
+     *
+     * @param element the element to add as root
+     */
+    public void addToResource(EObject element) {
+        if (element == null) {
+            return;
+        }
+
         if (stagingEnabled.get()) {
             // Parallel mode: stage for later commit with ordering
             long sequence = creationSequence.getAndIncrement();
-            elementOrder.put(instance, sequence);
-            stagedElements.offer(new StagedElement(instance, true, sequence));
+            elementOrder.put(element, sequence);
+            stagedElements.offer(new StagedElement(element, true, sequence));
         } else {
             // Sequential mode: add directly to Resource
             if (!targetResourceSet.getResources().isEmpty()) {
                 Resource targetResource = targetResourceSet.getResources().get(0);
-                targetResource.getContents().add(instance);
+                targetResource.getContents().add(element);
             }
         }
-
-        return (T) instance;
     }
 
 
