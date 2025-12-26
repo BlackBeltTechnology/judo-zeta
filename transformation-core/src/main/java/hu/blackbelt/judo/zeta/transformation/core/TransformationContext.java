@@ -707,10 +707,27 @@ public class TransformationContext {
             return cached;
         }
 
-        // If ruleName is specified, use equivalent(source, ruleName) - no guard check (ETL semantics)
+        // If ruleName is specified, find and execute that specific rule WITHOUT guard check (ETL semantics)
         T original = null;
-        if (ruleName != null) {
-            original = equivalent(source, ruleName);
+        if (ruleName != null && transformationRegistry != null) {
+            TransformRuleDescriptor rule = transformationRegistry.getRuleByName(ruleName);
+            // Note: NO guard check - ETL semantics: guards are for automatic execution only
+            if (rule != null && rule.appliesTo(source)) {
+                // Check if already in cache by rule name
+                EObject existing = resolutionCache.getByRule(source, ruleName);
+                if (existing != null && targetType.isInstance(existing)) {
+                    original = (T) existing;
+                } else {
+                    // Execute the specific rule
+                    EObject result = rule.execute(source, this);
+                    if (result != null) {
+                        resolutionCache.addMapping(source, ruleName, result, rule.isPrimary());
+                        if (targetType.isInstance(result)) {
+                            original = (T) result;
+                        }
+                    }
+                }
+            }
         }
 
         // Fall back to generic equivalent() only if no ruleName or rule not found
