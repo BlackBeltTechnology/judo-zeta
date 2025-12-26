@@ -24,6 +24,9 @@ import org.eclipse.emf.ecore.EObject;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+import static java.util.Optional.ofNullable;
 
 /**
  * Cache for transformation trace (source → target mappings).
@@ -43,10 +46,14 @@ public class ElementResolutionCache {
     private final Map<EObject, Map<String, EObject>> primaryCache = new ConcurrentHashMap<>();
 
     // Discriminated cache: source → rule name → discriminator → instance
-    private final Map<EObject, Map<String, Map<String, EObject>>> discriminatedCache = new ConcurrentHashMap<>();
+    // Uses Optional to allow caching null results (ConcurrentHashMap doesn't allow null values)
+    private final Map<EObject, Map<String, Map<String, Optional<EObject>>>> discriminatedCache = new ConcurrentHashMap<>();
 
     /**
      * Add a mapping from source to target.
+     *
+     * <p>Thread-safe: Uses CopyOnWriteArrayList for the type cache lists to allow
+     * concurrent iteration during parallel transformation while adding new mappings.</p>
      *
      * @param source the source element
      * @param ruleName the transformation rule name
@@ -67,8 +74,9 @@ public class ElementResolutionCache {
                 .put(ruleName, target);
 
         // Add to type cache (for equivalents() by type)
+        // Use CopyOnWriteArrayList for thread-safe iteration during parallel transformation
         typeCache.computeIfAbsent(source, k -> new ConcurrentHashMap<>())
-                .computeIfAbsent(targetTypeName, k -> Collections.synchronizedList(new ArrayList<>()))
+                .computeIfAbsent(targetTypeName, k -> new CopyOnWriteArrayList<>())
                 .add(target);
 
         // Add to primary cache if marked
@@ -99,6 +107,13 @@ public class ElementResolutionCache {
      * Get the equivalent target for a source element.
      * Returns the primary target if available, otherwise the first target of the type.
      *
+     * <p>This method supports type hierarchy lookups. If an EDataType is cached
+     * and EClassifier is requested, the EDataType will be returned since
+     * EDataType extends EClassifier.</p>
+     *
+     * <p>Thread-safe: Uses snapshot-based iteration to avoid ConcurrentModificationException
+     * during parallel transformation.</p>
+     *
      * @param source the source element
      * @param targetType the target type class
      * @param <T> the target type
@@ -107,21 +122,39 @@ public class ElementResolutionCache {
     public <T extends EObject> T getEquivalent(EObject source, Class<T> targetType) {
         String typeName = getTypeName(targetType);
 
-        // Check primary cache first
+        // Check primary cache first (exact match)
         Map<String, EObject> primaryMap = primaryCache.get(source);
         if (primaryMap != null) {
             EObject primary = primaryMap.get(typeName);
             if (primary != null) {
                 return targetType.cast(primary);
             }
+            // Fall back to assignable type check in primary cache
+            // Use snapshot to avoid ConcurrentModificationException
+            for (EObject primary2 : new ArrayList<>(primaryMap.values())) {
+                if (targetType.isInstance(primary2)) {
+                    return targetType.cast(primary2);
+                }
+            }
         }
 
-        // Fall back to first from type cache
+        // Check for assignable types in type cache (e.g., EDataType when requesting EClassifier)
+        // This handles cases where EDataType is cached but EClassifier is requested
         Map<String, List<EObject>> typeMap = typeCache.get(source);
         if (typeMap != null) {
-            List<EObject> targets = typeMap.get(typeName);
-            if (targets != null && !targets.isEmpty()) {
-                return targetType.cast(targets.get(0));
+            // First try exact type match
+            List<EObject> exactTargets = typeMap.get(typeName);
+            if (exactTargets != null && !exactTargets.isEmpty()) {
+                return targetType.cast(exactTargets.get(0));
+            }
+            // Fall back to assignable type check
+            // CopyOnWriteArrayList is already safe for iteration, but we need snapshot of typeMap.values()
+            for (List<EObject> targets : new ArrayList<>(typeMap.values())) {
+                for (EObject target : targets) {
+                    if (targetType.isInstance(target)) {
+                        return targetType.cast(target);
+                    }
+                }
             }
         }
 
@@ -131,37 +164,49 @@ public class ElementResolutionCache {
     /**
      * Get all equivalent targets for a source element of a given type.
      *
+     * <p>This method supports type hierarchy lookups. If an EDataType is cached
+     * and EClassifier is requested, the EDataType will be returned since
+     * EDataType extends EClassifier.</p>
+     *
+     * <p>Thread-safe: Uses snapshot-based iteration to avoid ConcurrentModificationException
+     * during parallel transformation.</p>
+     *
      * @param source the source element
      * @param targetType the target type class
      * @param <T> the target type
-     * @return list of equivalent targets
+     * @return list of equivalent targets (includes subtypes)
      */
-    @SuppressWarnings("unchecked")
     public <T extends EObject> List<T> getEquivalents(EObject source, Class<T> targetType) {
-        String typeName = getTypeName(targetType);
         Map<String, List<EObject>> typeMap = typeCache.get(source);
 
         if (typeMap == null) {
             return Collections.emptyList();
         }
 
-        List<EObject> targets = typeMap.get(typeName);
-        if (targets == null) {
-            return Collections.emptyList();
+        List<T> result = new ArrayList<>();
+        
+        // Check all cached targets for type assignability
+        // This handles cases where EDataType is cached but EClassifier is requested
+        // Use snapshot of typeMap.values() to avoid ConcurrentModificationException
+        for (List<EObject> targets : new ArrayList<>(typeMap.values())) {
+            // CopyOnWriteArrayList is already safe for iteration
+            for (EObject target : targets) {
+                if (targetType.isInstance(target)) {
+                    result.add(targetType.cast(target));
+                }
+            }
         }
-
-        List<T> result = new ArrayList<>(targets.size());
-        for (EObject target : targets) {
-            result.add((T) target);
-        }
+        
         return result;
     }
 
     /**
      * Add a discriminated mapping.
      *
+     * <p>Supports caching null results to avoid re-executing lazy rules that return null.</p>
+     *
      * @param source the source element
-     * @param target the target element
+     * @param target the target element (may be null)
      * @param ruleName the rule name
      * @param discriminator the discriminator value
      * @param <T> the target type
@@ -172,10 +217,11 @@ public class ElementResolutionCache {
             String ruleName,
             String discriminator
     ) {
+        // Use Optional to allow caching null results (ConcurrentHashMap doesn't allow null values)
         discriminatedCache
                 .computeIfAbsent(source, k -> new ConcurrentHashMap<>())
                 .computeIfAbsent(ruleName, k -> new ConcurrentHashMap<>())
-                .put(discriminator, target);
+                .put(discriminator, ofNullable(target));
     }
 
     /**
@@ -186,7 +232,7 @@ public class ElementResolutionCache {
      * @param ruleName the rule name
      * @param discriminator the discriminator value
      * @param <T> the target type
-     * @return the cached target, or null if not found
+     * @return the cached target, or null if not found or cached as null
      */
     public <T extends EObject> T getEquivalentDiscriminated(
             EObject source,
@@ -194,14 +240,37 @@ public class ElementResolutionCache {
             String ruleName,
             String discriminator
     ) {
-        Map<String, Map<String, EObject>> ruleMap = discriminatedCache.get(source);
+        Map<String, Map<String, Optional<EObject>>> ruleMap = discriminatedCache.get(source);
         if (ruleMap != null) {
-            Map<String, EObject> discMap = ruleMap.get(ruleName);
+            Map<String, Optional<EObject>> discMap = ruleMap.get(ruleName);
             if (discMap != null && discMap.containsKey(discriminator)) {
-                return targetType.cast(discMap.get(discriminator));
+                // Unwrap Optional - returns null if empty or if value is null
+                Optional<EObject> cached = discMap.get(discriminator);
+                return cached != null ? targetType.cast(cached.orElse(null)) : null;
             }
         }
         return null;
+    }
+
+    /**
+     * Check if a discriminated mapping exists (including null results).
+     *
+     * @param source the source element
+     * @param ruleName the rule name
+     * @param discriminator the discriminator value
+     * @return true if mapping exists (even if cached value is null)
+     */
+    public boolean hasDiscriminatedMapping(
+            EObject source,
+            String ruleName,
+            String discriminator
+    ) {
+        Map<String, Map<String, Optional<EObject>>> ruleMap = discriminatedCache.get(source);
+        if (ruleMap != null) {
+            Map<String, Optional<EObject>> discMap = ruleMap.get(ruleName);
+            return discMap != null && discMap.containsKey(discriminator);
+        }
+        return false;
     }
 
     /**
@@ -223,14 +292,17 @@ public class ElementResolutionCache {
         }
 
         // Add discriminated mappings
-        for (Map.Entry<EObject, Map<String, Map<String, EObject>>> sourceEntry : discriminatedCache.entrySet()) {
+        for (Map.Entry<EObject, Map<String, Map<String, Optional<EObject>>>> sourceEntry : discriminatedCache.entrySet()) {
             EObject source = sourceEntry.getKey();
-            for (Map.Entry<String, Map<String, EObject>> ruleEntry : sourceEntry.getValue().entrySet()) {
+            for (Map.Entry<String, Map<String, Optional<EObject>>> ruleEntry : sourceEntry.getValue().entrySet()) {
                 String ruleName = ruleEntry.getKey();
-                for (Map.Entry<String, EObject> discEntry : ruleEntry.getValue().entrySet()) {
+                for (Map.Entry<String, Optional<EObject>> discEntry : ruleEntry.getValue().entrySet()) {
                     String discriminator = discEntry.getKey();
-                    EObject target = discEntry.getValue();
-                    entries.add(new TraceEntry(source, target, ruleName, discriminator, false));
+                    EObject target = discEntry.getValue().orElse(null);
+                    // Skip null targets in trace export (they represent cached null results)
+                    if (target != null) {
+                        entries.add(new TraceEntry(source, target, ruleName, discriminator, false));
+                    }
                 }
             }
         }
