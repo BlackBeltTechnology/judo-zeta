@@ -325,18 +325,18 @@ The system MUST provide test infrastructure for easy test creation.
 
 ### Performance
 
-- **NFR-001**: Test suite MUST complete in under 30 seconds
-- **NFR-002**: Tests MUST NOT require external resources (files, network, databases)
+- **NFR-001**: The test suite MUST complete in under 30 seconds
+- **NFR-002**: The tests MUST NOT require external resources (files, network, databases)
 
 ### Reliability
 
-- **NFR-003**: Tests MUST be deterministic (no flaky tests)
-- **NFR-004**: Tests MUST be independent (can run in any order)
+- **NFR-003**: The tests MUST be deterministic (no flaky tests)
+- **NFR-004**: The tests MUST be independent (can run in any order)
 
 ### Maintainability
 
-- **NFR-005**: Tests MUST serve as documentation for framework usage
-- **NFR-006**: Test code MUST follow same quality standards as production code
+- **NFR-005**: The tests MUST serve as documentation for framework usage
+- **NFR-006**: The test code MUST follow same quality standards as production code
 
 ## Testing Strategy
 
