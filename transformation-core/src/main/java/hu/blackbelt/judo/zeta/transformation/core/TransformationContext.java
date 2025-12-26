@@ -639,15 +639,18 @@ public class TransformationContext {
     /**
      * Get a discriminated equivalent (for multiple transformations of the same source).
      *
+     * <p>Like {@link #equivalent(EObject, Class)}, this method DOES trigger @Lazy rules
+     * if no existing equivalent is found. This matches Epsilon ETL semantics.</p>
+     *
      * <p>If staging is enabled, the cloned element is staged for later commit
      * and its XMI ID is stored for deferred assignment.</p>
      *
      * @param source the source element
      * @param targetType the expected target type
-     * @param ruleName the rule name
+     * @param ruleName the rule name (for discriminated cache key)
      * @param discriminator the discriminator value
      * @param <T> the target type
-     * @return the discriminated target
+     * @return the discriminated target, or null if no matching rule found
      */
     public <T extends EObject> T equivalentDiscriminated(
             EObject source,
@@ -661,7 +664,7 @@ public class TransformationContext {
             return cached;
         }
 
-        // Get or create base transformation
+        // Get or create base equivalent (triggers @Lazy rules if needed - Epsilon semantics)
         T original = equivalent(source, targetType);
         if (original == null) {
             return null;

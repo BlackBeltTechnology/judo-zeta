@@ -201,7 +201,7 @@ public class ElementResolutionCache {
      * Add a discriminated mapping.
      *
      * @param source the source element
-     * @param target the target element
+     * @param target the target element (null targets are not cached)
      * @param ruleName the rule name
      * @param discriminator the discriminator value
      * @param <T> the target type
@@ -212,6 +212,10 @@ public class ElementResolutionCache {
             String ruleName,
             String discriminator
     ) {
+        // ConcurrentHashMap doesn't allow null keys or values - skip if any are null
+        if (source == null || target == null || ruleName == null || discriminator == null) {
+            return;
+        }
         discriminatedCache
                 .computeIfAbsent(source, k -> new ConcurrentHashMap<>())
                 .computeIfAbsent(ruleName, k -> new ConcurrentHashMap<>())
