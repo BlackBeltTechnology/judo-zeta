@@ -697,6 +697,11 @@ public class TransformationContext {
             return null;
         }
 
+        // If no discriminator, return the original without cloning (ETL semantics)
+        if (discriminator == null) {
+            return original;
+        }
+
         // Clone for discriminated version
         T clone = (T) EcoreUtil.copy(original);
 
