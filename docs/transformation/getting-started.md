@@ -162,7 +162,8 @@ public class TransformationExample {
             extensionRegistry
         );
         context.setTransformationRegistry(registry);
-        context.setTargetPackage(TargetPackage.eINSTANCE);
+        // Note: For generated metamodels, setTargetPackage is optional.
+        // The framework auto-discovers EPackages from generated Java classes.
         
         // 6. Create executor and run transformation
         TransformationExecutor executor = new TransformationExecutor(
@@ -384,6 +385,22 @@ registry.register(Entity2TableTransformations.class);
 registry.register(Namespace2SchemaTransformations.class);
 registry.register(Operation2ProcedureTransformations.class);
 registry.register(Reference2ForeignKeyTransformations.class);
+```
+
+### Package Resolution
+
+For **generated metamodels**, no package registration is needed:
+
+```java
+// EPackage is auto-discovered from the Java class
+Table table = ctx.createTarget(Table.class);
+```
+
+For **dynamic EMF** (runtime-created packages), register and specify explicitly:
+
+```java
+context.registerTargetPackage(dynamicPackage);
+EObject obj = ctx.createTarget(dynamicType, dynamicPackage);
 ```
 
 ### Parallel Execution for Large Models
