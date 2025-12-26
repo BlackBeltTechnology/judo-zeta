@@ -26,4 +26,10 @@ public @interface Constraint {
      * Error message to display when the constraint is violated.
      */
     String message() default "";
+
+    /**
+     * The resource alias to read elements from for validation.
+     * Defaults to "source".
+     */
+    String resourceAlias() default "source";
 }
