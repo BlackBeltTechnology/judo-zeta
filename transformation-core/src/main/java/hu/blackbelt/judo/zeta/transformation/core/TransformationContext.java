@@ -127,6 +127,12 @@ public class TransformationContext {
     private final ConcurrentHashMap<Class<?>, EPackage> discoveredPackageCache = new ConcurrentHashMap<>();
 
     /**
+     * Negative cache for types where EPackage discovery failed.
+     * Prevents repeated discovery attempts for non-generated types.
+     */
+    private final Set<Class<?>> discoveryFailedCache = ConcurrentHashMap.newKeySet();
+
+    /**
      * Wrapper for staged elements with ordering metadata.
      */
     private static class StagedElement {
@@ -299,16 +305,22 @@ public class TransformationContext {
      * @return the discovered EPackage, or null if not a generated class
      */
     private EPackage discoverPackageForType(Class<?> targetType) {
-        // Check cache first
+        // Check positive cache first
         EPackage cached = discoveredPackageCache.get(targetType);
         if (cached != null) {
             return cached;
+        }
+
+        // Check negative cache - don't retry failed discoveries
+        if (discoveryFailedCache.contains(targetType)) {
+            return null;
         }
 
         String typeName = targetType.getSimpleName();
         String javaPackageName = targetType.getPackage() != null ? targetType.getPackage().getName() : null;
 
         if (javaPackageName == null) {
+            discoveryFailedCache.add(targetType);
             return null;
         }
 
@@ -330,6 +342,8 @@ public class TransformationContext {
             // Auto-discovery failed, will fall back to registered packages
         }
 
+        // Cache the failure to avoid repeated discovery attempts
+        discoveryFailedCache.add(targetType);
         return null;
     }
 
