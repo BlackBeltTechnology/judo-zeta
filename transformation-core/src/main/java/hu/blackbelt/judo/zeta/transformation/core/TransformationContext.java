@@ -642,14 +642,14 @@ public class TransformationContext {
      * <p>This matches Epsilon ETL's equivalent("RuleName") semantics:
      * <ul>
      *   <li>Finds the rule by name</li>
-     *   <li>Executes WITHOUT guard check (guards are only for automatic execution)</li>
+     *   <li>Evaluates guard at invocation time</li>
      *   <li>Caches the result</li>
      * </ul></p>
      *
      * @param source the source element
      * @param ruleName the rule name to execute
      * @param <T> the target type
-     * @return the equivalent target, or null if rule not found or doesn't apply
+     * @return the equivalent target, or null if rule not found, doesn't apply, or guard fails
      */
     @SuppressWarnings("unchecked")
     public <T extends EObject> T equivalent(EObject source, String ruleName) {
@@ -669,7 +669,12 @@ public class TransformationContext {
             return null;
         }
 
-        // Execute WITHOUT guard check (ETL semantics - guards are for automatic execution only)
+        // ETL semantics: guards ARE evaluated at invocation time for @lazy rules
+        if (!rule.evaluateGuard(source, this)) {
+            return null;
+        }
+
+        // Execute the rule
         EObject result = rule.execute(source, this);
         if (result != null) {
             resolutionCache.addMapping(source, ruleName, result, rule.isPrimary());
@@ -707,12 +712,12 @@ public class TransformationContext {
             return cached;
         }
 
-        // If ruleName is specified, find and execute that specific rule WITHOUT guard check (ETL semantics)
+        // If ruleName is specified, find and execute that specific rule
         T original = null;
         if (ruleName != null && transformationRegistry != null) {
             TransformRuleDescriptor rule = transformationRegistry.getRuleByName(ruleName);
-            // Note: NO guard check - ETL semantics: guards are for automatic execution only
-            if (rule != null && rule.appliesTo(source)) {
+            // ETL semantics: guards ARE evaluated at invocation time for @lazy rules
+            if (rule != null && rule.appliesTo(source) && rule.evaluateGuard(source, this)) {
                 // Check if already in cache by rule name
                 EObject existing = resolutionCache.getByRule(source, ruleName);
                 if (existing != null && targetType.isInstance(existing)) {
