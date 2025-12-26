@@ -647,7 +647,7 @@ public class TransformationContext {
      * @param ruleName the rule name
      * @param discriminator the discriminator value
      * @param <T> the target type
-     * @return the discriminated target
+     * @return the discriminated target, or null if base transformation returns null
      */
     public <T extends EObject> T equivalentDiscriminated(
             EObject source,
