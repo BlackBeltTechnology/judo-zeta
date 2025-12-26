@@ -203,19 +203,20 @@ public class TransformRuleDescriptor {
      *
      * <p>ETL semantics:</p>
      * <ul>
-     *   <li><b>Non-greedy (default)</b>: Rule matches ONLY elements whose type is exactly
+     *   <li><b>Non-greedy, non-lazy (default)</b>: Rule matches ONLY elements whose type is exactly
      *       the declared sourceType. For interfaces, uses isInstance since EMF generates
      *       implementation classes (e.g., EClassImpl for EClass interface).</li>
-     *   <li><b>Greedy (@Greedy)</b>: Rule matches elements whose type is the declared
-     *       sourceType OR any subtype (kind-of semantics).</li>
+     *   <li><b>Greedy (@Greedy) or Lazy (@Lazy)</b>: Rule matches elements whose type is the declared
+     *       sourceType OR any subtype (kind-of semantics). This allows @Lazy rules to be
+     *       triggered via equivalent() for any matching source element.</li>
      * </ul>
      *
      * @param source the source element to check
      * @return true if this rule should transform the source element
      */
     public boolean appliesTo(EObject source) {
-        if (isGreedy) {
-            // Greedy: Kind-of semantics - matches sourceType and all subtypes
+        if (isGreedy || isLazy) {
+            // Greedy/Lazy: Kind-of semantics - matches sourceType and all subtypes
             return sourceType.isInstance(source);
         } else {
             // Non-greedy: Type-of semantics - matches ONLY the exact declared type
