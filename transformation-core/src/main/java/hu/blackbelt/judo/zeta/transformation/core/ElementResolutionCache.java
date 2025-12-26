@@ -24,6 +24,7 @@ import org.eclipse.emf.ecore.EObject;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * Cache for transformation trace (source → target mappings).
@@ -48,6 +49,9 @@ public class ElementResolutionCache {
     /**
      * Add a mapping from source to target.
      *
+     * <p>Thread-safe: Uses CopyOnWriteArrayList for the type cache lists to allow
+     * concurrent iteration during parallel transformation while adding new mappings.</p>
+     *
      * @param source the source element
      * @param ruleName the transformation rule name
      * @param target the target element
@@ -67,8 +71,9 @@ public class ElementResolutionCache {
                 .put(ruleName, target);
 
         // Add to type cache (for equivalents() by type)
+        // Use CopyOnWriteArrayList for thread-safe iteration during parallel transformation
         typeCache.computeIfAbsent(source, k -> new ConcurrentHashMap<>())
-                .computeIfAbsent(targetTypeName, k -> Collections.synchronizedList(new ArrayList<>()))
+                .computeIfAbsent(targetTypeName, k -> new CopyOnWriteArrayList<>())
                 .add(target);
 
         // Add to primary cache if marked
@@ -99,6 +104,13 @@ public class ElementResolutionCache {
      * Get the equivalent target for a source element.
      * Returns the primary target if available, otherwise the first target of the type.
      *
+     * <p>This method supports type hierarchy lookups. If an EDataType is cached
+     * and EClassifier is requested, the EDataType will be returned since
+     * EDataType extends EClassifier.</p>
+     *
+     * <p>Thread-safe: Uses snapshot-based iteration to avoid ConcurrentModificationException
+     * during parallel transformation.</p>
+     *
      * @param source the source element
      * @param targetType the target type class
      * @param <T> the target type
@@ -107,21 +119,39 @@ public class ElementResolutionCache {
     public <T extends EObject> T getEquivalent(EObject source, Class<T> targetType) {
         String typeName = getTypeName(targetType);
 
-        // Check primary cache first
+        // Check primary cache first (exact match)
         Map<String, EObject> primaryMap = primaryCache.get(source);
         if (primaryMap != null) {
             EObject primary = primaryMap.get(typeName);
             if (primary != null) {
                 return targetType.cast(primary);
             }
+            // Fall back to assignable type check in primary cache
+            // Use snapshot to avoid ConcurrentModificationException
+            for (EObject primary2 : new ArrayList<>(primaryMap.values())) {
+                if (targetType.isInstance(primary2)) {
+                    return targetType.cast(primary2);
+                }
+            }
         }
 
-        // Fall back to first from type cache
+        // Check for assignable types in type cache (e.g., EDataType when requesting EClassifier)
+        // This handles cases where EDataType is cached but EClassifier is requested
         Map<String, List<EObject>> typeMap = typeCache.get(source);
         if (typeMap != null) {
-            List<EObject> targets = typeMap.get(typeName);
-            if (targets != null && !targets.isEmpty()) {
-                return targetType.cast(targets.get(0));
+            // First try exact type match
+            List<EObject> exactTargets = typeMap.get(typeName);
+            if (exactTargets != null && !exactTargets.isEmpty()) {
+                return targetType.cast(exactTargets.get(0));
+            }
+            // Fall back to assignable type check
+            // CopyOnWriteArrayList is already safe for iteration, but we need snapshot of typeMap.values()
+            for (List<EObject> targets : new ArrayList<>(typeMap.values())) {
+                for (EObject target : targets) {
+                    if (targetType.isInstance(target)) {
+                        return targetType.cast(target);
+                    }
+                }
             }
         }
 
@@ -131,29 +161,39 @@ public class ElementResolutionCache {
     /**
      * Get all equivalent targets for a source element of a given type.
      *
+     * <p>This method supports type hierarchy lookups. If an EDataType is cached
+     * and EClassifier is requested, the EDataType will be returned since
+     * EDataType extends EClassifier.</p>
+     *
+     * <p>Thread-safe: Uses snapshot-based iteration to avoid ConcurrentModificationException
+     * during parallel transformation.</p>
+     *
      * @param source the source element
      * @param targetType the target type class
      * @param <T> the target type
-     * @return list of equivalent targets
+     * @return list of equivalent targets (includes subtypes)
      */
-    @SuppressWarnings("unchecked")
     public <T extends EObject> List<T> getEquivalents(EObject source, Class<T> targetType) {
-        String typeName = getTypeName(targetType);
         Map<String, List<EObject>> typeMap = typeCache.get(source);
 
         if (typeMap == null) {
             return Collections.emptyList();
         }
 
-        List<EObject> targets = typeMap.get(typeName);
-        if (targets == null) {
-            return Collections.emptyList();
+        List<T> result = new ArrayList<>();
+        
+        // Check all cached targets for type assignability
+        // This handles cases where EDataType is cached but EClassifier is requested
+        // Use snapshot of typeMap.values() to avoid ConcurrentModificationException
+        for (List<EObject> targets : new ArrayList<>(typeMap.values())) {
+            // CopyOnWriteArrayList is already safe for iteration
+            for (EObject target : targets) {
+                if (targetType.isInstance(target)) {
+                    result.add(targetType.cast(target));
+                }
+            }
         }
-
-        List<T> result = new ArrayList<>(targets.size());
-        for (EObject target : targets) {
-            result.add((T) target);
-        }
+        
         return result;
     }
 
