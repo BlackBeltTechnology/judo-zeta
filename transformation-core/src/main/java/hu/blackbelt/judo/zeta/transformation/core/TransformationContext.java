@@ -647,7 +647,7 @@ public class TransformationContext {
      * @param ruleName the rule name
      * @param discriminator the discriminator value
      * @param <T> the target type
-     * @return the discriminated target
+     * @return the discriminated target, or null if base transformation returns null
      */
     public <T extends EObject> T equivalentDiscriminated(
             EObject source,
@@ -655,15 +655,16 @@ public class TransformationContext {
             String ruleName,
             String discriminator
     ) {
-        // Check discriminated cache first
-        T cached = resolutionCache.getEquivalentDiscriminated(source, targetType, ruleName, discriminator);
-        if (cached != null) {
-            return cached;
+        // Check if already cached (including null results)
+        if (resolutionCache.hasDiscriminatedMapping(source, ruleName, discriminator)) {
+            return resolutionCache.getEquivalentDiscriminated(source, targetType, ruleName, discriminator);
         }
 
         // Get or create base transformation
         T original = equivalent(source, targetType);
         if (original == null) {
+            // Cache the null result to avoid re-execution
+            resolutionCache.addDiscriminatedMapping(source, null, ruleName, discriminator);
             return null;
         }
 

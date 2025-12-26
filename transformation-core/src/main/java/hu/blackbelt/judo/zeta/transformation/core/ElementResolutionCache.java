@@ -26,6 +26,8 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
+import static java.util.Optional.ofNullable;
+
 /**
  * Cache for transformation trace (source → target mappings).
  *
@@ -44,7 +46,8 @@ public class ElementResolutionCache {
     private final Map<EObject, Map<String, EObject>> primaryCache = new ConcurrentHashMap<>();
 
     // Discriminated cache: source → rule name → discriminator → instance
-    private final Map<EObject, Map<String, Map<String, EObject>>> discriminatedCache = new ConcurrentHashMap<>();
+    // Uses Optional to allow caching null results (ConcurrentHashMap doesn't allow null values)
+    private final Map<EObject, Map<String, Map<String, Optional<EObject>>>> discriminatedCache = new ConcurrentHashMap<>();
 
     /**
      * Add a mapping from source to target.
@@ -200,8 +203,10 @@ public class ElementResolutionCache {
     /**
      * Add a discriminated mapping.
      *
+     * <p>Supports caching null results to avoid re-executing lazy rules that return null.</p>
+     *
      * @param source the source element
-     * @param target the target element
+     * @param target the target element (may be null)
      * @param ruleName the rule name
      * @param discriminator the discriminator value
      * @param <T> the target type
@@ -212,10 +217,11 @@ public class ElementResolutionCache {
             String ruleName,
             String discriminator
     ) {
+        // Use Optional to allow caching null results (ConcurrentHashMap doesn't allow null values)
         discriminatedCache
                 .computeIfAbsent(source, k -> new ConcurrentHashMap<>())
                 .computeIfAbsent(ruleName, k -> new ConcurrentHashMap<>())
-                .put(discriminator, target);
+                .put(discriminator, ofNullable(target));
     }
 
     /**
@@ -226,7 +232,7 @@ public class ElementResolutionCache {
      * @param ruleName the rule name
      * @param discriminator the discriminator value
      * @param <T> the target type
-     * @return the cached target, or null if not found
+     * @return the cached target, or null if not found or cached as null
      */
     public <T extends EObject> T getEquivalentDiscriminated(
             EObject source,
@@ -234,14 +240,37 @@ public class ElementResolutionCache {
             String ruleName,
             String discriminator
     ) {
-        Map<String, Map<String, EObject>> ruleMap = discriminatedCache.get(source);
+        Map<String, Map<String, Optional<EObject>>> ruleMap = discriminatedCache.get(source);
         if (ruleMap != null) {
-            Map<String, EObject> discMap = ruleMap.get(ruleName);
+            Map<String, Optional<EObject>> discMap = ruleMap.get(ruleName);
             if (discMap != null && discMap.containsKey(discriminator)) {
-                return targetType.cast(discMap.get(discriminator));
+                // Unwrap Optional - returns null if empty or if value is null
+                Optional<EObject> cached = discMap.get(discriminator);
+                return cached != null ? targetType.cast(cached.orElse(null)) : null;
             }
         }
         return null;
+    }
+
+    /**
+     * Check if a discriminated mapping exists (including null results).
+     *
+     * @param source the source element
+     * @param ruleName the rule name
+     * @param discriminator the discriminator value
+     * @return true if mapping exists (even if cached value is null)
+     */
+    public boolean hasDiscriminatedMapping(
+            EObject source,
+            String ruleName,
+            String discriminator
+    ) {
+        Map<String, Map<String, Optional<EObject>>> ruleMap = discriminatedCache.get(source);
+        if (ruleMap != null) {
+            Map<String, Optional<EObject>> discMap = ruleMap.get(ruleName);
+            return discMap != null && discMap.containsKey(discriminator);
+        }
+        return false;
     }
 
     /**
@@ -263,14 +292,17 @@ public class ElementResolutionCache {
         }
 
         // Add discriminated mappings
-        for (Map.Entry<EObject, Map<String, Map<String, EObject>>> sourceEntry : discriminatedCache.entrySet()) {
+        for (Map.Entry<EObject, Map<String, Map<String, Optional<EObject>>>> sourceEntry : discriminatedCache.entrySet()) {
             EObject source = sourceEntry.getKey();
-            for (Map.Entry<String, Map<String, EObject>> ruleEntry : sourceEntry.getValue().entrySet()) {
+            for (Map.Entry<String, Map<String, Optional<EObject>>> ruleEntry : sourceEntry.getValue().entrySet()) {
                 String ruleName = ruleEntry.getKey();
-                for (Map.Entry<String, EObject> discEntry : ruleEntry.getValue().entrySet()) {
+                for (Map.Entry<String, Optional<EObject>> discEntry : ruleEntry.getValue().entrySet()) {
                     String discriminator = discEntry.getKey();
-                    EObject target = discEntry.getValue();
-                    entries.add(new TraceEntry(source, target, ruleName, discriminator, false));
+                    EObject target = discEntry.getValue().orElse(null);
+                    // Skip null targets in trace export (they represent cached null results)
+                    if (target != null) {
+                        entries.add(new TraceEntry(source, target, ruleName, discriminator, false));
+                    }
                 }
             }
         }
