@@ -95,22 +95,34 @@ class StagingInfrastructureTest {
     }
 
     @Test
-    @DisplayName("createTarget adds directly to resource when staging disabled")
+    @DisplayName("createTarget does not add to resource (ETL semantics)")
     void testCreateTargetWithoutStaging() {
         EClass created = context.createTarget(EClass.class);
-        
+
+        assertNotNull(created);
+        // ETL semantics: createTarget does NOT add to resource
+        assertEquals(0, targetResource.getContents().size());
+    }
+
+    @Test
+    @DisplayName("addToResource adds directly to resource when staging disabled")
+    void testAddToResourceWithoutStaging() {
+        EClass created = context.createTarget(EClass.class);
+        context.addToResource(created);
+
         assertNotNull(created);
         assertEquals(1, targetResource.getContents().size());
         assertSame(created, targetResource.getContents().get(0));
     }
 
     @Test
-    @DisplayName("createTarget stages element when staging enabled")
+    @DisplayName("addToResource stages element when staging enabled")
     void testCreateTargetWithStaging() {
         context.enableStaging();
-        
+
         EClass created = context.createTarget(EClass.class);
-        
+        context.addToResource(created);
+
         assertNotNull(created);
         assertEquals(0, targetResource.getContents().size(), "Element should not be in resource yet");
         assertEquals(1, context.getStagedElementCount());
@@ -120,15 +132,17 @@ class StagingInfrastructureTest {
     @DisplayName("commitStagedElements adds staged elements to resource")
     void testCommitStagedElements() {
         context.enableStaging();
-        
+
         EClass created1 = context.createTarget(EClass.class);
         EClass created2 = context.createTarget(EClass.class);
-        
+        context.addToResource(created1);
+        context.addToResource(created2);
+
         assertEquals(0, targetResource.getContents().size());
         assertEquals(2, context.getStagedElementCount());
-        
+
         context.commitStagedElements();
-        
+
         assertEquals(2, targetResource.getContents().size());
         assertEquals(0, context.getStagedElementCount());
     }
@@ -137,16 +151,19 @@ class StagingInfrastructureTest {
     @DisplayName("Commit maintains deterministic ordering by creation sequence")
     void testCommitMaintainsOrder() {
         context.enableStaging();
-        
+
         EClass first = context.createTarget(EClass.class);
         first.setName("First");
         EClass second = context.createTarget(EClass.class);
         second.setName("Second");
         EClass third = context.createTarget(EClass.class);
         third.setName("Third");
-        
+        context.addToResource(first);
+        context.addToResource(second);
+        context.addToResource(third);
+
         context.commitStagedElements();
-        
+
         assertEquals(3, targetResource.getContents().size());
         assertEquals("First", ((EClass) targetResource.getContents().get(0)).getName());
         assertEquals("Second", ((EClass) targetResource.getContents().get(1)).getName());
@@ -157,15 +174,18 @@ class StagingInfrastructureTest {
     @DisplayName("Element sequence tracking")
     void testElementSequenceTracking() {
         context.enableStaging();
-        
+
         EClass first = context.createTarget(EClass.class);
         EClass second = context.createTarget(EClass.class);
         EClass third = context.createTarget(EClass.class);
-        
+        context.addToResource(first);
+        context.addToResource(second);
+        context.addToResource(third);
+
         long seq1 = context.getElementSequence(first);
         long seq2 = context.getElementSequence(second);
         long seq3 = context.getElementSequence(third);
-        
+
         assertTrue(seq1 < seq2, "First element should have lower sequence");
         assertTrue(seq2 < seq3, "Second element should have lower sequence than third");
     }
@@ -174,14 +194,16 @@ class StagingInfrastructureTest {
     @DisplayName("clearStagedElements removes all staged elements")
     void testClearStagedElements() {
         context.enableStaging();
-        
-        context.createTarget(EClass.class);
-        context.createTarget(EClass.class);
-        
+
+        EClass c1 = context.createTarget(EClass.class);
+        EClass c2 = context.createTarget(EClass.class);
+        context.addToResource(c1);
+        context.addToResource(c2);
+
         assertEquals(2, context.getStagedElementCount());
-        
+
         context.clearStagedElements();
-        
+
         assertEquals(0, context.getStagedElementCount());
     }
 
@@ -189,15 +211,17 @@ class StagingInfrastructureTest {
     @DisplayName("clearElementOrder resets sequence counter")
     void testClearElementOrder() {
         context.enableStaging();
-        
+
         EClass first = context.createTarget(EClass.class);
+        context.addToResource(first);
         long seq1 = context.getElementSequence(first);
-        
+
         context.clearElementOrder();
-        
+
         EClass second = context.createTarget(EClass.class);
+        context.addToResource(second);
         long seq2 = context.getElementSequence(second);
-        
+
         // After clear, sequence should restart
         assertEquals(seq1, seq2, "Sequence should restart after clear");
     }
@@ -230,21 +254,22 @@ class StagingInfrastructureTest {
     @DisplayName("Contained elements are not added to resource contents")
     void testContainedElementsNotAddedToContents() {
         context.enableStaging();
-        
+
         EClass parent = context.createTarget(EClass.class);
         parent.setName("Parent");
-        
+        context.addToResource(parent);
+
         // Create a contained element (EAttribute is contained in EClass)
         org.eclipse.emf.ecore.EAttribute attr = EcoreFactory.eINSTANCE.createEAttribute();
         attr.setName("attr");
         parent.getEStructuralFeatures().add(attr);
-        
+
         context.commitStagedElements();
-        
+
         // Only the parent should be in contents
         assertEquals(1, targetResource.getContents().size());
         assertSame(parent, targetResource.getContents().get(0));
-        
+
         // But the attribute should still be accessible
         assertEquals(1, parent.getEStructuralFeatures().size());
     }

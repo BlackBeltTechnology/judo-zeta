@@ -230,15 +230,17 @@ class TransformationDeterminismTest {
         @Timeout(30)
         void sequentialAndParallelProduceSameElementCount() throws Exception {
             int elementCount = 100;
-            
+
             Resource seqResource = runSequentialTransformation(elementCount, (ctx, i) -> {
                 EClass element = ctx.createTarget(EClass.class);
                 element.setName("Element_" + String.format("%04d", i));
+                ctx.addToResource(element);
             });
-            
+
             Resource parResource = runParallelTransformation(elementCount, (ctx, i) -> {
                 EClass element = ctx.createTarget(EClass.class);
                 element.setName("Element_" + String.format("%04d", i));
+                ctx.addToResource(element);
             });
             
             assertEquals(seqResource.getContents().size(), parResource.getContents().size(),
@@ -250,17 +252,19 @@ class TransformationDeterminismTest {
         @Timeout(30)
         void sequentialAndParallelProduceEqualElements() throws Exception {
             int elementCount = 50;
-            
+
             Resource seqResource = runSequentialTransformation(elementCount, (ctx, i) -> {
                 EClass element = ctx.createTarget(EClass.class);
                 element.setName("Class_" + String.format("%04d", i));
                 element.setAbstract(i % 2 == 0);
+                ctx.addToResource(element);
             });
-            
+
             Resource parResource = runParallelTransformation(elementCount, (ctx, i) -> {
                 EClass element = ctx.createTarget(EClass.class);
                 element.setName("Class_" + String.format("%04d", i));
                 element.setAbstract(i % 2 == 0);
+                ctx.addToResource(element);
             });
             
             // Get sorted names for comparison (order may differ due to parallelism)
@@ -275,25 +279,27 @@ class TransformationDeterminismTest {
         @Timeout(30)
         void sequentialAndParallelProduceSameXmiOutput() throws Exception {
             int elementCount = 50;
-            
+
             // Use simple sequential creation for deterministic baseline
             TransformationContext seqContext = createContext();
             for (int i = 0; i < elementCount; i++) {
                 EClass element = seqContext.createTarget(EClass.class);
                 element.setName("Element_" + String.format("%04d", i));
+                seqContext.addToResource(element);
             }
             Resource seqResource = seqContext.getTargetResourceSet().getResources().get(0);
-            
+
             // Run same transformation in parallel with staging
             TransformationContext parContext = createContext();
             parContext.enableStaging();
-            
+
             // Create in order to match sequential (single-threaded "parallel" for comparison)
             for (int i = 0; i < elementCount; i++) {
                 EClass element = parContext.createTarget(EClass.class);
                 element.setName("Element_" + String.format("%04d", i));
+                parContext.addToResource(element);
             }
-            
+
             parContext.commitStagedElements();
             Resource parResource = parContext.getTargetResourceSet().getResources().get(0);
             
@@ -308,19 +314,21 @@ class TransformationDeterminismTest {
         @Timeout(30)
         void sequentialAndParallelPreserveProperties() throws Exception {
             int elementCount = 30;
-            
+
             Resource seqResource = runSequentialTransformation(elementCount, (ctx, i) -> {
                 EClass element = ctx.createTarget(EClass.class);
                 element.setName("Class_" + i);
                 element.setAbstract(i % 3 == 0);
                 element.setInterface(i % 5 == 0);
+                ctx.addToResource(element);
             });
-            
+
             Resource parResource = runParallelTransformation(elementCount, (ctx, i) -> {
                 EClass element = ctx.createTarget(EClass.class);
                 element.setName("Class_" + i);
                 element.setAbstract(i % 3 == 0);
                 element.setInterface(i % 5 == 0);
+                ctx.addToResource(element);
             });
             
             // Count abstract classes
@@ -344,17 +352,19 @@ class TransformationDeterminismTest {
         @Timeout(30)
         void multipleParallelRunsProduceSameOutput() throws Exception {
             int elementCount = 100;
-            
+
             // First parallel run
             Resource run1 = runParallelTransformation(elementCount, (ctx, i) -> {
                 EClass element = ctx.createTarget(EClass.class);
                 element.setName("Element_" + String.format("%04d", i));
+                ctx.addToResource(element);
             });
-            
+
             // Second parallel run
             Resource run2 = runParallelTransformation(elementCount, (ctx, i) -> {
                 EClass element = ctx.createTarget(EClass.class);
                 element.setName("Element_" + String.format("%04d", i));
+                ctx.addToResource(element);
             });
             
             assertEquals(run1.getContents().size(), run2.getContents().size(),
@@ -388,6 +398,7 @@ class TransformationDeterminismTest {
                             startLatch.await();
                             EClass element = context.createTarget(EClass.class);
                             element.setName("Element_" + String.format("%04d", index));
+                            context.addToResource(element);
                         } catch (Exception e) {
                             // Ignore
                         } finally {
@@ -428,14 +439,16 @@ class TransformationDeterminismTest {
             for (int i = 0; i < elementCount; i++) {
                 EClass element = ctx1.createTarget(EClass.class);
                 element.setName("Element_" + String.format("%04d", i));
+                ctx1.addToResource(element);
             }
             ctx1.commitStagedElements();
-            
+
             TransformationContext ctx2 = createContext();
             ctx2.enableStaging();
             for (int i = 0; i < elementCount; i++) {
                 EClass element = ctx2.createTarget(EClass.class);
                 element.setName("Element_" + String.format("%04d", i));
+                ctx2.addToResource(element);
             }
             ctx2.commitStagedElements();
             
@@ -473,7 +486,8 @@ class TransformationDeterminismTest {
                             EPackage pkg = context.createTarget(EPackage.class);
                             pkg.setName("Package_" + String.format("%02d", pkgIndex));
                             pkg.setNsURI("http://test/" + pkgIndex);
-                            
+                            context.addToResource(pkg);
+
                             for (int c = 0; c < classesPerPackage; c++) {
                                 EClass cls = EcoreFactory.eINSTANCE.createEClass();
                                 cls.setName("Class_" + pkgIndex + "_" + c);
@@ -486,14 +500,14 @@ class TransformationDeterminismTest {
                         }
                     });
                 }
-                
+
                 startLatch.countDown();
                 assertTrue(doneLatch.await(30, TimeUnit.SECONDS));
-                
+
                 context.commitStagedElements();
-                
+
                 Resource resource = context.getTargetResourceSet().getResources().get(0);
-                
+
                 // Only packages should be root elements (classes are contained)
                 assertEquals(packageCount, resource.getContents().size(),
                         "Only root packages should be in contents");
@@ -536,7 +550,8 @@ class TransformationDeterminismTest {
                             EPackage pkg = context.createTarget(EPackage.class);
                             pkg.setName("Package_" + String.format("%02d", pkgIndex));
                             pkg.setNsURI("http://deep/" + pkgIndex);
-                            
+                            context.addToResource(pkg);
+
                             for (int c = 0; c < classesPerPackage; c++) {
                                 // Level 2: Class
                                 EClass cls = EcoreFactory.eINSTANCE.createEClass();
@@ -606,8 +621,9 @@ class TransformationDeterminismTest {
             for (int i = 0; i < elementCount; i++) {
                 EClass element = context.createTarget(EClass.class);
                 element.setName("Element_" + String.format("%04d", i));
+                context.addToResource(element);
             }
-            
+
             context.commitStagedElements();
             
             Resource resource = context.getTargetResourceSet().getResources().get(0);
@@ -635,7 +651,8 @@ class TransformationDeterminismTest {
             EPackage pkg = context.createTarget(EPackage.class);
             pkg.setName("TestPackage");
             pkg.setNsURI("http://test/ordering");
-            
+            context.addToResource(pkg);
+
             // Add classes in specific order
             for (int i = 0; i < 10; i++) {
                 EClass cls = EcoreFactory.eINSTANCE.createEClass();
@@ -671,19 +688,21 @@ class TransformationDeterminismTest {
         @Timeout(120)
         void largeModelSequentialParallelEquivalence() throws Exception {
             int elementCount = 10000;
-            
+
             // Sequential baseline
             TransformationContext seqContext = createContext();
             for (int i = 0; i < elementCount; i++) {
                 EClass element = seqContext.createTarget(EClass.class);
                 element.setName("LargeElement_" + String.format("%05d", i));
+                seqContext.addToResource(element);
             }
             Resource seqResource = seqContext.getTargetResourceSet().getResources().get(0);
-            
+
             // Parallel with staging
             Resource parResource = runParallelTransformation(elementCount, (ctx, i) -> {
                 EClass element = ctx.createTarget(EClass.class);
                 element.setName("LargeElement_" + String.format("%05d", i));
+                ctx.addToResource(element);
             });
             
             assertEquals(seqResource.getContents().size(), parResource.getContents().size(),
@@ -701,21 +720,23 @@ class TransformationDeterminismTest {
         @Timeout(120)
         void largeModelXmiDeterminism() throws Exception {
             int elementCount = 5000;
-            
+
             // Two staged runs with same creation order
             TransformationContext ctx1 = createContext();
             ctx1.enableStaging();
             for (int i = 0; i < elementCount; i++) {
                 EClass element = ctx1.createTarget(EClass.class);
                 element.setName("Large_" + String.format("%05d", i));
+                ctx1.addToResource(element);
             }
             ctx1.commitStagedElements();
-            
+
             TransformationContext ctx2 = createContext();
             ctx2.enableStaging();
             for (int i = 0; i < elementCount; i++) {
                 EClass element = ctx2.createTarget(EClass.class);
                 element.setName("Large_" + String.format("%05d", i));
+                ctx2.addToResource(element);
             }
             ctx2.commitStagedElements();
             
@@ -749,7 +770,8 @@ class TransformationDeterminismTest {
                             EPackage pkg = context.createTarget(EPackage.class);
                             pkg.setName("Package_" + String.format("%03d", pkgIndex));
                             pkg.setNsURI("http://large/" + pkgIndex);
-                            
+                            context.addToResource(pkg);
+
                             for (int c = 0; c < classesPerPackage; c++) {
                                 EClass cls = EcoreFactory.eINSTANCE.createEClass();
                                 cls.setName("Class_" + pkgIndex + "_" + c);
@@ -762,14 +784,14 @@ class TransformationDeterminismTest {
                         }
                     });
                 }
-                
+
                 startLatch.countDown();
                 assertTrue(doneLatch.await(60, TimeUnit.SECONDS));
-                
+
                 context.commitStagedElements();
-                
+
                 Resource resource = context.getTargetResourceSet().getResources().get(0);
-                
+
                 assertEquals(packageCount, resource.getContents().size(),
                         "Should have correct package count");
                 
@@ -796,12 +818,13 @@ class TransformationDeterminismTest {
         @Timeout(30)
         void repeatedSerializationProducesIdenticalBytes() throws Exception {
             TransformationContext context = createContext();
-            
+
             for (int i = 0; i < 20; i++) {
                 EClass element = context.createTarget(EClass.class);
                 element.setName("Element_" + i);
+                context.addToResource(element);
             }
-            
+
             Resource resource = context.getTargetResourceSet().getResources().get(0);
             
             byte[] xmi1 = serializeToXmi(resource);
@@ -817,20 +840,22 @@ class TransformationDeterminismTest {
         @Timeout(30)
         void stagedVsDirectCreationProduceSameXmi() throws Exception {
             int elementCount = 30;
-            
+
             // Direct creation
             TransformationContext directCtx = createContext();
             for (int i = 0; i < elementCount; i++) {
                 EClass element = directCtx.createTarget(EClass.class);
                 element.setName("Test_" + String.format("%03d", i));
+                directCtx.addToResource(element);
             }
-            
+
             // Staged creation
             TransformationContext stagedCtx = createContext();
             stagedCtx.enableStaging();
             for (int i = 0; i < elementCount; i++) {
                 EClass element = stagedCtx.createTarget(EClass.class);
                 element.setName("Test_" + String.format("%03d", i));
+                stagedCtx.addToResource(element);
             }
             stagedCtx.commitStagedElements();
             
@@ -864,7 +889,8 @@ class TransformationDeterminismTest {
             TransformationContext context = createContext();
             EClass element = context.createTarget(EClass.class);
             element.setName("TestElement");
-            
+            context.addToResource(element);
+
             Resource resource = context.getTargetResourceSet().getResources().get(0);
             byte[] xmi = serializeToXmi(resource);
             

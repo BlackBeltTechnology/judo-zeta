@@ -253,14 +253,27 @@ class ResourceAliasTest {
         }
 
         @Test
-        @DisplayName("createTarget() should add to target resource")
-        void createTargetShouldAddToTargetResource() {
+        @DisplayName("createTarget() should NOT add to target resource (ETL semantics)")
+        void createTargetShouldNotAddToTargetResource() {
             // When
             EClass created = context.createTarget(EClass.class);
 
+            // Then - ETL semantics: createTarget does NOT add to resource
+            assertNotNull(created, "Should create element");
+            assertEquals(0, targetResource.getContents().size(),
+                "Target resource should be empty (ETL semantics)");
+        }
+
+        @Test
+        @DisplayName("addToResource() should add to target resource")
+        void addToResourceShouldAddToTargetResource() {
+            // When
+            EClass created = context.createTarget(EClass.class);
+            context.addToResource(created);
+
             // Then
             assertNotNull(created, "Should create element");
-            assertEquals(1, targetResource.getContents().size(), 
+            assertEquals(1, targetResource.getContents().size(),
                 "Target resource should contain the created element");
             assertSame(created, targetResource.getContents().get(0));
         }
