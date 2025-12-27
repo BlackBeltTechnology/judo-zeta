@@ -35,13 +35,16 @@ public class Entity2TableTransformations {
         return (entity, ctx) -> {
             Table table = ctx.createTarget(Table.class);
             table.setName(entity.getName());
-            
-            // Transform related elements
+
+            // Add as root element (tables are top-level in target model)
+            ctx.addToResource(table);
+
+            // Transform related elements (columns are contained by table)
             for (Attribute attr : entity.getAttributes()) {
                 Column column = ctx.equivalent(attr, Column.class);
-                table.getColumns().add(column);
+                table.getColumns().add(column);  // Contained, no addToResource needed
             }
-            
+
             return table;
         };
     }
@@ -49,6 +52,7 @@ public class Entity2TableTransformations {
     @TransformRule(name = "Attribute2Column")
     public TransformFunction<Attribute, Column> attribute2Column() {
         return (attr, ctx) -> {
+            // Columns are contained by tables, no addToResource needed
             Column column = ctx.createTarget(Column.class);
             column.setName(attr.getName());
             column.setType(mapType(attr.getType()));
@@ -107,7 +111,7 @@ trace.saveToJson(new File("trace.json"));
 
 | Annotation | Description |
 |------------|-------------|
-| `@Lazy` | Rule executes on-demand via `equivalent()` calls |
+| `@Lazy` | Rule executes on-demand via `equivalent()` calls (kind-of semantics) |
 | `@Abstract` | Rule only executes via `executeParentRule()` |
 | `@Primary` | Rule's result takes precedence in `equivalent()` |
 | `@Greedy` | Matches source type AND all subtypes |
@@ -144,6 +148,8 @@ public TransformFunction<EntityType, Table> entityType2Table() {
         Table table = ctx.executeParentRule("BaseNamedElement", entity);
         // Add entity-specific logic
         table.setSchema(ctx.equivalent(entity.getNamespace(), Schema.class));
+        // Add as root element
+        ctx.addToResource(table);
         return table;
     };
 }
@@ -158,6 +164,7 @@ public TransformFunction<NamedElement, NamedType> namedElement2NamedType() {
     return (source, ctx) -> {
         NamedType type = ctx.createTarget(NamedType.class);
         type.setName(source.getName());
+        ctx.addToResource(type);  // Add as root element
         return type;
     };
 }
@@ -193,6 +200,7 @@ public TransformFunction<EntityType, Table> abstractEntity2Table() {
         // Only executes for abstract entities
         Table table = ctx.createTarget(Table.class);
         table.setAbstract(true);
+        ctx.addToResource(table);
         return table;
     };
 }
@@ -200,6 +208,34 @@ public TransformFunction<EntityType, Table> abstractEntity2Table() {
 private boolean isAbstract(EObject element, TransformationContext ctx) {
     return ((EntityType) element).isAbstract();
 }
+```
+
+**Guard evaluation timing (ETL semantics):**
+- For **non-lazy rules**: Guards are evaluated during initial scheduling
+- For **@Lazy rules**: Guards are evaluated at invocation time (when `equivalent()` is called)
+
+### Lazy Rules and equivalent()
+
+`@Lazy` rules are not executed during the initial transformation pass. Instead, they are triggered on-demand via `equivalent()` calls:
+
+```java
+@TransformRule(name = "Entity2AuditLog")
+@Lazy
+@Guard(method = "needsAudit")
+public TransformFunction<EntityType, AuditLog> entity2AuditLog() {
+    return (entity, ctx) -> {
+        AuditLog log = ctx.createTarget(AuditLog.class);
+        log.setEntityName(entity.getName());
+        ctx.addToResource(log);  // Add as root element
+        return log;
+    };
+}
+
+// Trigger lazy rule by name
+AuditLog log = ctx.equivalent(entity, "Entity2AuditLog");
+
+// Or by target type (finds matching lazy rule)
+AuditLog log = ctx.equivalent(entity, AuditLog.class);
 ```
 
 ### Resource Aliases and Multi-Model Transformations
@@ -231,6 +267,7 @@ public TransformFunction<EntityType, Table> entity2Table() {
     return (entity, ctx) -> {
         Table table = ctx.create(Table.class);
         table.setName(entity.getName());
+        ctx.addToResource(table);  // Add as root element
         return table;
     };
 }
@@ -249,14 +286,15 @@ public MultiSourceTransformFunction<Table> entityMappingToTable() {
     return (sources, ctx) -> {
         EntityType entity = (EntityType) sources[0];
         TypeMapping mapping = (TypeMapping) sources[1];
-        
+
         // Skip non-matching combinations
         if (!mapping.getSourceTypeName().equals(entity.getName())) {
             return null;
         }
-        
+
         Table table = ctx.create(Table.class);
         table.setName(mapping.getTargetTableName());
+        ctx.addToResource(table);  // Add as root element
         return table;
     };
 }
@@ -337,6 +375,7 @@ When writing transformation rules that will execute in parallel:
 
 **Safe Operations (DO):**
 - Create new target elements via `ctx.createTarget()`
+- Add root elements via `ctx.addToResource()` (thread-safe with staging)
 - Set properties on elements you created
 - Reference elements obtained via `ctx.equivalent()`
 - Read from source elements (source model is read-only)
@@ -356,20 +395,23 @@ public TransformFunction<EntityType, Table> entityType2Table() {
     return (entity, ctx) -> {
         // Safe: create new target element
         Table table = ctx.createTarget(Table.class);
-        
+
         // Safe: set properties on our created element
         table.setName(entity.getName());
-        
+
+        // Safe: add root element to resource (thread-safe with staging)
+        ctx.addToResource(table);
+
         // Safe: get equivalent (thread-safe lazy execution)
         Schema schema = ctx.equivalent(entity.getNamespace(), Schema.class);
         table.setSchema(schema);
-        
+
         // Safe: read from source and transform children
         for (Attribute attr : entity.getAttributes()) {
             Column column = ctx.equivalent(attr, Column.class);
             table.getColumns().add(column);
         }
-        
+
         return table;
     };
 }
@@ -422,12 +464,47 @@ TransformationResult result2 = executor.transform(sourceElements2);
 
 The Zeta framework faithfully implements Epsilon ETL semantics for the following behaviors:
 
+### Element Creation (createTarget vs addToResource)
+
+Following ETL semantics, `createTarget()` creates elements **without** adding them to the resource root. Elements become part of the target model when:
+
+1. They are set as containment references of other elements, OR
+2. They are explicitly added as root elements via `addToResource()`
+
+```java
+@TransformRule(name = "Package2Schema")
+public TransformFunction<EPackage, Schema> package2Schema() {
+    return (pkg, ctx) -> {
+        // Create schema - NOT added to resource yet
+        Schema schema = ctx.createTarget(Schema.class);
+        schema.setName(pkg.getName());
+
+        // Explicitly add as root element
+        ctx.addToResource(schema);
+
+        // Create tables - will be contained by schema, no addToResource needed
+        for (EClass cls : pkg.getEClassifiers()) {
+            Table table = ctx.createTarget(Table.class);
+            table.setName(cls.getName());
+            schema.getTables().add(table);  // Contained by schema
+        }
+
+        return schema;
+    };
+}
+```
+
+**Key methods:**
+- `createTarget(Class<T>)` - Creates element without adding to resource
+- `addToResource(EObject)` - Explicitly adds element as resource root
+- `create(Class<T>)` - Alias for createTarget (ETL compatibility)
+
 ### Type Matching
 
 **Non-greedy rules (default)**: Match ONLY the exact declared source type.
 
 ```java
-// This rule matches ONLY EClass elements, not EDataType 
+// This rule matches ONLY EClass elements, not EDataType
 // (even though both extend EClassifier)
 @TransformRule(name = "EClassOnly")
 @Transform(type = EClass.class)
@@ -442,6 +519,16 @@ public TransformFunction<EClass, Table> eClassOnly() { ... }
 @Transform(type = EClassifier.class)
 @Greedy
 public TransformFunction<EClassifier, Type> allClassifiers() { ... }
+```
+
+**Lazy rules (@Lazy)**: Also use kind-of semantics to allow triggering via `equivalent()` for any matching source.
+
+```java
+// This @Lazy rule can be triggered for EClass AND all subtypes
+@TransformRule(name = "LazyClassifier")
+@Transform(type = EClassifier.class)
+@Lazy
+public TransformFunction<EClassifier, Type> lazyClassifier() { ... }
 ```
 
 ### Rule Execution Order
@@ -515,6 +602,7 @@ public TransformFunction<EClass, Table> childB() {
 | `extends ParentRule` | `@Extends("ParentRule")` |
 | `guard: e.isAbstract()` | `@Guard(method = "guardMethod")` |
 | `e.equivalent()` | `ctx.equivalent(e, TargetType.class)` |
+| `e.equivalent("RuleName")` | `ctx.equivalent(e, "RuleName")` |
 | `e.equivalents()` | `ctx.equivalents(e, TargetType.class)` |
 | `pre { ... }` | `@PreExecution` |
 | `post { ... }` | `@PostExecution` |
