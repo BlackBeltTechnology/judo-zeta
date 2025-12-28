@@ -484,6 +484,148 @@ class ETLSemanticsTest {
         }
     }
 
+    // ==================== Guard Failure Tests ====================
+
+    @Nested
+    @DisplayName("Guard Failure Handling")
+    class GuardFailureTests {
+
+        /**
+         * ETL Semantics: When a guard fails, equivalent() returns null without NPE.
+         */
+        @Test
+        @DisplayName("equivalent(source, ruleName) returns null when guard fails")
+        void equivalentByRuleNameReturnsNullWhenGuardFails() {
+            EClass testClass = createEClass("NonAbstractClass");
+            testClass.setAbstract(false); // Guard will fail
+
+            registry.register(GuardedLazyTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            // Should return null without throwing NPE
+            EPackage result = assertDoesNotThrow(() ->
+                context.equivalent(testClass, "AbstractOnly"));
+
+            assertNull(result, "Should return null when guard fails");
+            assertEquals(0, executionCount.get(), "Rule should not execute when guard fails");
+        }
+
+        /**
+         * ETL Semantics: When a guard fails, equivalentDiscriminated() returns null without NPE.
+         */
+        @Test
+        @DisplayName("equivalentDiscriminated returns null when guard fails")
+        void equivalentDiscriminatedReturnsNullWhenGuardFails() {
+            EClass testClass = createEClass("NonAbstractClass");
+            testClass.setAbstract(false); // Guard will fail
+
+            registry.register(GuardedLazyTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            // Should return null without throwing NPE
+            EPackage result = assertDoesNotThrow(() ->
+                context.equivalentDiscriminated(testClass, EPackage.class, "AbstractOnly", "testDisc"));
+
+            assertNull(result, "Should return null when guard fails");
+            assertEquals(0, executionCount.get(), "Rule should not execute when guard fails");
+        }
+
+        /**
+         * ETL Semantics: Guard passes, rule executes successfully.
+         */
+        @Test
+        @DisplayName("equivalent(source, ruleName) executes rule when guard passes")
+        void equivalentByRuleNameExecutesWhenGuardPasses() {
+            EClass testClass = createEClass("AbstractClass");
+            testClass.setAbstract(true); // Guard will pass
+
+            registry.register(GuardedLazyTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            EPackage result = context.equivalent(testClass, "AbstractOnly");
+
+            assertNotNull(result, "Should return result when guard passes");
+            assertEquals("AbstractClass", result.getName());
+            assertEquals(1, executionCount.get(), "Rule should execute when guard passes");
+        }
+
+        /**
+         * ETL Semantics: equivalentDiscriminated with passing guard creates discriminated clone.
+         */
+        @Test
+        @DisplayName("equivalentDiscriminated creates clone when guard passes")
+        void equivalentDiscriminatedCreatesCloneWhenGuardPasses() {
+            EClass testClass = createEClass("AbstractClass");
+            testClass.setAbstract(true); // Guard will pass
+
+            registry.register(GuardedLazyTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            EPackage result1 = context.equivalentDiscriminated(testClass, EPackage.class, "AbstractOnly", "disc1");
+            EPackage result2 = context.equivalentDiscriminated(testClass, EPackage.class, "AbstractOnly", "disc2");
+
+            assertNotNull(result1);
+            assertNotNull(result2);
+            assertNotSame(result1, result2, "Discriminated equivalents should be different instances");
+            assertEquals(1, executionCount.get(), "Rule should execute only once (cached)");
+        }
+
+        /**
+         * Verify no NPE when calling equivalentDiscriminated with unknown rule name.
+         */
+        @Test
+        @DisplayName("equivalentDiscriminated returns null for unknown rule without NPE")
+        void equivalentDiscriminatedReturnsNullForUnknownRule() {
+            EClass testClass = createEClass("TestClass");
+
+            registry.register(GuardedLazyTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            EPackage result = assertDoesNotThrow(() ->
+                context.equivalentDiscriminated(testClass, EPackage.class, "NonExistentRule", "disc"));
+
+            assertNull(result, "Should return null for unknown rule");
+        }
+
+        /**
+         * Verify no NPE when calling equivalent(source, ruleName) with unknown rule name.
+         */
+        @Test
+        @DisplayName("equivalent(source, ruleName) returns null for unknown rule without NPE")
+        void equivalentByRuleNameReturnsNullForUnknownRule() {
+            EClass testClass = createEClass("TestClass");
+
+            registry.register(GuardedLazyTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            EPackage result = assertDoesNotThrow(() ->
+                context.equivalent(testClass, "NonExistentRule"));
+
+            assertNull(result, "Should return null for unknown rule");
+        }
+    }
+
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
+    public static class GuardedLazyTransformation {
+        @TransformRule(name = "AbstractOnly")
+        @Transform(type = EClass.class)
+        @Lazy
+        @Guard(method = "isAbstract")
+        public TransformFunction<EClass, EPackage> abstractOnly() {
+            return (source, ctx) -> {
+                executionCount.incrementAndGet();
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setName(source.getName());
+                ctx.addToResource(pkg);
+                return pkg;
+            };
+        }
+
+        public boolean isAbstract(EObject element, TransformationContext ctx) {
+            return element instanceof EClass && ((EClass) element).isAbstract();
+        }
+    }
+
     // ==================== Multiple Rules Same Source Tests ====================
 
     @Nested

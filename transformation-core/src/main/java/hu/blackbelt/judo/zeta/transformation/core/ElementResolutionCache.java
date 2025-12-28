@@ -64,6 +64,10 @@ public class ElementResolutionCache {
             T target,
             boolean isPrimary
     ) {
+        // ConcurrentHashMap doesn't allow null keys or values - skip if any are null
+        if (source == null || ruleName == null || target == null) {
+            return;
+        }
         String targetTypeName = target.eClass().getName();
 
         // Add to rule cache (for idempotent equivalent() calls)
@@ -93,6 +97,10 @@ public class ElementResolutionCache {
      */
     @SuppressWarnings("unchecked")
     public <T extends EObject> T getByRule(EObject source, String ruleName) {
+        // ConcurrentHashMap doesn't allow null keys
+        if (source == null || ruleName == null) {
+            return null;
+        }
         Map<String, EObject> ruleMap = ruleCache.get(source);
         if (ruleMap != null) {
             return (T) ruleMap.get(ruleName);
@@ -238,6 +246,10 @@ public class ElementResolutionCache {
             String ruleName,
             String discriminator
     ) {
+        // ConcurrentHashMap doesn't allow null keys
+        if (source == null || ruleName == null || discriminator == null) {
+            return null;
+        }
         Map<String, Map<String, EObject>> ruleMap = discriminatedCache.get(source);
         if (ruleMap != null) {
             Map<String, EObject> discMap = ruleMap.get(ruleName);
