@@ -180,6 +180,35 @@ public class TransformationContext {
         }
     }
 
+    /**
+     * Key for tracking named rule executions to prevent infinite recursion.
+     */
+    private static class NamedRuleKey {
+        final EObject source;
+        final String ruleName;
+
+        NamedRuleKey(EObject source, String ruleName) {
+            this.source = source;
+            this.ruleName = ruleName;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            NamedRuleKey that = (NamedRuleKey) o;
+            return Objects.equals(source, that.source) && Objects.equals(ruleName, that.ruleName);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(source, ruleName);
+        }
+    }
+
+    // Thread-local set to track in-progress named rule executions (prevents recursion)
+    private final ThreadLocal<Set<NamedRuleKey>> inProgressNamedRules = ThreadLocal.withInitial(HashSet::new);
+
     public TransformationContext(
             ModelProvider modelProvider,
             ResourceSet sourceResourceSet,
@@ -696,12 +725,32 @@ public class TransformationContext {
             return null;
         }
 
-        // Execute the rule
-        EObject result = rule.execute(source, this);
-        if (result != null) {
-            resolutionCache.addMapping(source, ruleName, result, rule.isPrimary());
+        // Check for recursion - if we're already executing this rule for this source
+        NamedRuleKey ruleKey = new NamedRuleKey(source, ruleName);
+        Set<NamedRuleKey> inProgress = inProgressNamedRules.get();
+        if (inProgress.contains(ruleKey)) {
+            // Recursive call detected - return null to break the cycle
+            return null;
         }
-        return (T) result;
+
+        // Mark as in-progress and execute the rule
+        inProgress.add(ruleKey);
+        try {
+            // Double-check cache after marking in-progress
+            cached = resolutionCache.getByRule(source, ruleName);
+            if (cached != null) {
+                return (T) cached;
+            }
+
+            // Execute the rule
+            EObject result = rule.execute(source, this);
+            if (result != null) {
+                resolutionCache.addMapping(source, ruleName, result, rule.isPrimary());
+            }
+            return (T) result;
+        } finally {
+            inProgress.remove(ruleKey);
+        }
     }
 
     /**
@@ -745,13 +794,33 @@ public class TransformationContext {
                 if (existing != null && targetType.isInstance(existing)) {
                     original = (T) existing;
                 } else {
-                    // Execute the specific rule
-                    EObject result = rule.execute(source, this);
-                    if (result != null) {
-                        resolutionCache.addMapping(source, ruleName, result, rule.isPrimary());
-                        if (targetType.isInstance(result)) {
-                            original = (T) result;
+                    // Check for recursion - if we're already executing this rule for this source
+                    NamedRuleKey ruleKey = new NamedRuleKey(source, ruleName);
+                    Set<NamedRuleKey> inProgress = inProgressNamedRules.get();
+                    if (inProgress.contains(ruleKey)) {
+                        // Recursive call detected - return null to break the cycle
+                        return null;
+                    }
+
+                    // Mark as in-progress and execute the rule
+                    inProgress.add(ruleKey);
+                    try {
+                        // Double-check cache after marking in-progress
+                        existing = resolutionCache.getByRule(source, ruleName);
+                        if (existing != null && targetType.isInstance(existing)) {
+                            original = (T) existing;
+                        } else {
+                            // Execute the specific rule
+                            EObject result = rule.execute(source, this);
+                            if (result != null) {
+                                resolutionCache.addMapping(source, ruleName, result, rule.isPrimary());
+                                if (targetType.isInstance(result)) {
+                                    original = (T) result;
+                                }
+                            }
                         }
+                    } finally {
+                        inProgress.remove(ruleKey);
                     }
                 }
             }

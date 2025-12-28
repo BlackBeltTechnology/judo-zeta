@@ -603,6 +603,84 @@ class ETLSemanticsTest {
 
             assertNull(result, "Should return null for unknown rule");
         }
+
+        /**
+         * Verify no StackOverflowError when rule calls equivalentDiscriminated recursively.
+         */
+        @Test
+        @DisplayName("equivalentDiscriminated prevents infinite recursion")
+        void equivalentDiscriminatedPreventsInfiniteRecursion() {
+            EClass testClass = createEClass("RecursiveClass");
+
+            registry.register(RecursiveTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            // Should not throw StackOverflowError
+            EPackage result = assertDoesNotThrow(() ->
+                context.equivalentDiscriminated(testClass, EPackage.class, "RecursiveRule", "disc1"));
+
+            // Result should be non-null (rule executed once)
+            assertNotNull(result, "Should return result despite recursive call");
+            assertEquals(1, executionCount.get(), "Rule should execute only once");
+        }
+
+        /**
+         * Verify no StackOverflowError when rule calls equivalent(source, ruleName) recursively.
+         */
+        @Test
+        @DisplayName("equivalent(source, ruleName) prevents infinite recursion")
+        void equivalentByRuleNamePreventsInfiniteRecursion() {
+            EClass testClass = createEClass("RecursiveClass");
+
+            registry.register(RecursiveEquivalentTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            // Should not throw StackOverflowError
+            EPackage result = assertDoesNotThrow(() ->
+                context.equivalent(testClass, "RecursiveEquivalentRule"));
+
+            // Result should be non-null (rule executed once)
+            assertNotNull(result, "Should return result despite recursive call");
+            assertEquals(1, executionCount.get(), "Rule should execute only once");
+        }
+    }
+
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
+    public static class RecursiveTransformation {
+        @TransformRule(name = "RecursiveRule")
+        @Transform(type = EClass.class)
+        @Lazy
+        public TransformFunction<EClass, EPackage> recursiveRule() {
+            return (source, ctx) -> {
+                executionCount.incrementAndGet();
+                // This would cause infinite recursion without protection
+                EPackage recursive = ctx.equivalentDiscriminated(source, EPackage.class, "RecursiveRule", "nested");
+
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setName(source.getName());
+                ctx.addToResource(pkg);
+                return pkg;
+            };
+        }
+    }
+
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
+    public static class RecursiveEquivalentTransformation {
+        @TransformRule(name = "RecursiveEquivalentRule")
+        @Transform(type = EClass.class)
+        @Lazy
+        public TransformFunction<EClass, EPackage> recursiveEquivalentRule() {
+            return (source, ctx) -> {
+                executionCount.incrementAndGet();
+                // This would cause infinite recursion without protection
+                EPackage recursive = ctx.equivalent(source, "RecursiveEquivalentRule");
+
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setName(source.getName());
+                ctx.addToResource(pkg);
+                return pkg;
+            };
+        }
     }
 
     @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
