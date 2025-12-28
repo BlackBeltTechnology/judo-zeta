@@ -140,6 +140,13 @@ public class TransformationContext {
     private final Set<Class<?>> discoveryFailedCache = ConcurrentHashMap.newKeySet();
 
     /**
+     * When true, createTarget() automatically adds root elements to the target resource.
+     * This provides convenience at the cost of strict ETL semantics compliance.
+     * Default is false (ETL semantics - explicit addToResource() required).
+     */
+    private volatile boolean autoAddRootElements = false;
+
+    /**
      * Wrapper for staged elements with ordering metadata.
      */
     private static class StagedElement {
@@ -304,6 +311,29 @@ public class TransformationContext {
      */
     public List<EPackage> getTargetPackages() {
         return Collections.unmodifiableList(new ArrayList<>(targetPackages));
+    }
+
+    /**
+     * Enable or disable automatic root element addition.
+     *
+     * <p>When enabled, {@link #createTarget(Class)} automatically adds created
+     * elements to the target resource (legacy behavior). When disabled (default),
+     * you must explicitly call {@link #addToResource(EObject)} for root elements
+     * (strict ETL semantics).</p>
+     *
+     * @param autoAdd true to automatically add root elements, false for ETL semantics
+     */
+    public void setAutoAddRootElements(boolean autoAdd) {
+        this.autoAddRootElements = autoAdd;
+    }
+
+    /**
+     * Check if automatic root element addition is enabled.
+     *
+     * @return true if createTarget() automatically adds to resource
+     */
+    public boolean isAutoAddRootElements() {
+        return autoAddRootElements;
     }
 
     /**
@@ -556,9 +586,12 @@ public class TransformationContext {
     /**
      * Internal method to create a target element in a specific package.
      *
-     * <p>ETL semantics: Elements are NOT added to resource root automatically.
+     * <p>ETL semantics (default): Elements are NOT added to resource root automatically.
      * They become part of the model when assigned to containment references.
      * Only true root elements should be explicitly added via {@link #addToResource(EObject)}.</p>
+     *
+     * <p>When {@link #setAutoAddRootElements(boolean)} is set to true, elements are
+     * automatically added to the resource (legacy behavior for convenience).</p>
      */
     @SuppressWarnings("unchecked")
     private <T extends EObject> T createTargetInPackage(Class<T> targetType, EPackage pkg) {
@@ -572,7 +605,12 @@ public class TransformationContext {
 
         EObject instance = pkg.getEFactoryInstance().create(eClass);
 
-        // ETL semantics: do NOT add to resource root automatically
+        // When autoAddRootElements is enabled, automatically add to resource
+        // This restores legacy behavior for convenience
+        if (autoAddRootElements) {
+            addToResource(instance);
+        }
+        // Otherwise ETL semantics: do NOT add to resource root automatically
         // Elements become part of the model when assigned to containment references
         // Use addToResource() explicitly for true root elements
 

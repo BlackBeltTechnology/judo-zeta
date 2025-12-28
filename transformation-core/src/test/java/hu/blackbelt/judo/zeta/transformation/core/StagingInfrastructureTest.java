@@ -294,12 +294,61 @@ class StagingInfrastructureTest {
     void testTransformationExceptionToString() {
         EClass element = EcoreFactory.eINSTANCE.createEClass();
         element.setName("TestClass");
-        
+
         TransformationException ex = new TransformationException(
                 "Error", element, "MyRule");
-        
+
         String str = ex.toString();
         assertTrue(str.contains("MyRule"), "Should contain rule name");
         assertTrue(str.contains("EClass"), "Should contain element type");
+    }
+
+    @Test
+    @DisplayName("autoAddRootElements is disabled by default")
+    void testAutoAddRootElementsDisabledByDefault() {
+        assertFalse(context.isAutoAddRootElements());
+    }
+
+    @Test
+    @DisplayName("createTarget does not add to resource when autoAddRootElements is false")
+    void testCreateTargetDoesNotAddWhenAutoAddDisabled() {
+        context.setAutoAddRootElements(false);
+
+        EClass created = context.createTarget(EClass.class);
+
+        assertNotNull(created);
+        assertEquals(0, targetResource.getContents().size(),
+                "Element should NOT be in resource when autoAddRootElements is false");
+    }
+
+    @Test
+    @DisplayName("createTarget adds to resource when autoAddRootElements is true")
+    void testCreateTargetAddsWhenAutoAddEnabled() {
+        context.setAutoAddRootElements(true);
+
+        EClass created = context.createTarget(EClass.class);
+
+        assertNotNull(created);
+        assertEquals(1, targetResource.getContents().size(),
+                "Element should be in resource when autoAddRootElements is true");
+        assertSame(created, targetResource.getContents().get(0));
+    }
+
+    @Test
+    @DisplayName("autoAddRootElements works with staging enabled")
+    void testAutoAddRootElementsWithStaging() {
+        context.setAutoAddRootElements(true);
+        context.enableStaging();
+
+        EClass created = context.createTarget(EClass.class);
+
+        // With staging, element should be staged, not in resource yet
+        assertEquals(0, targetResource.getContents().size());
+        assertEquals(1, context.getStagedElementCount());
+
+        context.commitStagedElements();
+
+        assertEquals(1, targetResource.getContents().size());
+        assertSame(created, targetResource.getContents().get(0));
     }
 }
