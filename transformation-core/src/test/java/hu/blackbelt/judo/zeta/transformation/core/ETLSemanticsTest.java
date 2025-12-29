@@ -918,6 +918,51 @@ class ETLSemanticsTest {
             // Should not throw and should work correctly
             assertDoesNotThrow(() -> executor.transform());
         }
+
+        /**
+         * ETL Semantics: Diamond inheritance - common ancestor executes only once.
+         *
+         *        A (common ancestor)
+         *       / \
+         *      B   C
+         *       \ /
+         *        D (child extends both B and C)
+         */
+        @Test
+        @DisplayName("Diamond inheritance - common ancestor executes only once")
+        void diamondInheritanceCommonAncestorExecutesOnce() {
+            createEClass("Entity");
+            executionLog.clear();
+
+            registry.register(DiamondInheritanceTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            // Common ancestor A should execute only ONCE (not twice)
+            long ancestorCount = executionLog.stream().filter(s -> s.equals("Ancestor")).count();
+            long leftCount = executionLog.stream().filter(s -> s.equals("Left")).count();
+            long rightCount = executionLog.stream().filter(s -> s.equals("Right")).count();
+            long diamondCount = executionLog.stream().filter(s -> s.equals("Diamond")).count();
+
+            assertEquals(1, ancestorCount, "Common ancestor should execute only once");
+            assertEquals(1, leftCount, "Left branch should execute once");
+            assertEquals(1, rightCount, "Right branch should execute once");
+            assertEquals(1, diamondCount, "Diamond child should execute once");
+
+            // All should share the same target instance
+            assertEquals(4, capturedInstances.size(), "All 4 rules should capture the target");
+            EObject first = capturedInstances.get(0);
+            for (EObject instance : capturedInstances) {
+                assertSame(first, instance, "All rules should share same target instance");
+            }
+        }
     }
 
     @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
@@ -1068,6 +1113,73 @@ class ETLSemanticsTest {
                 // Explicit call still works for backward compatibility
                 EPackage pkg = ctx.executeParentRule("ExplicitParent", source);
                 pkg.setNsPrefix("explicit_child");
+                ctx.addToResource(pkg);
+                return pkg;
+            };
+        }
+    }
+
+    /**
+     * Diamond inheritance test:
+     *
+     *      Ancestor (A)
+     *       /     \
+     *    Left(B)  Right(C)
+     *       \     /
+     *      Diamond(D)
+     */
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
+    public static class DiamondInheritanceTransformation {
+
+        @TransformRule(name = "Ancestor")
+        @Transform(type = EClass.class)
+        @Abstract
+        public TransformFunction<EClass, EPackage> ancestor() {
+            return (source, ctx) -> {
+                executionLog.add("Ancestor");
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                capturedInstances.add(pkg);
+                pkg.setName(source.getName());
+                return pkg;
+            };
+        }
+
+        @TransformRule(name = "Left")
+        @Transform(type = EClass.class)
+        @Abstract
+        @Extends("Ancestor")
+        public TransformFunction<EClass, EPackage> left() {
+            return (source, ctx) -> {
+                executionLog.add("Left");
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                capturedInstances.add(pkg);
+                pkg.setNsPrefix("left");
+                return pkg;
+            };
+        }
+
+        @TransformRule(name = "Right")
+        @Transform(type = EClass.class)
+        @Abstract
+        @Extends("Ancestor")
+        public TransformFunction<EClass, EPackage> right() {
+            return (source, ctx) -> {
+                executionLog.add("Right");
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                capturedInstances.add(pkg);
+                pkg.setNsURI("http://right");
+                return pkg;
+            };
+        }
+
+        @TransformRule(name = "Diamond")
+        @Transform(type = EClass.class)
+        @Extends({"Left", "Right"})
+        public TransformFunction<EClass, EPackage> diamond() {
+            return (source, ctx) -> {
+                executionLog.add("Diamond");
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                capturedInstances.add(pkg);
                 ctx.addToResource(pkg);
                 return pkg;
             };
