@@ -216,6 +216,21 @@ public class TransformationContext {
     // Thread-local set to track in-progress named rule executions (prevents recursion)
     private final ThreadLocal<Set<NamedRuleKey>> inProgressNamedRules = ThreadLocal.withInitial(HashSet::new);
 
+    /**
+     * Thread-local pre-created target for @Extends inheritance.
+     * When executing a child rule with @Extends, the framework pre-creates the target
+     * of the child's type, then passes it through the inheritance chain.
+     * All rules in the chain receive this via createTarget() instead of creating new instances.
+     */
+    private final ThreadLocal<EObject> preCreatedTarget = new ThreadLocal<>();
+
+    /**
+     * Thread-local flag indicating we're executing an @Extends inheritance chain.
+     * During this phase, createTarget() returns the pre-created target if compatible.
+     * This applies to BOTH parent rules AND the child rule in the chain.
+     */
+    private final ThreadLocal<Boolean> inInheritanceExecution = ThreadLocal.withInitial(() -> false);
+
     public TransformationContext(
             ModelProvider modelProvider,
             ResourceSet sourceResourceSet,
@@ -592,9 +607,23 @@ public class TransformationContext {
      *
      * <p>When {@link #setAutoAddRootElements(boolean)} is set to true, elements are
      * automatically added to the resource (legacy behavior for convenience).</p>
+     *
+     * <p><b>@Extends inheritance:</b> During parent rule execution, if a pre-created target
+     * exists and is compatible with the requested type, it is returned instead of creating
+     * a new instance. This enables ETL-style inheritance where parent rules operate on the
+     * same target instance as child rules.</p>
      */
     @SuppressWarnings("unchecked")
     private <T extends EObject> T createTargetInPackage(Class<T> targetType, EPackage pkg) {
+        // During @Extends inheritance execution, return pre-created target if compatible
+        // This enables ETL-style inheritance: all rules in the chain share the same target
+        if (Boolean.TRUE.equals(inInheritanceExecution.get())) {
+            EObject preCreated = preCreatedTarget.get();
+            if (preCreated != null && targetType.isInstance(preCreated)) {
+                return targetType.cast(preCreated);
+            }
+        }
+
         String typeName = targetType.getSimpleName();
         EClass eClass = (EClass) pkg.getEClassifier(typeName);
 
@@ -942,6 +971,62 @@ public class TransformationContext {
             resolutionCache.addMapping(source, parentRuleName, result, parentRule.isPrimary());
         }
         return (T) result;
+    }
+
+    // ==================== @Extends Inheritance Support ====================
+
+    /**
+     * Set the pre-created target for @Extends inheritance chain execution.
+     * Called by TransformRuleDescriptor before executing parent rules.
+     *
+     * @param target the pre-created target (child's type)
+     */
+    void setPreCreatedTarget(EObject target) {
+        preCreatedTarget.set(target);
+    }
+
+    /**
+     * Get the pre-created target for the current inheritance chain.
+     *
+     * @return the pre-created target, or null if not in inheritance execution
+     */
+    EObject getPreCreatedTarget() {
+        return preCreatedTarget.get();
+    }
+
+    /**
+     * Clear the pre-created target after inheritance chain execution.
+     */
+    void clearPreCreatedTarget() {
+        preCreatedTarget.remove();
+    }
+
+    /**
+     * Set whether we're currently executing an @Extends inheritance chain.
+     * When true, createTarget() returns the pre-created target if compatible.
+     *
+     * @param executing true during inheritance chain execution
+     */
+    void setInInheritanceExecution(boolean executing) {
+        inInheritanceExecution.set(executing);
+    }
+
+    /**
+     * Check if we're currently executing an @Extends inheritance chain.
+     *
+     * @return true if in inheritance chain execution
+     */
+    boolean isInInheritanceExecution() {
+        return Boolean.TRUE.equals(inInheritanceExecution.get());
+    }
+
+    /**
+     * Get the transformation registry.
+     *
+     * @return the transformation registry
+     */
+    public TransformationRegistry getTransformationRegistry() {
+        return transformationRegistry;
     }
 
     /**

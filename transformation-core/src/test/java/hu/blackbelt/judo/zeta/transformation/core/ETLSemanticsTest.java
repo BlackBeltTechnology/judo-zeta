@@ -774,6 +774,306 @@ class ETLSemanticsTest {
         }
     }
 
+    // ==================== Automatic @Extends Inheritance Tests ====================
+
+    @Nested
+    @DisplayName("Automatic @Extends Inheritance (ETL Semantics)")
+    class AutomaticExtendsTests {
+
+        /**
+         * ETL Semantics: Parent rule's body executes automatically before child rule.
+         * No explicit executeParentRule() call needed.
+         */
+        @Test
+        @DisplayName("Parent rule executes automatically - no explicit call needed")
+        void parentRuleExecutesAutomatically() {
+            createEClass("Entity");
+            executionLog.clear();
+
+            registry.register(AutomaticExtendsTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            // Parent should execute BEFORE child (automatic)
+            assertTrue(executionLog.contains("AutoParent"), "Parent should execute automatically");
+            assertTrue(executionLog.contains("AutoChild"), "Child should execute");
+            int parentIndex = executionLog.indexOf("AutoParent");
+            int childIndex = executionLog.indexOf("AutoChild");
+            assertTrue(parentIndex < childIndex, "Parent should execute BEFORE child");
+        }
+
+        /**
+         * ETL Semantics: Parent and child operate on the SAME target instance.
+         * Child's target type is created, parent's createTarget() returns that instance.
+         */
+        @Test
+        @DisplayName("Parent and child share the same target instance")
+        void parentAndChildShareSameTarget() {
+            createEClass("Entity");
+            capturedInstances.clear();
+
+            registry.register(SharedTargetTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            assertEquals(2, capturedInstances.size(), "Both parent and child should capture instance");
+            assertSame(capturedInstances.get(0), capturedInstances.get(1),
+                    "Parent and child should operate on SAME target instance");
+        }
+
+        /**
+         * ETL Semantics: Parent initializes common properties, child adds specific ones.
+         */
+        @Test
+        @DisplayName("Parent initializes properties, child adds to them")
+        void parentInitializesChildAdds() {
+            EClass source = createEClass("TestEntity");
+
+            registry.register(PropertyInheritanceTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            // Get the result from target resource
+            Resource targetResource = targetResourceSet.getResources().get(0);
+            assertEquals(1, targetResource.getContents().size());
+            EPackage result = (EPackage) targetResource.getContents().get(0);
+
+            // Parent should have set name, child should have set nsPrefix
+            assertEquals("TestEntity", result.getName(), "Name should be set by parent");
+            assertEquals("child_prefix", result.getNsPrefix(), "NsPrefix should be set by child");
+            assertEquals("http://child.nsuri", result.getNsURI(), "NsURI should be set by child");
+        }
+
+        /**
+         * ETL Semantics: Multi-level inheritance chain (grandparent → parent → child).
+         */
+        @Test
+        @DisplayName("Multi-level inheritance chain executes in order")
+        void multiLevelInheritanceChain() {
+            createEClass("Entity");
+            executionLog.clear();
+
+            registry.register(MultiLevelExtendsTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            // All three should execute in order: Grandparent → Parent → Child
+            assertTrue(executionLog.contains("Grandparent"), "Grandparent should execute");
+            assertTrue(executionLog.contains("Parent"), "Parent should execute");
+            assertTrue(executionLog.contains("Child"), "Child should execute");
+
+            int grandparentIndex = executionLog.indexOf("Grandparent");
+            int parentIndex = executionLog.indexOf("Parent");
+            int childIndex = executionLog.indexOf("Child");
+
+            assertTrue(grandparentIndex < parentIndex, "Grandparent before Parent");
+            assertTrue(parentIndex < childIndex, "Parent before Child");
+        }
+
+        /**
+         * Backward compatibility: Explicit executeParentRule() still works.
+         */
+        @Test
+        @DisplayName("Explicit executeParentRule() still works for backward compatibility")
+        void explicitParentRuleStillWorks() {
+            createEClass("Entity");
+
+            registry.register(ExplicitParentCallTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            // Should not throw and should work correctly
+            assertDoesNotThrow(() -> executor.transform());
+        }
+    }
+
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
+    public static class AutomaticExtendsTransformation {
+        @TransformRule(name = "AutoParent")
+        @Transform(type = EClass.class)
+        @Abstract
+        public TransformFunction<EClass, EPackage> autoParent() {
+            return (source, ctx) -> {
+                executionLog.add("AutoParent");
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setName(source.getName());
+                return pkg;
+            };
+        }
+
+        @TransformRule(name = "AutoChild")
+        @Transform(type = EClass.class)
+        @Extends("AutoParent")
+        public TransformFunction<EClass, EPackage> autoChild() {
+            return (source, ctx) -> {
+                executionLog.add("AutoChild");
+                // NO explicit executeParentRule() call - framework does it automatically
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setNsPrefix("child_" + source.getName());
+                ctx.addToResource(pkg);
+                return pkg;
+            };
+        }
+    }
+
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
+    public static class SharedTargetTransformation {
+        @TransformRule(name = "SharedParent")
+        @Transform(type = EClass.class)
+        @Abstract
+        public TransformFunction<EClass, EPackage> sharedParent() {
+            return (source, ctx) -> {
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                capturedInstances.add(pkg); // Capture in parent
+                pkg.setName(source.getName());
+                return pkg;
+            };
+        }
+
+        @TransformRule(name = "SharedChild")
+        @Transform(type = EClass.class)
+        @Extends("SharedParent")
+        public TransformFunction<EClass, EPackage> sharedChild() {
+            return (source, ctx) -> {
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                capturedInstances.add(pkg); // Capture in child - should be SAME instance
+                pkg.setNsPrefix("child");
+                ctx.addToResource(pkg);
+                return pkg;
+            };
+        }
+    }
+
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
+    public static class PropertyInheritanceTransformation {
+        @TransformRule(name = "PropertyParent")
+        @Transform(type = EClass.class)
+        @Abstract
+        public TransformFunction<EClass, EPackage> propertyParent() {
+            return (source, ctx) -> {
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                // Parent sets common properties
+                pkg.setName(source.getName());
+                return pkg;
+            };
+        }
+
+        @TransformRule(name = "PropertyChild")
+        @Transform(type = EClass.class)
+        @Extends("PropertyParent")
+        public TransformFunction<EClass, EPackage> propertyChild() {
+            return (source, ctx) -> {
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                // Child adds specific properties (name already set by parent)
+                pkg.setNsPrefix("child_prefix");
+                pkg.setNsURI("http://child.nsuri");
+                ctx.addToResource(pkg);
+                return pkg;
+            };
+        }
+    }
+
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
+    public static class MultiLevelExtendsTransformation {
+        @TransformRule(name = "GrandparentRule")
+        @Transform(type = EClass.class)
+        @Abstract
+        public TransformFunction<EClass, EPackage> grandparent() {
+            return (source, ctx) -> {
+                executionLog.add("Grandparent");
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setName("grandparent_" + source.getName());
+                return pkg;
+            };
+        }
+
+        @TransformRule(name = "ParentRule")
+        @Transform(type = EClass.class)
+        @Abstract
+        @Extends("GrandparentRule")
+        public TransformFunction<EClass, EPackage> parent() {
+            return (source, ctx) -> {
+                executionLog.add("Parent");
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setNsPrefix("parent_prefix");
+                return pkg;
+            };
+        }
+
+        @TransformRule(name = "ChildRule")
+        @Transform(type = EClass.class)
+        @Extends("ParentRule")
+        public TransformFunction<EClass, EPackage> child() {
+            return (source, ctx) -> {
+                executionLog.add("Child");
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setNsURI("http://child.uri");
+                ctx.addToResource(pkg);
+                return pkg;
+            };
+        }
+    }
+
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
+    public static class ExplicitParentCallTransformation {
+        @TransformRule(name = "ExplicitParent")
+        @Transform(type = EClass.class)
+        @Abstract
+        public TransformFunction<EClass, EPackage> explicitParent() {
+            return (source, ctx) -> {
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setName(source.getName());
+                return pkg;
+            };
+        }
+
+        @TransformRule(name = "ExplicitChild")
+        @Transform(type = EClass.class)
+        @Extends("ExplicitParent")
+        public TransformFunction<EClass, EPackage> explicitChild() {
+            return (source, ctx) -> {
+                // Explicit call still works for backward compatibility
+                EPackage pkg = ctx.executeParentRule("ExplicitParent", source);
+                pkg.setNsPrefix("explicit_child");
+                ctx.addToResource(pkg);
+                return pkg;
+            };
+        }
+    }
+
     /**
      * Simple ModelProvider implementation for tests.
      */

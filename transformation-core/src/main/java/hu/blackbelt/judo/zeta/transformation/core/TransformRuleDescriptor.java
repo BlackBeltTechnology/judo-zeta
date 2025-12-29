@@ -409,13 +409,128 @@ public class TransformRuleDescriptor {
     /**
      * Execute this rule on a single source element.
      *
+     * <p><b>@Extends inheritance (ETL semantics):</b> When this rule has @Extends annotations,
+     * the framework automatically:</p>
+     * <ol>
+     *   <li>Pre-creates a target instance of this rule's target type</li>
+     *   <li>Executes all parent rules first (in declaration order), passing the pre-created target</li>
+     *   <li>Executes this rule's transform function</li>
+     * </ol>
+     *
+     * <p>Parent rules receive the pre-created target via {@code ctx.createTarget()}, which returns
+     * the existing instance instead of creating a new one. This enables code reuse through
+     * inheritance - parent rules initialize common properties, child rules add specifics.</p>
+     *
      * @param source the source element
      * @param context the transformation context
      * @return the target element
      * @throws IllegalStateException if called on a multi-source rule
      */
     public EObject execute(EObject source, TransformationContext context) {
+        // Check if this rule extends parent rules
+        if (!extendsRules.isEmpty() && context.getTransformationRegistry() != null) {
+            return executeWithInheritance(source, context);
+        }
+
+        // No inheritance - execute normally
         return getFunction().transform(source, context);
+    }
+
+    /**
+     * Execute rule with @Extends inheritance chain.
+     * Pre-creates target, executes parents first, then this rule.
+     *
+     * <p>The target is created ONCE (of the child's type) and shared across the entire
+     * inheritance chain. Parent rules' createTarget() calls return this shared instance.</p>
+     *
+     * <p>Multi-level inheritance is supported: if a parent also has @Extends, its parents
+     * are executed first (recursively), all sharing the same pre-created target.</p>
+     */
+    private EObject executeWithInheritance(EObject source, TransformationContext context) {
+        // Check if already in inheritance execution (nested @Extends)
+        if (context.isInInheritanceExecution()) {
+            // We're being called as a parent in a chain
+            // First execute OUR parents recursively, then our own function
+            executeParentRulesInChain(source, context);
+            return getFunction().transform(source, context);
+        }
+
+        // Pre-create target of THIS rule's type (most derived)
+        // We need to create it directly to avoid side effects, then set inheritance mode
+        EObject target = createTargetDirectly(context);
+
+        try {
+            // Set pre-created target and enable inheritance mode for entire chain
+            context.setPreCreatedTarget(target);
+            context.setInInheritanceExecution(true);
+
+            // Execute all parent rules first (in order)
+            // Parent rules will get the pre-created target via createTarget()
+            executeParentRulesInChain(source, context);
+
+            // Now execute this rule (child) - still in inheritance mode so
+            // its createTarget() returns the same pre-created target
+            return getFunction().transform(source, context);
+
+        } finally {
+            // Clean up
+            context.clearPreCreatedTarget();
+            context.setInInheritanceExecution(false);
+        }
+    }
+
+    /**
+     * Execute parent rules in the inheritance chain.
+     * Handles multi-level inheritance by recursively calling execute() on parents.
+     */
+    private void executeParentRulesInChain(EObject source, TransformationContext context) {
+        if (extendsRules.isEmpty()) {
+            return;
+        }
+
+        TransformationRegistry registry = context.getTransformationRegistry();
+        ElementResolutionCache cache = context.getElementResolutionCache();
+
+        for (String parentRuleName : extendsRules) {
+            // Check if parent was already executed (idempotency)
+            EObject cached = cache.getByRule(source, parentRuleName);
+            if (cached != null) {
+                continue; // Parent already executed, skip
+            }
+
+            TransformRuleDescriptor parentRule = registry.getRuleByName(parentRuleName);
+            if (parentRule != null) {
+                // Execute parent - this handles recursive @Extends
+                // If parent also has @Extends, executeWithInheritance detects we're in chain
+                // and recursively executes the grandparent first
+                EObject result = parentRule.execute(source, context);
+
+                // Cache the result for idempotency
+                if (result != null) {
+                    cache.addMapping(source, parentRuleName, result, parentRule.isPrimary());
+                }
+            }
+        }
+    }
+
+    /**
+     * Create target instance directly without going through TransformationContext.createTarget().
+     * This avoids side effects like auto-adding to resource during pre-creation.
+     */
+    private EObject createTargetDirectly(TransformationContext context) {
+        String typeName = targetType.getSimpleName();
+
+        // Try to find the EPackage for this target type
+        for (org.eclipse.emf.ecore.EPackage pkg : context.getTargetPackages()) {
+            org.eclipse.emf.ecore.EClassifier classifier = pkg.getEClassifier(typeName);
+            if (classifier instanceof org.eclipse.emf.ecore.EClass) {
+                return pkg.getEFactoryInstance().create((org.eclipse.emf.ecore.EClass) classifier);
+            }
+        }
+
+        // Fallback: use context.createTarget() and accept side effects
+        // This handles auto-discovered packages
+        return context.createTarget(targetType);
     }
 
     /**
