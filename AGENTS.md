@@ -313,6 +313,24 @@ try {
 | `ElementResolutionCache` | Thread-safe ConcurrentHashMap-based cache |
 | `TransformationTrace` | JSON-exportable source→target mapping |
 
+### Transformation Annotations
+
+| Annotation | Description |
+|------------|-------------|
+| `@TransformationContext` | Marks a class as containing transformation rules |
+| `@TransformRule` | Defines a transformation rule method |
+| `@Lazy` | Rule executes on-demand via `equivalent()` calls |
+| `@Abstract` | Rule only executes via parent rule inheritance |
+| `@Primary` | Rule's result takes precedence in `equivalent()` |
+| `@Greedy` | Matches source type AND all subtypes |
+| `@Extends` | Inherits from parent rules (automatic execution) |
+| `@Guard` | Conditional execution based on guard method |
+| `@Detached` | Output NOT added to Resource.contents (caller adds to container) |
+| `@Transform` | Specifies source type and resource alias |
+| `@To` | Specifies target type and resource alias |
+| `@PreExecution` | Method runs before transformation starts |
+| `@PostExecution` | Method runs after transformation completes |
+
 ### Dependency Resolution
 
 The framework topologically sorts rules based on `@Satisfies` annotations:

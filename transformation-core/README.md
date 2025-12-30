@@ -115,8 +115,9 @@ trace.saveToJson(new File("trace.json"));
 | `@Abstract` | Rule only executes via `executeParentRule()` |
 | `@Primary` | Rule's result takes precedence in `equivalent()` |
 | `@Greedy` | Matches source type AND all subtypes |
-| `@Extends` | Inherits from parent rules |
+| `@Extends` | Inherits from parent rules (automatic execution) |
 | `@Guard` | Conditional execution based on guard method |
+| `@Detached` | Output NOT added to Resource.contents (caller adds to container) |
 
 ### Lifecycle Hooks
 
@@ -237,6 +238,46 @@ AuditLog log = ctx.equivalent(entity, "Entity2AuditLog");
 // Or by target type (finds matching lazy rule)
 AuditLog log = ctx.equivalent(entity, AuditLog.class);
 ```
+
+### Detached Rules (@Detached)
+
+`@Detached` marks lazy rules whose output should NOT be added to `Resource.contents`. The caller is responsible for adding the object to its proper container:
+
+```java
+@TransformRule(name = "TableRowCallAction")
+@Lazy
+@Detached  // Output NOT added to Resource.contents
+public TransformFunction<OperationForm, Action> tableRowCallAction() {
+    return (source, ctx) -> {
+        Action target = ctx.createTarget(Action.class);
+        target.setName(source.getName() + "::TableRowCallAction");
+        // Will NOT be added to Resource because @Detached
+        return target;
+    };
+}
+
+// Usage: caller retrieves and adds to container
+@TransformRule(name = "Form2Page")
+public TransformFunction<Form, Page> form2Page() {
+    return (form, ctx) -> {
+        Page page = ctx.createTarget(Page.class);
+        page.setName(form.getName());
+
+        // Get detached action via equivalentDiscriminated
+        Action action = ctx.equivalentDiscriminated(
+            form, Action.class, "TableRowCallAction", "relation1");
+        action.setName(action.getName() + "::MyRelation");
+
+        // Caller adds to container (NOT Resource.contents)
+        page.getActions().add(action);
+
+        ctx.addToResource(page);
+        return page;
+    };
+}
+```
+
+Use `@Detached` for objects that should only exist within a parent container (e.g., Actions within PageDefinition.actions), not at the resource root.
 
 ### Resource Aliases and Multi-Model Transformations
 
@@ -601,6 +642,7 @@ public TransformFunction<EClass, Table> childB() {
 | `@greedy` | `@Greedy` |
 | `extends ParentRule` | `@Extends("ParentRule")` |
 | `guard: e.isAbstract()` | `@Guard(method = "guardMethod")` |
+| Lazy rule (output not in Resource) | `@Lazy @Detached` |
 | `e.equivalent()` | `ctx.equivalent(e, TargetType.class)` |
 | `e.equivalent("RuleName")` | `ctx.equivalent(e, "RuleName")` |
 | `e.equivalents()` | `ctx.equivalents(e, TargetType.class)` |
