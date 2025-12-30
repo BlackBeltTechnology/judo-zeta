@@ -193,6 +193,7 @@ public class TransformationRegistry {
         boolean isAbstract = ruleMethod.isAnnotationPresent(Abstract.class);
         boolean isPrimary = ruleMethod.isAnnotationPresent(Primary.class);
         boolean isGreedy = ruleMethod.isAnnotationPresent(Greedy.class);
+        boolean isDetached = ruleMethod.isAnnotationPresent(Detached.class);
 
         // Get extends rules
         Extends extendsAnnotation = ruleMethod.getAnnotation(Extends.class);
@@ -212,6 +213,7 @@ public class TransformationRegistry {
                 isAbstract,
                 isPrimary,
                 isGreedy,
+                isDetached,
                 extendsRules,
                 transforms,
                 tos

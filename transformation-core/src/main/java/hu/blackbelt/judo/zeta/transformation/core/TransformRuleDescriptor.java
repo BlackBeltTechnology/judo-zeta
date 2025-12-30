@@ -45,6 +45,7 @@ public class TransformRuleDescriptor {
     private final boolean isAbstract;
     private final boolean isPrimary;
     private final boolean isGreedy;
+    private final boolean isDetached;
     private final List<String> extendsRules;
 
     /**
@@ -78,7 +79,7 @@ public class TransformRuleDescriptor {
             List<String> extendsRules
     ) {
         this(instance, ruleMethod, name, description, sourceType, targetType, guardMethod,
-                isLazy, isAbstract, isPrimary, isGreedy, extendsRules,
+                isLazy, isAbstract, isPrimary, isGreedy, false, extendsRules,
                 Collections.emptyList(), Collections.emptyList());
     }
 
@@ -94,6 +95,27 @@ public class TransformRuleDescriptor {
             boolean isAbstract,
             boolean isPrimary,
             boolean isGreedy,
+            boolean isDetached,
+            List<String> extendsRules
+    ) {
+        this(instance, ruleMethod, name, description, sourceType, targetType, guardMethod,
+                isLazy, isAbstract, isPrimary, isGreedy, isDetached, extendsRules,
+                Collections.emptyList(), Collections.emptyList());
+    }
+
+    public TransformRuleDescriptor(
+            Object instance,
+            Method ruleMethod,
+            String name,
+            String description,
+            Class<? extends EObject> sourceType,
+            Class<? extends EObject> targetType,
+            Method guardMethod,
+            boolean isLazy,
+            boolean isAbstract,
+            boolean isPrimary,
+            boolean isGreedy,
+            boolean isDetached,
             List<String> extendsRules,
             List<TransformDefinition> transforms,
             List<ToDefinition> tos
@@ -109,6 +131,7 @@ public class TransformRuleDescriptor {
         this.isAbstract = isAbstract;
         this.isPrimary = isPrimary;
         this.isGreedy = isGreedy;
+        this.isDetached = isDetached;
         this.extendsRules = extendsRules;
         this.transforms = transforms != null ? transforms : Collections.emptyList();
         this.tos = tos != null ? tos : Collections.emptyList();
@@ -149,6 +172,18 @@ public class TransformRuleDescriptor {
 
     public boolean isGreedy() {
         return isGreedy;
+    }
+
+    /**
+     * Check if this rule is marked as detached.
+     *
+     * <p>Detached rules create objects that are NOT added to Resource.contents.
+     * The caller is responsible for adding the object to its proper container.</p>
+     *
+     * @return true if the rule is marked with @Detached
+     */
+    public boolean isDetached() {
+        return isDetached;
     }
 
     public List<String> getExtendsRules() {
@@ -427,13 +462,26 @@ public class TransformRuleDescriptor {
      * @throws IllegalStateException if called on a multi-source rule
      */
     public EObject execute(EObject source, TransformationContext context) {
-        // Check if this rule extends parent rules
-        if (!extendsRules.isEmpty() && context.getTransformationRegistry() != null) {
-            return executeWithInheritance(source, context);
-        }
+        // Track current executing rule for @Detached support
+        TransformRuleDescriptor previousRule = context.getCurrentExecutingRule();
+        context.setCurrentExecutingRule(this);
 
-        // No inheritance - execute normally
-        return getFunction().transform(source, context);
+        try {
+            // Check if this rule extends parent rules
+            if (!extendsRules.isEmpty() && context.getTransformationRegistry() != null) {
+                return executeWithInheritance(source, context);
+            }
+
+            // No inheritance - execute normally
+            return getFunction().transform(source, context);
+        } finally {
+            // Restore previous rule (for nested rule execution)
+            if (previousRule != null) {
+                context.setCurrentExecutingRule(previousRule);
+            } else {
+                context.clearCurrentExecutingRule();
+            }
+        }
     }
 
     /**

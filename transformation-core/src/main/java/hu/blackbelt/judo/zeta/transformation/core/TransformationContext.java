@@ -231,6 +231,12 @@ public class TransformationContext {
      */
     private final ThreadLocal<Boolean> inInheritanceExecution = ThreadLocal.withInitial(() -> false);
 
+    /**
+     * Thread-local tracking of the currently executing rule.
+     * Used to check if the current rule is @Detached in createTarget().
+     */
+    private final ThreadLocal<TransformRuleDescriptor> currentExecutingRule = new ThreadLocal<>();
+
     public TransformationContext(
             ModelProvider modelProvider,
             ResourceSet sourceResourceSet,
@@ -634,9 +640,13 @@ public class TransformationContext {
 
         EObject instance = pkg.getEFactoryInstance().create(eClass);
 
-        // When autoAddRootElements is enabled, automatically add to resource
-        // This restores legacy behavior for convenience
-        if (autoAddRootElements) {
+        // Check if current rule is @Detached - detached rules NEVER add to resource
+        // The caller is responsible for adding to the appropriate container
+        boolean isDetached = isCurrentRuleDetached();
+
+        // When autoAddRootElements is enabled AND rule is NOT detached, add to resource
+        // @Detached overrides autoAddRootElements
+        if (autoAddRootElements && !isDetached) {
             addToResource(instance);
         }
         // Otherwise ETL semantics: do NOT add to resource root automatically
@@ -915,18 +925,30 @@ public class TransformationContext {
         String discriminatedId = baseId + "/(discriminator/" + discriminator + ")";
         setElementId(clone, discriminatedId);
 
-        if (stagingEnabled.get()) {
-            // Parallel mode: stage for later commit with ordering
-            long sequence = creationSequence.getAndIncrement();
-            elementOrder.put(clone, sequence);
-            stagedElements.offer(new StagedElement(clone, true, sequence));
-        } else {
-            // Sequential mode: add directly to Resource
-            if (!targetResourceSet.getResources().isEmpty()) {
-                Resource targetResource = targetResourceSet.getResources().get(0);
-                targetResource.getContents().add(clone);
+        // Check if the rule is @Detached - detached rules don't add to Resource
+        // The caller is responsible for adding to the appropriate container
+        TransformRuleDescriptor rule = transformationRegistry != null
+                ? transformationRegistry.getRuleByName(ruleName)
+                : null;
+        boolean isDetached = rule != null && rule.isDetached();
+
+        if (!isDetached) {
+            // Only add to resource if NOT detached
+            if (stagingEnabled.get()) {
+                // Parallel mode: stage for later commit with ordering
+                long sequence = creationSequence.getAndIncrement();
+                elementOrder.put(clone, sequence);
+                stagedElements.offer(new StagedElement(clone, true, sequence));
+            } else {
+                // Sequential mode: add directly to Resource
+                if (!targetResourceSet.getResources().isEmpty()) {
+                    Resource targetResource = targetResourceSet.getResources().get(0);
+                    targetResource.getContents().add(clone);
+                }
             }
         }
+        // For @Detached rules: caller adds clone to appropriate container
+        // e.g., page.getActions().add(clone)
 
         // Cache discriminated result
         resolutionCache.addDiscriminatedMapping(source, clone, ruleName, discriminator);
@@ -1027,6 +1049,45 @@ public class TransformationContext {
      */
     public TransformationRegistry getTransformationRegistry() {
         return transformationRegistry;
+    }
+
+    // ==================== Current Rule Tracking (@Detached support) ====================
+
+    /**
+     * Set the currently executing rule.
+     * Called by rule execution framework before invoking a rule's transform function.
+     *
+     * @param rule the rule being executed
+     */
+    void setCurrentExecutingRule(TransformRuleDescriptor rule) {
+        currentExecutingRule.set(rule);
+    }
+
+    /**
+     * Get the currently executing rule.
+     *
+     * @return the current rule, or null if not executing a rule
+     */
+    TransformRuleDescriptor getCurrentExecutingRule() {
+        return currentExecutingRule.get();
+    }
+
+    /**
+     * Clear the current executing rule.
+     * Called after rule execution completes.
+     */
+    void clearCurrentExecutingRule() {
+        currentExecutingRule.remove();
+    }
+
+    /**
+     * Check if the currently executing rule is marked as @Detached.
+     *
+     * @return true if the current rule is detached
+     */
+    boolean isCurrentRuleDetached() {
+        TransformRuleDescriptor rule = currentExecutingRule.get();
+        return rule != null && rule.isDetached();
     }
 
     /**
