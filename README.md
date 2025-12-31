@@ -21,6 +21,9 @@ A lightweight, standalone framework for Eclipse Modeling Framework (EMF) metamod
 - **Rule Inheritance** - `@Abstract`, `@Extends` for reusable transformation hierarchies
 - **Lazy Evaluation** - On-demand transformation execution with `@Lazy` annotation
 - **Greedy Matching** - Type hierarchy matching with `@Greedy` annotation
+- **Thread-Safe Parallel Execution** - Two-phase staging approach for EMF thread-safety
+- **Fail-Fast Error Handling** - Immediate abort with element/rule context
+- **Deterministic Ordering** - Maintains element creation order in parallel mode
 
 ### Shared Features
 - **Extension Methods** - Custom helper methods accessible from rules
@@ -75,11 +78,23 @@ public class EntityTransformations {
     }
 }
 
-// Execute transformation
+// Execute transformation with parallel support
 TransformationRegistry registry = new TransformationRegistry();
 registry.register(EntityTransformations.class);
-TransformationExecutor executor = TransformationExecutor.builder().registry(registry).build();
-TransformationResult result = executor.transform(sourceModel);
+
+TransformationExecutor executor = TransformationExecutor.builder()
+    .registry(registry)
+    .context(context)
+    .parallel(true)                    // Enable parallel (default)
+    .parallelThreshold(1000)           // Min elements for parallel
+    .build();
+
+try {
+    TransformationResult result = executor.transform(sourceModel);
+} catch (TransformationException e) {
+    // Fail-fast with element/rule context
+    log.error("Failed in rule '{}': {}", e.getRuleName(), e.getMessage());
+}
 ```
 
 ## Project Structure
@@ -347,9 +362,11 @@ public class EntityTypeValidations {
 }
 ```
 
-## Parallel Validation
+## Parallel Execution
 
-The framework automatically parallelizes validation for large models:
+Both validation and transformation frameworks support parallel execution for large models.
+
+### Parallel Validation
 
 - **Threshold:** 5000 elements (configurable)
 - **Chunk Size:** 100 elements per work unit (configurable)
@@ -365,6 +382,45 @@ ValidationExecutor executor = ValidationExecutor.builder()
 
 List<ValidationResult> results = executor.validate(elements);
 ```
+
+### Parallel Transformation
+
+The transformation framework uses a **two-phase staging approach** for thread-safe parallel execution:
+
+1. **Phase 1 (Parallel):** Elements created and staged in thread-safe queue
+2. **Phase 2 (Sequential):** Staged elements committed to EMF Resource
+
+- **Threshold:** 1000 elements (configurable)
+- **Thread-Safe:** Uses `ConcurrentLinkedQueue` for staging
+- **Deterministic:** Maintains element creation order
+- **Fail-Fast:** Aborts on first error with context
+
+```java
+TransformationExecutor executor = TransformationExecutor.builder()
+    .registry(registry)
+    .context(context)
+    .parallel(true)                    // Enable parallel (default)
+    .parallelThreshold(1000)           // Min elements for parallel
+    .chunkSize(100)                    // Elements per work unit
+    .build();
+
+// Executor is reusable - state resets automatically
+TransformationResult result1 = executor.transform(sourceElements1);
+TransformationResult result2 = executor.transform(sourceElements2);
+```
+
+### Thread-Safety Guidelines for Transformation Rules
+
+**Safe Operations:**
+- `ctx.createTarget()` - Creates staged elements
+- `ctx.equivalent()` - Thread-safe lazy rule execution
+- Setting properties on elements you created
+- Reading from source elements
+
+**Avoid:**
+- Modifying source elements
+- Modifying target elements created by other rules
+- Shared mutable state between rules
 
 ## OSGi Integration
 
