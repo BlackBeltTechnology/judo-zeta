@@ -1518,8 +1518,8 @@ public class TransformationContext {
     /**
      * Get the source element's path for structured ID generation.
      *
-     * <p>Format: {@code <container-name>/(esm/<source-id>)} or just {@code (esm/<source-id>)}
-     * if no named container is available.</p>
+     * <p>Format: {@code <container-name>/(<alias>/<source-id>)} or just {@code (<alias>/<source-id>)}
+     * if no named container is available. The alias is determined from the registered resource aliases.</p>
      *
      * @param source the source element
      * @return the source path string
@@ -1532,14 +1532,52 @@ public class TransformationContext {
         // Get the source element's XMI ID
         String sourceId = getSourceElementId(source);
 
+        // Get the resource alias for the source element
+        String alias = getResourceAlias(source);
+
         // Try to get a container name (useful for traceability)
         String containerName = getContainerName(source);
 
         if (containerName != null && !containerName.isEmpty()) {
-            return containerName + "/(esm/" + sourceId + ")";
+            return containerName + "/(" + alias + "/" + sourceId + ")";
         } else {
-            return "(esm/" + sourceId + ")";
+            return "(" + alias + "/" + sourceId + ")";
         }
+    }
+
+    /**
+     * Get the resource alias for an element based on its ResourceSet.
+     *
+     * <p>Looks up the element's ResourceSet in the registered resource aliases.
+     * Returns "source" as default if no matching alias is found.</p>
+     *
+     * @param element the element
+     * @return the resource alias (e.g., "esm", "asm", "mapping")
+     */
+    private String getResourceAlias(EObject element) {
+        if (element == null) {
+            return "source";
+        }
+
+        Resource resource = element.eResource();
+        if (resource == null) {
+            return "source";
+        }
+
+        ResourceSet elementResourceSet = resource.getResourceSet();
+        if (elementResourceSet == null) {
+            return "source";
+        }
+
+        // Find the alias for this ResourceSet
+        for (Map.Entry<String, ResourceSet> entry : resourceRegistry.entrySet()) {
+            if (entry.getValue() == elementResourceSet) {
+                return entry.getKey();
+            }
+        }
+
+        // Default to "source" if no matching alias found
+        return "source";
     }
 
     /**

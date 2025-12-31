@@ -125,14 +125,15 @@ class StructuredIdTest {
             }
 
             assertNotNull(targetId, "Target should have an XMI ID");
-            // ID should contain source name and rule name
+            // ID should contain source name, alias, and rule name
+            // The alias is "source" by default (registered in TransformationContext constructor)
             assertTrue(targetId.contains("Customer"), "ID should contain source name: " + targetId);
-            assertTrue(targetId.contains("esm/_abc123"), "ID should contain source ID: " + targetId);
+            assertTrue(targetId.contains("source/_abc123"), "ID should contain alias and source ID: " + targetId);
             assertTrue(targetId.contains("Entity2Package"), "ID should contain rule name: " + targetId);
         }
 
         @Test
-        @DisplayName("Structured ID format follows ETL pattern")
+        @DisplayName("Structured ID format follows ETL pattern with source alias")
         void structuredIdFollowsEtlPattern() {
             EClass source = createEClass("Order", "_def456");
 
@@ -153,11 +154,12 @@ class StructuredIdTest {
                 targetId = ((XMIResource) targetResource).getID(target);
             }
 
-            // Expected format: <name>/(esm/<id>)/<rule-name>
-            // Example: Order/(esm/_def456)/Entity2Package
+            // Expected format: <name>/(<alias>/<id>)/<rule-name>
+            // The alias is "source" by default (registered in constructor)
+            // Example: Order/(source/_def456)/Entity2Package
             assertNotNull(targetId);
-            assertTrue(targetId.matches("Order/\\(esm/_def456\\)/Entity2Package"),
-                    "ID should match ETL pattern: " + targetId);
+            assertTrue(targetId.matches("Order/\\(source/_def456\\)/Entity2Package"),
+                    "ID should match ETL pattern with source alias: " + targetId);
         }
 
         @Test
@@ -282,7 +284,7 @@ class StructuredIdTest {
             String targetId = context.getPendingXmiId(target);
 
             assertNotNull(targetId);
-            assertTrue(targetId.contains("esm/_ann001"), "ID should contain source ID: " + targetId);
+            assertTrue(targetId.contains("source/_ann001"), "ID should contain alias and source ID: " + targetId);
         }
     }
 

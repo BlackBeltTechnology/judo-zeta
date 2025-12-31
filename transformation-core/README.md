@@ -284,14 +284,16 @@ Use `@Detached` for objects that should only exist within a parent container (e.
 ZETA generates ETL-style structured XMI IDs for traceability:
 
 ```
-Format: <source-container>/(esm/<source-id>)/<rule-name>
+Format: <source-container>/(<alias>/<source-id>)/<rule-name>
 Example: Customer/(esm/_abc123)/Entity2Table
 ```
+
+The `<alias>` is the registered resource alias (e.g., "esm", "asm", "mapping", "source").
 
 For discriminated equivalents, the discriminator is appended:
 
 ```
-Format: <source-container>/(esm/<source-id>)/<rule-name>/(discriminator/<discriminator-value>)
+Format: <base-id>/(discriminator/<discriminator-value>)
 Example: Customer/(esm/_abc123)/TableAction/(discriminator/relation1)
 ```
 
