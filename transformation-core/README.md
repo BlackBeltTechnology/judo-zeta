@@ -130,26 +130,61 @@ trace.saveToJson(new File("trace.json"));
 
 ### Rule Inheritance
 
+Two inheritance patterns are supported:
+
+**Pattern 1: Automatic (concrete target types)**
+
+When the child rule's target type is concrete, use `@Extends`:
+
 ```java
 @TransformRule(name = "BaseNamedElement")
 @Abstract
-public TransformFunction<NamedElement, NamedType> baseNamedElement() {
+public TransformFunction<NamedElement, Table> baseNamedElement() {
     return (source, ctx) -> {
-        NamedType target = ctx.createTarget(NamedType.class);
+        // createTarget() returns pre-created target shared with child
+        Table target = ctx.createTarget(Table.class);
         target.setName(source.getName());
         return target;
     };
 }
 
 @TransformRule(name = "EntityType2Table")
-@Extends("BaseNamedElement")
+@Extends("BaseNamedElement")  // Framework executes parent automatically
 public TransformFunction<EntityType, Table> entityType2Table() {
     return (entity, ctx) -> {
-        // Execute parent rule first
-        Table table = ctx.executeParentRule("BaseNamedElement", entity);
-        // Add entity-specific logic
+        // createTarget() returns the pre-created target
+        Table table = ctx.createTarget(Table.class);
         table.setSchema(ctx.equivalent(entity.getNamespace(), Schema.class));
-        // Add as root element
+        ctx.addToResource(table);
+        return table;
+    };
+}
+```
+
+**Pattern 2: Manual (abstract parent target types)**
+
+When the parent rule has an abstract target type, pass the concrete target:
+
+```java
+@TransformRule(name = "BaseNamedElement")
+@Abstract
+public TransformFunction<NamedElement, NamedElement> baseNamedElement() {
+    return (source, ctx) -> {
+        // createTarget() returns target passed by child
+        NamedElement target = ctx.createTarget(NamedElement.class);
+        target.setName(source.getName());
+        return target;
+    };
+}
+
+@TransformRule(name = "EntityType2Table")
+public TransformFunction<EntityType, Table> entityType2Table() {
+    return (entity, ctx) -> {
+        // Child creates CONCRETE target first
+        Table table = ctx.createTarget(Table.class);
+        // Pass target to parent - parent's createTarget() returns same instance
+        ctx.executeParentRule("BaseNamedElement", entity, table);
+        table.setSchema(ctx.equivalent(entity.getNamespace(), Schema.class));
         ctx.addToResource(table);
         return table;
     };
