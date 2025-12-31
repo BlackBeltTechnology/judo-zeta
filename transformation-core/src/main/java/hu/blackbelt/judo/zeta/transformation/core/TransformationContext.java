@@ -1077,6 +1077,44 @@ public class TransformationContext {
      */
     @SuppressWarnings("unchecked")
     public <T extends EObject> T executeParentRule(String parentRuleName, EObject source) {
+        return executeParentRule(parentRuleName, source, null);
+    }
+
+    /**
+     * Execute a parent rule with a pre-created target (for manual @Extends inheritance).
+     *
+     * <p>This overload allows the child rule to create the target first and pass it
+     * to the parent rule. The parent's {@code createTarget()} calls will return the
+     * pre-created target instead of creating a new instance.</p>
+     *
+     * <p>This is useful for:</p>
+     * <ul>
+     *   <li>Parent rules that have abstract target types (cannot be instantiated)</li>
+     *   <li>Cases where the child needs to control the concrete type</li>
+     *   <li>Legacy code migration where rules were designed differently</li>
+     * </ul>
+     *
+     * <p>Example:</p>
+     * <pre>{@code
+     * @TransformRule(name = "ConcreteRule")
+     * public TransformFunction<Entity, Table> concreteRule() {
+     *     return (entity, ctx) -> {
+     *         Table table = ctx.createTarget(Table.class);
+     *         ctx.executeParentRule("AbstractRule", entity, table);  // Parent uses same table
+     *         table.setSpecificProperty("value");
+     *         return table;
+     *     };
+     * }
+     * }</pre>
+     *
+     * @param parentRuleName the parent rule name
+     * @param source the source element
+     * @param target the pre-created target (parent's createTarget() will return this)
+     * @param <T> the target type
+     * @return the target from parent rule execution (same as passed target if provided)
+     */
+    @SuppressWarnings("unchecked")
+    public <T extends EObject> T executeParentRule(String parentRuleName, EObject source, T target) {
         if (transformationRegistry == null) {
             throw new IllegalStateException("Transformation registry not set");
         }
@@ -1093,12 +1131,33 @@ public class TransformationContext {
             return (T) cached;
         }
 
-        // Execute parent rule and cache the result
-        EObject result = parentRule.execute(source, this);
-        if (result != null) {
-            resolutionCache.addMapping(source, parentRuleName, result, parentRule.isPrimary());
+        // If target provided, set up inheritance context so parent's createTarget() returns it
+        boolean wasInInheritance = isInInheritanceExecution();
+        EObject previousPreCreated = getPreCreatedTarget();
+
+        if (target != null) {
+            setPreCreatedTarget(target);
+            setInInheritanceExecution(true);
         }
-        return (T) result;
+
+        try {
+            // Execute parent rule and cache the result
+            EObject result = parentRule.execute(source, this);
+            if (result != null) {
+                resolutionCache.addMapping(source, parentRuleName, result, parentRule.isPrimary());
+            }
+            return (T) result;
+        } finally {
+            // Restore previous inheritance state
+            if (target != null) {
+                if (previousPreCreated != null) {
+                    setPreCreatedTarget(previousPreCreated);
+                } else {
+                    clearPreCreatedTarget();
+                }
+                setInInheritanceExecution(wasInInheritance);
+            }
+        }
     }
 
     // ==================== @Extends Inheritance Support ====================

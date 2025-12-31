@@ -507,6 +507,18 @@ public class TransformRuleDescriptor {
         // We need to create it directly to avoid side effects, then set inheritance mode
         EObject target = createTargetDirectly(context);
 
+        // If target is null (abstract type), execute without pre-creation
+        // The transform function will create the concrete type via createTarget()
+        // which will then be used for parent rules via executeParentRule(name, source, target)
+        if (target == null) {
+            // Execute parents first without pre-created target
+            // Parents with abstract types will also return null from createTarget()
+            // This pattern requires the LEAF child rule to create the concrete type
+            // and pass it to parents via executeParentRule(name, source, target)
+            executeParentRulesInChain(source, context);
+            return getFunction().transform(source, context);
+        }
+
         try {
             // Set pre-created target and enable inheritance mode for entire chain
             context.setPreCreatedTarget(target);
@@ -564,6 +576,8 @@ public class TransformRuleDescriptor {
     /**
      * Create target instance directly without going through TransformationContext.createTarget().
      * This avoids side effects like auto-adding to resource during pre-creation.
+     *
+     * @return the created target, or null if the target type is abstract
      */
     private EObject createTargetDirectly(TransformationContext context) {
         String typeName = targetType.getSimpleName();
@@ -572,13 +586,22 @@ public class TransformRuleDescriptor {
         for (org.eclipse.emf.ecore.EPackage pkg : context.getTargetPackages()) {
             org.eclipse.emf.ecore.EClassifier classifier = pkg.getEClassifier(typeName);
             if (classifier instanceof org.eclipse.emf.ecore.EClass) {
-                return pkg.getEFactoryInstance().create((org.eclipse.emf.ecore.EClass) classifier);
+                org.eclipse.emf.ecore.EClass eClass = (org.eclipse.emf.ecore.EClass) classifier;
+                // Check if the type is abstract - cannot pre-create abstract types
+                if (eClass.isAbstract() || eClass.isInterface()) {
+                    return null; // Let the transform function create the concrete type
+                }
+                return pkg.getEFactoryInstance().create(eClass);
             }
         }
 
-        // Fallback: use context.createTarget() and accept side effects
-        // This handles auto-discovered packages
-        return context.createTarget(targetType);
+        // Try auto-discovery for generated metamodels
+        try {
+            return context.createTarget(targetType);
+        } catch (IllegalArgumentException e) {
+            // Target type might be abstract or not found - let transform function handle it
+            return null;
+        }
     }
 
     /**
