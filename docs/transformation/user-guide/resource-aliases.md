@@ -40,6 +40,26 @@ ctx.registerResource("reference", referenceResourceSet);
 ResourceSet reference = ctx.getResource("reference");
 ```
 
+## Preferred Source Alias
+
+When using structured XMI IDs, you can set a preferred alias that will be used in generated IDs instead of the default "source":
+
+```java
+// Register the ESM resource and set it as preferred
+ctx.registerResource("esm", esmResourceSet);
+ctx.setPreferredSourceAlias("esm");
+
+// Now structured XMI IDs will use "esm":
+// Customer/(esm/_abc123)/Entity2Table
+// instead of:
+// Customer/(source/_abc123)/Entity2Table
+```
+
+This is useful for:
+- Matching existing ETL transformation output for compatibility
+- Working with multiple source models with distinct aliases
+- Migrating from ETL to ZETA while preserving XMI ID formats
+
 ## Default Aliases
 
 The following aliases are automatically registered:

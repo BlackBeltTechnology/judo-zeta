@@ -77,6 +77,13 @@ public class TransformationContext {
     private final Map<String, ResourceSet> resourceRegistry = new ConcurrentHashMap<>();
 
     /**
+     * Preferred alias for the source ResourceSet.
+     * When set, getResourceAlias() returns this alias for elements from the source ResourceSet.
+     * This allows transformations to use a custom alias like "esm" instead of "source".
+     */
+    private volatile String preferredSourceAlias = null;
+
+    /**
      * Thread-local current source element for parallel transformation support.
      */
     private final ThreadLocal<EObject> currentSource = new ThreadLocal<>();
@@ -1286,6 +1293,31 @@ public class TransformationContext {
     }
 
     /**
+     * Set the preferred alias for the source ResourceSet.
+     * When set, getResourceAlias() returns this alias for elements from the source ResourceSet.
+     * This allows transformations to use a custom alias like "esm" instead of "source".
+     *
+     * <p>Example usage:</p>
+     * <pre>{@code
+     * ctx.registerResource("esm", esmModel.getResourceSet());
+     * ctx.setPreferredSourceAlias("esm");
+     * // Now XMI IDs will use "esm" instead of "source"
+     * }</pre>
+     *
+     * @param alias the preferred alias (must be registered)
+     * @throws IllegalArgumentException if alias is not registered
+     */
+    public void setPreferredSourceAlias(String alias) {
+        if (alias != null && !resourceRegistry.containsKey(alias)) {
+            throw new IllegalArgumentException(
+                    "Cannot set preferred source alias '" + alias + "' - not registered. " +
+                    "Available aliases: " + resourceRegistry.keySet()
+            );
+        }
+        this.preferredSourceAlias = alias;
+    }
+
+    /**
      * Get a ResourceSet by its alias.
      *
      * @param alias the alias name
@@ -1683,24 +1715,34 @@ public class TransformationContext {
      * Get the resource alias for an element based on its ResourceSet.
      *
      * <p>Looks up the element's ResourceSet in the registered resource aliases.
-     * Returns "source" as default if no matching alias is found.</p>
+     * If a preferred source alias is set and the element is from that ResourceSet,
+     * returns the preferred alias. Otherwise returns the first matching alias,
+     * or "source" as default if no match is found.</p>
      *
      * @param element the element
      * @return the resource alias (e.g., "esm", "asm", "mapping")
      */
     private String getResourceAlias(EObject element) {
         if (element == null) {
-            return "source";
+            return preferredSourceAlias != null ? preferredSourceAlias : "source";
         }
 
         Resource resource = element.eResource();
         if (resource == null) {
-            return "source";
+            return preferredSourceAlias != null ? preferredSourceAlias : "source";
         }
 
         ResourceSet elementResourceSet = resource.getResourceSet();
         if (elementResourceSet == null) {
-            return "source";
+            return preferredSourceAlias != null ? preferredSourceAlias : "source";
+        }
+
+        // If preferred source alias is set and element is from that ResourceSet, use it
+        if (preferredSourceAlias != null) {
+            ResourceSet preferredResourceSet = resourceRegistry.get(preferredSourceAlias);
+            if (preferredResourceSet == elementResourceSet) {
+                return preferredSourceAlias;
+            }
         }
 
         // Find the alias for this ResourceSet

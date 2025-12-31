@@ -405,6 +405,24 @@ ctx.registerResource("rdbms", rdbmsResourceSet);
 ResourceSet mapping = ctx.getResource("mapping");
 ```
 
+#### Preferred Source Alias
+
+By default, structured XMI IDs use "source" as the alias for source elements. To use a custom alias (matching ETL model bindings like "esm"), set the preferred source alias:
+
+```java
+// Register the ESM resource and set it as preferred
+ctx.registerResource("esm", esmResourceSet);
+ctx.setPreferredSourceAlias("esm");
+
+// Now XMI IDs will use "esm" instead of "source":
+// Customer/(esm/_abc123)/Entity2Table
+```
+
+This is useful when:
+- Matching existing ETL transformation output for compatibility
+- Working with multiple source models with distinct aliases
+- Migrating from ETL to ZETA while preserving XMI ID formats
+
 #### Using @Transform and @To Annotations
 
 ```java
