@@ -286,6 +286,167 @@ class AbstractTypeInheritanceTest {
         }
     }
 
+    // ==================== Structured XMI ID Tests ====================
+
+    @Nested
+    @DisplayName("Structured XMI ID in Inheritance")
+    class StructuredXmiIdTests {
+
+        @Test
+        @DisplayName("Automatic @Extends sets structured XMI ID on pre-created target")
+        void automaticExtendsSetStructuredXmiId() {
+            EClass source = createEClass("Customer");
+
+            registry.register(AutomaticInheritanceTransformation.class);
+            context.setTransformationRegistry(registry);
+            context.setUseStructuredIds(true);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            assertEquals(1, targetResource.getContents().size());
+            EPackage result = (EPackage) targetResource.getContents().get(0);
+
+            // Verify XMI ID is set and contains expected components
+            String xmiId = context.getPendingXmiId(result);
+            assertNotNull(xmiId, "XMI ID should be set on target");
+            assertTrue(xmiId.contains("DerivedPackage"), "XMI ID should contain rule name: " + xmiId);
+            assertTrue(xmiId.contains("Customer"), "XMI ID should contain source name: " + xmiId);
+        }
+
+        @Test
+        @DisplayName("Manual executeParentRule with target sets structured XMI ID")
+        void manualExecuteParentRuleSetsXmiId() {
+            EClass source = createEClass("Order");
+
+            registry.register(ManualInheritanceTransformation.class);
+            context.setTransformationRegistry(registry);
+            context.setUseStructuredIds(true);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            assertEquals(1, targetResource.getContents().size());
+            EPackage result = (EPackage) targetResource.getContents().get(0);
+
+            // Verify XMI ID is set (set by child's createTarget call)
+            String xmiId = context.getPendingXmiId(result);
+            assertNotNull(xmiId, "XMI ID should be set on target");
+            assertTrue(xmiId.contains("ConcretePackage"), "XMI ID should contain rule name: " + xmiId);
+        }
+
+        @Test
+        @DisplayName("Multi-level @Extends uses child rule name in XMI ID")
+        void multiLevelExtendsUsesChildRuleName() {
+            EClass source = createEClass("Account");
+
+            registry.register(MultiLevelInheritanceTransformation.class);
+            context.setTransformationRegistry(registry);
+            context.setUseStructuredIds(true);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            assertEquals(1, targetResource.getContents().size());
+            EPackage result = (EPackage) targetResource.getContents().get(0);
+
+            // XMI ID should use the CHILD rule name (most derived)
+            String xmiId = context.getPendingXmiId(result);
+            assertNotNull(xmiId, "XMI ID should be set on target");
+            assertTrue(xmiId.contains("Child"), "XMI ID should contain child rule name: " + xmiId);
+        }
+    }
+
+    // ==================== Preferred Source Alias Tests ====================
+
+    @Nested
+    @DisplayName("Preferred Source Alias")
+    class PreferredSourceAliasTests {
+
+        @Test
+        @DisplayName("setPreferredSourceAlias changes alias in structured XMI IDs")
+        void preferredAliasChangesXmiId() {
+            EClass source = createEClass("Entity");
+
+            // Register a custom alias for the source ResourceSet
+            context.registerResource("esm", sourceResourceSet);
+            context.setPreferredSourceAlias("esm");
+
+            registry.register(AutomaticInheritanceTransformation.class);
+            context.setTransformationRegistry(registry);
+            context.setUseStructuredIds(true);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            assertEquals(1, targetResource.getContents().size());
+            EPackage result = (EPackage) targetResource.getContents().get(0);
+
+            String xmiId = context.getPendingXmiId(result);
+            assertNotNull(xmiId, "XMI ID should be set");
+            assertTrue(xmiId.contains("esm/"), "XMI ID should use 'esm' alias: " + xmiId);
+            assertFalse(xmiId.contains("source/"), "XMI ID should not use 'source' alias: " + xmiId);
+        }
+
+        @Test
+        @DisplayName("Unregistered alias throws exception")
+        void unregisteredAliasThrows() {
+            assertThrows(IllegalArgumentException.class, () -> {
+                context.setPreferredSourceAlias("unregistered");
+            });
+        }
+
+        @Test
+        @DisplayName("Null alias resets to default behavior")
+        void nullAliasResetsToDefault() {
+            context.registerResource("esm", sourceResourceSet);
+            context.setPreferredSourceAlias("esm");
+
+            // Reset to default
+            context.setPreferredSourceAlias(null);
+
+            EClass source = createEClass("Test");
+
+            registry.register(AutomaticInheritanceTransformation.class);
+            context.setTransformationRegistry(registry);
+            context.setUseStructuredIds(true);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            EPackage result = (EPackage) targetResource.getContents().get(0);
+            String xmiId = context.getPendingXmiId(result);
+
+            // Should use default "source" alias
+            assertTrue(xmiId.contains("source/"), "XMI ID should use default 'source' alias: " + xmiId);
+        }
+    }
+
     // ==================== Transformation Classes ====================
 
     /**

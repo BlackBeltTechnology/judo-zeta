@@ -519,6 +519,10 @@ public class TransformRuleDescriptor {
             return getFunction().transform(source, context);
         }
 
+        // Set structured XMI ID on the pre-created target
+        // This is needed because createTargetDirectly() bypasses createTarget() ID generation
+        context.setStructuredIdOnTarget(target, source, name);
+
         try {
             // Set pre-created target and enable inheritance mode for entire chain
             context.setPreCreatedTarget(target);

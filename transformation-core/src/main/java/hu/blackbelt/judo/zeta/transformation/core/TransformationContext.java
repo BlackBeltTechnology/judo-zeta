@@ -1215,6 +1215,30 @@ public class TransformationContext {
     }
 
     /**
+     * Set a structured XMI ID on a target element.
+     *
+     * <p>This is called by TransformRuleDescriptor when pre-creating a target
+     * in executeWithInheritance(). Since createTargetDirectly() bypasses the
+     * normal createTarget() flow, the structured ID must be set explicitly.</p>
+     *
+     * @param target the target element
+     * @param source the source element (for ID generation)
+     * @param ruleName the rule name (for ID generation)
+     */
+    void setStructuredIdOnTarget(EObject target, EObject source, String ruleName) {
+        if (target == null) {
+            return;
+        }
+        // Only set if not already set
+        String existingId = getPendingXmiId(target);
+        if (existingId != null) {
+            return;
+        }
+        String targetId = generateStructuredId(source, ruleName);
+        setElementId(target, targetId);
+    }
+
+    /**
      * Get the transformation registry.
      *
      * @return the transformation registry
