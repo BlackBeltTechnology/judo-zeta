@@ -18,7 +18,20 @@ Creates a new target element.
 Table table = ctx.createTarget(Table.class);
 ```
 
-**Requirements**: Target EPackage must be set via `context.setTargetPackage()`
+**Package Resolution**: The EPackage is auto-discovered from the Java class. No registration needed.
+
+### createTarget() with Explicit Package
+
+Creates a new target element in a specific package. **Only needed for dynamic EMF models.**
+
+```java
+<T extends EObject> T createTarget(Class<T> targetClass, EPackage targetPackage)
+```
+
+```java
+// For dynamic EMF only
+EObject obj = ctx.createTarget(dynamicType, dynamicPackage);
+```
 
 ## Element Resolution
 
@@ -51,6 +64,8 @@ List<Table> allTables = ctx.equivalents(entity, Table.class);
 **Returns**: All targets, with @Primary results first.
 
 ### equivalentDiscriminated()
+
+> **Zeta-specific**: This method is a Zeta extension, not part of the original ETL specification. It provides a workaround for creating multiple target elements from a single source element.
 
 Returns a discriminated target for multiple outputs from same source.
 
@@ -154,7 +169,7 @@ List<Attribute> allAttrs = ctx.call(entity, "getAllAttributes");
 
 ### setTargetPackage()
 
-Sets the EPackage for target element creation.
+Sets a single EPackage for target element creation. Clears any previously registered packages.
 
 ```java
 void setTargetPackage(EPackage targetPackage)
@@ -164,12 +179,86 @@ void setTargetPackage(EPackage targetPackage)
 context.setTargetPackage(TargetPackage.eINSTANCE);
 ```
 
+**Note**: This method does NOT include sub-packages for backward compatibility. Use `registerTargetPackage(pkg, true)` to include sub-packages.
+
+### registerTargetPackage()
+
+Registers an additional target EPackage without clearing existing packages.
+
+```java
+void registerTargetPackage(EPackage targetPackage)
+void registerTargetPackage(EPackage targetPackage, boolean includeSubpackages)
+```
+
+```java
+// Register single package (no sub-packages)
+context.registerTargetPackage(UiPackage.eINSTANCE);
+
+// Register package with all sub-packages (opt-in)
+context.registerTargetPackage(RootPackage.eINSTANCE, true);
+```
+
+**Parameters**:
+- `targetPackage` - The EPackage to register (required, non-null)
+- `includeSubpackages` - If `true`, recursively registers all sub-packages
+
+**Use Cases**:
+- Transformations spanning multiple EMF packages
+- Hierarchical package structures with nested packages
+- Cross-module transformations
+
+### getTargetPackages()
+
+Returns all registered target packages as an unmodifiable list.
+
+```java
+List<EPackage> getTargetPackages()
+```
+
+```java
+List<EPackage> packages = context.getTargetPackages();
+for (EPackage pkg : packages) {
+    System.out.println("Registered: " + pkg.getNsURI());
+}
+```
+
 ### setTransformationRegistry()
 
 Sets the transformation registry.
 
 ```java
 void setTransformationRegistry(TransformationRegistry registry)
+```
+
+## Package Resolution
+
+### Generated Metamodels (Default)
+
+For generated EMF metamodels, **no package registration is needed**:
+
+```java
+// Just use the generated Java class - EPackage is auto-discovered
+Table table = ctx.createTarget(Table.class);
+Column column = ctx.create(Column.class);
+```
+
+The framework finds the EPackage by looking for `*Package.eINSTANCE` in the same Java package.
+
+### Dynamic EMF
+
+For dynamic EMF models (created at runtime), register packages explicitly:
+
+```java
+context.registerTargetPackage(dynamicPackage);
+
+// With sub-packages
+context.registerTargetPackage(dynamicRootPackage, true);
+```
+
+Then use explicit package specification:
+
+```java
+EObject obj = ctx.createTarget(dynamicType, dynamicPackage);
 ```
 
 ---
