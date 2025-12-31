@@ -230,12 +230,12 @@ class StagingInfrastructureTest {
     @DisplayName("Pending XMI ID is stored for staged elements")
     void testPendingXmiIdForStagedElements() {
         context.enableStaging();
-        
+
         EClass created = context.createTarget(EClass.class);
-        
-        // Access element ID (should generate and store pending ID)
-        // This is tested indirectly through the internal getElementId method
-        assertNull(context.getPendingXmiId(created), "No pending ID before first access");
+
+        // IDs are now generated eagerly during createTarget() for structured ID support
+        // The ID should be stored in pendingXmiIds immediately
+        assertNotNull(context.getPendingXmiId(created), "ID should be generated during createTarget");
     }
 
     @Test

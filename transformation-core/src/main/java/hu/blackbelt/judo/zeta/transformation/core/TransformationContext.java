@@ -94,9 +94,14 @@ public class TransformationContext {
     private final AtomicBoolean stagingEnabled = new AtomicBoolean(false);
 
     /**
-     * Sequence counter for maintaining deterministic element ordering.
+     * Sequence counter for maintaining deterministic element ordering in staging.
      */
     private final AtomicLong creationSequence = new AtomicLong(0);
+
+    /**
+     * Sequence counter for deterministic ID generation (separate from ordering).
+     */
+    private final AtomicLong idSequence = new AtomicLong(0);
 
     /**
      * Map tracking creation order of each staged element.
@@ -145,6 +150,13 @@ public class TransformationContext {
      * Default is false (ETL semantics - explicit addToResource() required).
      */
     private volatile boolean autoAddRootElements = false;
+
+    /**
+     * When true, generated XMI IDs follow ETL-style structured format:
+     * &lt;source-path&gt;/&lt;rule-name&gt;/(discriminator/&lt;discriminator-value&gt;)
+     * Default is true (ETL semantics for traceability).
+     */
+    private volatile boolean useStructuredIds = true;
 
     /**
      * Wrapper for staged elements with ordering metadata.
@@ -355,6 +367,32 @@ public class TransformationContext {
      */
     public boolean isAutoAddRootElements() {
         return autoAddRootElements;
+    }
+
+    /**
+     * Enable or disable ETL-style structured XMI IDs.
+     *
+     * <p>When enabled (default), generated XMI IDs follow the ETL pattern:</p>
+     * <pre>{@code <source-container>/(esm/<source-id>)/<rule-name>}</pre>
+     *
+     * <p>For discriminated equivalents:</p>
+     * <pre>{@code <source-container>/(esm/<source-id>)/<rule-name>/(discriminator/<discriminator-value>)}</pre>
+     *
+     * <p>When disabled, simple UUIDs are used (legacy behavior).</p>
+     *
+     * @param useStructured true for ETL-style structured IDs, false for UUIDs
+     */
+    public void setUseStructuredIds(boolean useStructured) {
+        this.useStructuredIds = useStructured;
+    }
+
+    /**
+     * Check if ETL-style structured XMI IDs are enabled.
+     *
+     * @return true if structured IDs are used
+     */
+    public boolean isUseStructuredIds() {
+        return useStructuredIds;
     }
 
     /**
@@ -618,6 +656,10 @@ public class TransformationContext {
      * exists and is compatible with the requested type, it is returned instead of creating
      * a new instance. This enables ETL-style inheritance where parent rules operate on the
      * same target instance as child rules.</p>
+     *
+     * <p><b>Structured IDs:</b> When {@link #setUseStructuredIds(boolean)} is enabled (default),
+     * the created element gets an ETL-style structured XMI ID based on the source element
+     * and rule name.</p>
      */
     @SuppressWarnings("unchecked")
     private <T extends EObject> T createTargetInPackage(Class<T> targetType, EPackage pkg) {
@@ -639,6 +681,15 @@ public class TransformationContext {
         }
 
         EObject instance = pkg.getEFactoryInstance().create(eClass);
+
+        // Generate and set XMI ID
+        // When useStructuredIds is enabled: ETL-style structured ID
+        // When disabled: simple UUID
+        EObject source = currentSource.get();
+        TransformRuleDescriptor rule = currentExecutingRule.get();
+        String ruleName = rule != null ? rule.getName() : null;
+        String targetId = generateStructuredId(source, ruleName);
+        setElementId(instance, targetId);
 
         // Check if current rule is @Detached - detached rules NEVER add to resource
         // The caller is responsible for adding to the appropriate container
@@ -679,6 +730,12 @@ public class TransformationContext {
             if (!targetResourceSet.getResources().isEmpty()) {
                 Resource targetResource = targetResourceSet.getResources().get(0);
                 targetResource.getContents().add(element);
+
+                // Apply pending XMI ID if one was set before adding to resource
+                String pendingId = pendingXmiIds.get(element);
+                if (pendingId != null && targetResource instanceof XMIResource) {
+                    ((XMIResource) targetResource).setID(element, pendingId);
+                }
             }
         }
     }
@@ -920,9 +977,17 @@ public class TransformationContext {
         // Clone for discriminated version
         T clone = (T) EcoreUtil.copy(original);
 
-        // Set discriminated ID (works for both staged and non-staged)
-        String baseId = getElementId(original);
-        String discriminatedId = baseId + "/(discriminator/" + discriminator + ")";
+        // Generate discriminated ID following ETL semantics
+        // Format: <source-path>/<rule-name>/(discriminator/<discriminator-value>)
+        String discriminatedId;
+        if (useStructuredIds) {
+            String baseId = generateStructuredId(source, ruleName);
+            discriminatedId = generateDiscriminatedId(baseId, discriminator);
+        } else {
+            // Legacy: append discriminator to whatever ID the original has
+            String baseId = getElementId(original);
+            discriminatedId = baseId + "/(discriminator/" + discriminator + ")";
+        }
         setElementId(clone, discriminatedId);
 
         // Check if the rule is @Detached - detached rules don't add to Resource
@@ -944,6 +1009,11 @@ public class TransformationContext {
                 if (!targetResourceSet.getResources().isEmpty()) {
                     Resource targetResource = targetResourceSet.getResources().get(0);
                     targetResource.getContents().add(clone);
+
+                    // Apply the discriminated XMI ID
+                    if (targetResource instanceof XMIResource) {
+                        ((XMIResource) targetResource).setID(clone, discriminatedId);
+                    }
                 }
             }
         }
@@ -1367,6 +1437,7 @@ public class TransformationContext {
     void clearElementOrder() {
         elementOrder.clear();
         creationSequence.set(0);
+        idSequence.set(0);
     }
 
     /**
@@ -1405,6 +1476,12 @@ public class TransformationContext {
 
     // ==================== ID Handling ====================
 
+    /**
+     * Get the XMI ID of an element (from resource or generate one).
+     *
+     * @param element the element
+     * @return the element's XMI ID
+     */
     private String getElementId(EObject element) {
         // First check pending IDs for staged elements
         String pendingId = pendingXmiIds.get(element);
@@ -1431,11 +1508,171 @@ public class TransformationContext {
         }
 
         // Generate UUID and store for staged elements (ensures consistency)
-        String generatedId = UUID.randomUUID().toString();
+        String generatedId = "_" + UUID.randomUUID().toString().replace("-", "");
         if (stagingEnabled.get()) {
             pendingXmiIds.put(element, generatedId);
         }
         return generatedId;
+    }
+
+    /**
+     * Get the source element's path for structured ID generation.
+     *
+     * <p>Format: {@code <container-name>/(esm/<source-id>)} or just {@code (esm/<source-id>)}
+     * if no named container is available.</p>
+     *
+     * @param source the source element
+     * @return the source path string
+     */
+    private String getSourcePath(EObject source) {
+        if (source == null) {
+            return "";
+        }
+
+        // Get the source element's XMI ID
+        String sourceId = getSourceElementId(source);
+
+        // Try to get a container name (useful for traceability)
+        String containerName = getContainerName(source);
+
+        if (containerName != null && !containerName.isEmpty()) {
+            return containerName + "/(esm/" + sourceId + ")";
+        } else {
+            return "(esm/" + sourceId + ")";
+        }
+    }
+
+    /**
+     * Get the XMI ID of a source element (from its resource).
+     *
+     * @param source the source element
+     * @return the source element's XMI ID
+     */
+    private String getSourceElementId(EObject source) {
+        Resource resource = source.eResource();
+        if (resource != null) {
+            String id = resource.getURIFragment(source);
+            if (id != null && !id.startsWith("/")) {
+                return id;
+            }
+        }
+
+        // Try to get "id" attribute
+        EStructuralFeature idFeature = source.eClass().getEStructuralFeature("id");
+        if (idFeature != null) {
+            Object idValue = source.eGet(idFeature);
+            if (idValue != null) {
+                return idValue.toString();
+            }
+        }
+
+        // Fallback to hash-based ID for consistency
+        return "_" + Integer.toHexString(System.identityHashCode(source));
+    }
+
+    /**
+     * Get a meaningful container name for the source element.
+     *
+     * <p>Tries to find a named container (element with "name" attribute)
+     * walking up the containment hierarchy.</p>
+     *
+     * @param source the source element
+     * @return the container name, or null if none found
+     */
+    private String getContainerName(EObject source) {
+        // First try the source element itself
+        String name = getElementName(source);
+        if (name != null) {
+            return name;
+        }
+
+        // Walk up containment hierarchy looking for named element
+        EObject container = source.eContainer();
+        while (container != null) {
+            name = getElementName(container);
+            if (name != null) {
+                return name;
+            }
+            container = container.eContainer();
+        }
+
+        return null;
+    }
+
+    /**
+     * Get the "name" attribute of an element if available.
+     *
+     * @param element the element
+     * @return the name value, or null if not available
+     */
+    private String getElementName(EObject element) {
+        EStructuralFeature nameFeature = element.eClass().getEStructuralFeature("name");
+        if (nameFeature != null) {
+            Object nameValue = element.eGet(nameFeature);
+            if (nameValue != null && !nameValue.toString().isEmpty()) {
+                return nameValue.toString();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Generate a structured XMI ID following ETL semantics.
+     *
+     * <p>Format: {@code <source-path>/<rule-name>}</p>
+     * <p>Example: {@code GenericUser/(esm/_abc123)/Entity2Table}</p>
+     *
+     * <p>When no source or rule is available, falls back to a deterministic
+     * sequence-based ID to ensure reproducible XMI output.</p>
+     *
+     * @param source the source element (can be null)
+     * @param ruleName the rule name (can be null)
+     * @return the structured ID, or a sequence-based ID if no context available
+     */
+    String generateStructuredId(EObject source, String ruleName) {
+        if (!useStructuredIds) {
+            // Deterministic ID based on ID sequence for reproducibility
+            return "_seq" + idSequence.getAndIncrement();
+        }
+
+        StringBuilder id = new StringBuilder();
+
+        // Add source path
+        if (source != null) {
+            id.append(getSourcePath(source));
+        }
+
+        // Add rule name
+        if (ruleName != null && !ruleName.isEmpty()) {
+            if (id.length() > 0) {
+                id.append("/");
+            }
+            id.append(ruleName);
+        }
+
+        // If no source or rule name, fall back to deterministic sequence-based ID
+        if (id.length() == 0) {
+            return "_seq" + idSequence.getAndIncrement();
+        }
+
+        return id.toString();
+    }
+
+    /**
+     * Generate a discriminated structured XMI ID following ETL semantics.
+     *
+     * <p>Format: {@code <base-id>/(discriminator/<discriminator-value>)}</p>
+     * <p>Example: {@code GenericUser/(esm/_abc123)/TableAction/(discriminator/relation1)}</p>
+     *
+     * @param baseId the base structured ID
+     * @param discriminator the discriminator value
+     * @return the discriminated ID
+     */
+    String generateDiscriminatedId(String baseId, String discriminator) {
+        if (discriminator == null || discriminator.isEmpty()) {
+            return baseId;
+        }
+        return baseId + "/(discriminator/" + discriminator + ")";
     }
 
     private void setElementId(EObject element, String id) {
@@ -1445,15 +1682,13 @@ public class TransformationContext {
             element.eSet(idFeature, id);
         }
 
-        if (stagingEnabled.get()) {
-            // Store for later XMI ID assignment during commit
-            pendingXmiIds.put(element, id);
-        } else {
-            // Direct assignment if already in resource
-            Resource resource = element.eResource();
-            if (resource instanceof XMIResource) {
-                ((XMIResource) resource).setID(element, id);
-            }
+        // Always store in pendingXmiIds for later retrieval/application
+        pendingXmiIds.put(element, id);
+
+        // If element is already in a resource, apply the ID now
+        Resource resource = element.eResource();
+        if (resource instanceof XMIResource) {
+            ((XMIResource) resource).setID(element, id);
         }
     }
 }

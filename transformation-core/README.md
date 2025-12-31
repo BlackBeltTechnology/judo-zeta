@@ -279,6 +279,33 @@ public TransformFunction<Form, Page> form2Page() {
 
 Use `@Detached` for objects that should only exist within a parent container (e.g., Actions within PageDefinition.actions), not at the resource root.
 
+### Structured XMI IDs (ETL Semantics)
+
+ZETA generates ETL-style structured XMI IDs for traceability:
+
+```
+Format: <source-container>/(esm/<source-id>)/<rule-name>
+Example: Customer/(esm/_abc123)/Entity2Table
+```
+
+For discriminated equivalents, the discriminator is appended:
+
+```
+Format: <source-container>/(esm/<source-id>)/<rule-name>/(discriminator/<discriminator-value>)
+Example: Customer/(esm/_abc123)/TableAction/(discriminator/relation1)
+```
+
+This enables:
+- Tracing target elements back to source elements
+- Understanding which rule created each element
+- Debugging transformation flows
+
+To disable structured IDs (use sequence-based IDs instead):
+
+```java
+context.setUseStructuredIds(false);  // Uses _seq0, _seq1, etc.
+```
+
 ### Resource Aliases and Multi-Model Transformations
 
 The framework supports working with multiple EMF ResourceSets through resource aliases, similar to ETL's model binding. This enables complex transformation scenarios involving multiple input models.
