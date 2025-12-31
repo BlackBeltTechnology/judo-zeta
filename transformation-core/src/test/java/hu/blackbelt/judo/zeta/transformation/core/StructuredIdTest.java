@@ -229,6 +229,56 @@ class StructuredIdTest {
         }
 
         @Test
+        @DisplayName("XMI ID-based lookup finds existing element with structured IDs")
+        void xmiIdBasedLookupFindsExistingElement() {
+            EClass source = createEClass("Order", "_xyz999");
+
+            registry.register(DiscriminatedTransformation.class);
+            context.setTransformationRegistry(registry);
+            context.setUseStructuredIds(true);
+
+            // First call - creates the element
+            EAnnotation first = context.equivalentDiscriminated(
+                    source, EAnnotation.class, "LazyAnnotation", "lookup-test");
+
+            assertNotNull(first);
+            String firstId = context.getPendingXmiId(first);
+            assertNotNull(firstId, "First element should have XMI ID");
+            assertTrue(firstId.contains("discriminator/lookup-test"),
+                    "ID should contain discriminator: " + firstId);
+
+            // Second call with same discriminator - should find by XMI ID
+            EAnnotation second = context.equivalentDiscriminated(
+                    source, EAnnotation.class, "LazyAnnotation", "lookup-test");
+
+            assertSame(first, second, "Should return same instance via XMI ID lookup");
+        }
+
+        @Test
+        @DisplayName("XMI ID-based lookup disabled when useStructuredIds is false")
+        void xmiIdLookupDisabledWithoutStructuredIds() {
+            EClass source = createEClass("Product", "_abc000");
+
+            registry.register(DiscriminatedTransformation.class);
+            context.setTransformationRegistry(registry);
+            context.setUseStructuredIds(false);
+
+            // First call
+            EAnnotation first = context.equivalentDiscriminated(
+                    source, EAnnotation.class, "LazyAnnotation", "no-structured");
+
+            // Second call - uses cache, not XMI ID lookup
+            EAnnotation second = context.equivalentDiscriminated(
+                    source, EAnnotation.class, "LazyAnnotation", "no-structured");
+
+            assertSame(first, second, "Should return same instance via object cache");
+
+            // Verify IDs are sequence-based, not structured
+            String firstId = context.getPendingXmiId(first);
+            assertTrue(firstId.startsWith("_seq"), "ID should be sequence-based: " + firstId);
+        }
+
+        @Test
         @DisplayName("Disabled structured IDs uses sequence-based format")
         void disabledStructuredIdsUsesSequence() {
             context.setUseStructuredIds(false);

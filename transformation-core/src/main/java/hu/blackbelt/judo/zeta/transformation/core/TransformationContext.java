@@ -911,7 +911,21 @@ public class TransformationContext {
             String ruleName,
             String discriminator
     ) {
-        // Check discriminated cache first
+        // When structured IDs are enabled, use XMI ID-based lookup first (ETL semantics)
+        if (useStructuredIds && discriminator != null) {
+            String baseId = generateStructuredId(source, ruleName);
+            String discriminatedId = generateDiscriminatedId(baseId, discriminator);
+
+            // Look up by XMI ID in target resource
+            T existing = findByXmiId(discriminatedId, targetType);
+            if (existing != null) {
+                // Cache it for future lookups and return
+                resolutionCache.addDiscriminatedMapping(source, existing, ruleName, discriminator);
+                return existing;
+            }
+        }
+
+        // Check discriminated cache (object-reference based)
         T cached = resolutionCache.getEquivalentDiscriminated(source, targetType, ruleName, discriminator);
         if (cached != null) {
             return cached;
@@ -1543,6 +1557,45 @@ public class TransformationContext {
         } else {
             return "(" + alias + "/" + sourceId + ")";
         }
+    }
+
+    /**
+     * Find an element in the target resource by its XMI ID.
+     *
+     * <p>This enables ETL-style ID-based lookup for discriminated equivalents.
+     * When the same (source + discriminator) combination is looked up again,
+     * the existing element is found by its XMI ID.</p>
+     *
+     * @param xmiId the XMI ID to search for
+     * @param targetType the expected target type
+     * @param <T> the target type
+     * @return the element with the given ID, or null if not found
+     */
+    @SuppressWarnings("unchecked")
+    private <T extends EObject> T findByXmiId(String xmiId, Class<T> targetType) {
+        if (xmiId == null || targetResourceSet.getResources().isEmpty()) {
+            return null;
+        }
+
+        Resource targetResource = targetResourceSet.getResources().get(0);
+
+        // Check XMI resource for ID-based lookup
+        if (targetResource instanceof XMIResource) {
+            XMIResource xmiResource = (XMIResource) targetResource;
+            EObject element = xmiResource.getEObject(xmiId);
+            if (element != null && targetType.isInstance(element)) {
+                return (T) element;
+            }
+        }
+
+        // Also check pending XMI IDs for staged elements not yet committed
+        for (Map.Entry<EObject, String> entry : pendingXmiIds.entrySet()) {
+            if (xmiId.equals(entry.getValue()) && targetType.isInstance(entry.getKey())) {
+                return (T) entry.getKey();
+            }
+        }
+
+        return null;
     }
 
     /**
