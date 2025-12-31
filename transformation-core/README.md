@@ -308,6 +308,49 @@ To disable structured IDs (use sequence-based IDs instead):
 context.setUseStructuredIds(false);  // Uses _seq0, _seq1, etc.
 ```
 
+### XMI ID-based Cache Lookup (ETL Semantics)
+
+When `useStructuredIds` is enabled (default), ZETA uses XMI ID-based lookup for `equivalent()` calls, matching ETL behavior:
+
+1. **equivalent(source, TargetType.class)** - Before executing a lazy rule, ZETA generates the expected structured ID and checks if an element with that ID already exists in the target model
+2. **equivalent(source, "RuleName")** - Same lookup using the specified rule name
+3. **equivalentDiscriminated(source, TargetType.class, "RuleName", "discriminator")** - Looks up by discriminated ID first
+
+This means:
+- If you manually create an element with the expected XMI ID, `equivalent()` will find it
+- Elements created in previous transformation phases are discovered by ID
+- Cross-rule references work correctly even when rules execute in different orders
+
+Example:
+
+```java
+// First transformation creates element with structured ID
+@TransformRule(name = "Entity2Table")
+public TransformFunction<Entity, Table> entity2Table() {
+    return (entity, ctx) -> {
+        Table table = ctx.createTarget(Table.class);
+        // Gets ID: Customer/(esm/_abc123)/Entity2Table
+        table.setName(entity.getName());
+        ctx.addToResource(table);
+        return table;
+    };
+}
+
+// Second transformation finds existing element by XMI ID
+@TransformRule(name = "CreateFK")
+public TransformFunction<Reference, ForeignKey> createFk() {
+    return (ref, ctx) -> {
+        // Finds existing table by structured XMI ID lookup
+        Table table = ctx.equivalent(ref.getOwner(), Table.class);
+        ForeignKey fk = ctx.createTarget(ForeignKey.class);
+        fk.setOwningTable(table);
+        return fk;
+    };
+}
+```
+
+When `useStructuredIds` is disabled, ZETA falls back to object-reference caching only.
+
 ### Resource Aliases and Multi-Model Transformations
 
 The framework supports working with multiple EMF ResourceSets through resource aliases, similar to ETL's model binding. This enables complex transformation scenarios involving multiple input models.

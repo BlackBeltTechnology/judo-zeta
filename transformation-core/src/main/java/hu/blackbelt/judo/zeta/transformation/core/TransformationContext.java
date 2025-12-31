@@ -767,14 +767,25 @@ public class TransformationContext {
             for (TransformRuleDescriptor rule : rules) {
                 if (rule.appliesTo(source) && targetType.isAssignableFrom(rule.getTargetType())) {
                     if (rule.evaluateGuard(source, this)) {
+                        // When structured IDs are enabled, try XMI ID-based lookup first (ETL semantics)
+                        if (useStructuredIds) {
+                            String structuredId = generateStructuredId(source, rule.getName());
+                            T existingByXmiId = findByXmiId(structuredId, targetType);
+                            if (existingByXmiId != null) {
+                                // Found by XMI ID - cache it and return
+                                resolutionCache.addMapping(source, rule.getName(), existingByXmiId, rule.isPrimary());
+                                return existingByXmiId;
+                            }
+                        }
+
                         LazyRuleKey key = new LazyRuleKey(source, targetType);
-                        
+
                         // Check if already executed (from cache or concurrent execution)
                         EObject existing = executingLazyRules.get(key);
                         if (existing != null) {
                             return (T) existing;
                         }
-                        
+
                         // Check if this key is currently being executed in this thread (recursion)
                         Set<LazyRuleKey> inProgress = inProgressRules.get();
                         if (inProgress.contains(key)) {
@@ -782,7 +793,7 @@ public class TransformationContext {
                             // The caller should handle null gracefully
                             return null;
                         }
-                        
+
                         // Mark as in-progress for this thread
                         inProgress.add(key);
                         try {
@@ -791,7 +802,7 @@ public class TransformationContext {
                             if (cachedAgain != null) {
                                 return cachedAgain;
                             }
-                            
+
                             // Execute the rule
                             EObject result = rule.execute(source, this);
                             if (result != null) {
@@ -852,6 +863,17 @@ public class TransformationContext {
         TransformRuleDescriptor rule = transformationRegistry.getRuleByName(ruleName);
         if (rule == null || !rule.appliesTo(source)) {
             return null;
+        }
+
+        // When structured IDs are enabled, try XMI ID-based lookup first (ETL semantics)
+        if (useStructuredIds) {
+            String structuredId = generateStructuredId(source, ruleName);
+            T existingByXmiId = findByXmiId(structuredId, (Class<T>) rule.getTargetType());
+            if (existingByXmiId != null) {
+                // Found by XMI ID - cache it and return
+                resolutionCache.addMapping(source, ruleName, existingByXmiId, rule.isPrimary());
+                return existingByXmiId;
+            }
         }
 
         // ETL semantics: guards ARE evaluated at invocation time for @lazy rules
