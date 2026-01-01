@@ -247,6 +247,11 @@ The transformation framework uses a **two-phase staging approach** for thread-sa
 - Elements committed to target Resource (single-threaded)
 - XMI IDs applied after elements added to Resource
 
+**Post-Transformation XMI ID Application:**
+- Elements added through containment references (not via `addToResource()`) may have pending XMI IDs
+- Call `applyAllPendingXmiIds()` after transformation completes to ensure all elements have their XMI IDs properly set
+- This method iterates through the target resource and applies any pending IDs that weren't applied during the commit phase
+
 ```java
 // Configure parallel transformation
 TransformationExecutor executor = TransformationExecutor.builder()

@@ -261,6 +261,42 @@ Then use explicit package specification:
 EObject obj = ctx.createTarget(dynamicType, dynamicPackage);
 ```
 
+## XMI ID Management
+
+### applyAllPendingXmiIds()
+
+Applies all pending XMI IDs to elements in the target resource.
+
+```java
+void applyAllPendingXmiIds()
+```
+
+```java
+// After transformation completes
+executor.transform(sourceElements);
+ctx.applyAllPendingXmiIds();
+```
+
+**When to use**: Call this method after transformation completes to ensure all elements have their XMI IDs properly set. Elements added through containment references (not via `addToResource()`) may have pending IDs that were never applied during the normal commit phase.
+
+**How it works**:
+1. Iterates through all elements in the target resource
+2. Checks the pending XMI ID map for each element
+3. Applies any pending IDs that haven't been set yet
+
+**Example**:
+
+```java
+TransformationResult result = executor.transform(sourceElements);
+
+// Ensure all XMI IDs are applied, including those on
+// elements added via containment references
+ctx.applyAllPendingXmiIds();
+
+// Now safe to serialize the target resource
+targetResource.save(saveOptions);
+```
+
 ---
 
 **Previous**: [Annotations](annotations.md) | **Next**: [TransformationResult](transformation-result.md)
