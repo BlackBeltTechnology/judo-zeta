@@ -466,6 +466,13 @@ public class TransformRuleDescriptor {
         TransformRuleDescriptor previousRule = context.getCurrentExecutingRule();
         context.setCurrentExecutingRule(this);
 
+        // CRITICAL: Save and update currentSource for proper ID generation
+        // When equivalent() triggers a lazy rule, currentSource must point to the
+        // actual source being transformed (not the caller's source).
+        // This ensures XMI IDs are generated from the correct source element.
+        EObject previousSource = context.getCurrentSource();
+        context.setCurrentSource(source);
+
         try {
             // Check if this rule extends parent rules
             if (!extendsRules.isEmpty() && context.getTransformationRegistry() != null) {
@@ -475,6 +482,13 @@ public class TransformRuleDescriptor {
             // No inheritance - execute normally
             return getFunction().transform(source, context);
         } finally {
+            // Restore previous source (for nested rule execution)
+            if (previousSource != null) {
+                context.setCurrentSource(previousSource);
+            } else {
+                context.clearCurrentSource();
+            }
+
             // Restore previous rule (for nested rule execution)
             if (previousRule != null) {
                 context.setCurrentExecutingRule(previousRule);
