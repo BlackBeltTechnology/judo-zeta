@@ -978,6 +978,114 @@ class StructuredIdTest {
             assertFalse(parentId.contains("items"),
                     "Parent ID must NOT contain 'items' name: " + parentId);
         }
+
+        /**
+         * CRITICAL TEST: executeParentRule called through ctx.call() with @Cached extension method.
+         * This tests the EXACT scenario where @Cached might interfere with context propagation.
+         *
+         * Call chain:
+         * Rule A (processing items)
+         *   -> ctx.call(orderItemTO, "getCachedEquivalent", ctx)  // goes through ExtensionMethodRegistry
+         *     -> @Cached extension method
+         *       -> ctx.executeParentRule("RuleB", self)
+         */
+        @Test
+        @DisplayName("executeParentRule via ctx.call() with @Cached extension uses correct source context")
+        void executeParentRuleViaCachedExtensionUsesCorrectContext() {
+            // Create the outer rule's source (relation member "items")
+            EReference itemsRelation = EcoreFactory.eINSTANCE.createEReference();
+            itemsRelation.setName("items");
+            sourceResource.getContents().add(itemsRelation);
+            if (sourceResource instanceof XMIResource) {
+                ((XMIResource) sourceResource).setID(itemsRelation, "_items_cached_test");
+            }
+
+            // Create the target type - NOT a primary element
+            EClass orderItemTO = EcoreFactory.eINSTANCE.createEClass();
+            orderItemTO.setName("OrderItemCached");
+            EPackage container = EcoreFactory.eINSTANCE.createEPackage();
+            container.setName("types");
+            container.getEClassifiers().add(orderItemTO);
+            sourceResource.getContents().add(container);
+            if (sourceResource instanceof XMIResource) {
+                ((XMIResource) sourceResource).setID(orderItemTO, "_orderitem_cached_test");
+            }
+            itemsRelation.setEType(orderItemTO);
+
+            // Create a new context with a REAL ExtensionMethodRegistry for this test
+            ExtensionMethodRegistry realExtRegistry = new ExtensionMethodRegistry();
+            realExtRegistry.register(CachedExtensionMethods.class);
+
+            TransformationContext ctxWithRealExt = new TransformationContext(
+                    new TestModelProvider(),
+                    sourceResourceSet,
+                    targetResourceSet,
+                    realExtRegistry
+            );
+            ctxWithRealExt.setTargetPackage(EcorePackage.eINSTANCE);
+            ctxWithRealExt.setAutoAddRootElements(true);
+            ctxWithRealExt.setUseStructuredIds(true);
+
+            TransformationRegistry regForCachedTest = new TransformationRegistry();
+            regForCachedTest.register(RuleCallingCachedExtension.class);
+            regForCachedTest.register(ParentRuleForCachedExtension.class);
+            ctxWithRealExt.setTransformationRegistry(regForCachedTest);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(regForCachedTest)
+                    .context(ctxWithRealExt)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            // Get targets
+            EAnnotation outerTarget = null;
+            EPackage parentTarget = null;
+            for (EObject obj : targetResource.getContents()) {
+                if (obj instanceof EAnnotation) {
+                    outerTarget = (EAnnotation) obj;
+                } else if (obj instanceof EPackage) {
+                    parentTarget = (EPackage) obj;
+                }
+            }
+
+            assertNotNull(outerTarget, "Outer rule should create annotation");
+            if (parentTarget == null && outerTarget != null) {
+                for (EObject ref : outerTarget.getReferences()) {
+                    if (ref instanceof EPackage) {
+                        parentTarget = (EPackage) ref;
+                    }
+                }
+            }
+            assertNotNull(parentTarget, "Parent rule should create package via @Cached extension");
+
+            String outerId = getXmiId(outerTarget);
+            String parentId = getXmiId(parentTarget);
+
+            // Outer ID should contain items' source ID and outer rule name
+            assertTrue(outerId.contains("_items_cached_test"),
+                    "Outer ID should contain items' source ID: " + outerId);
+            assertTrue(outerId.contains("RuleCallingCachedExt"),
+                    "Outer ID should contain outer rule name: " + outerId);
+
+            // Parent ID MUST contain OrderItem's source ID and parent rule name
+            // NOT the caller's (items) context!
+            assertTrue(parentId.contains("_orderitem_cached_test"),
+                    "Parent ID should contain OrderItem's source ID: " + parentId);
+            assertTrue(parentId.contains("ParentRuleViaCachedExt"),
+                    "Parent ID should contain ParentRuleViaCachedExt: " + parentId);
+            assertTrue(parentId.contains("OrderItemCached"),
+                    "Parent ID should contain 'OrderItemCached' name: " + parentId);
+
+            // Parent ID must NOT contain the caller's (items) context
+            assertFalse(parentId.contains("_items_cached_test"),
+                    "Parent ID must NOT contain items' source ID: " + parentId);
+            assertFalse(parentId.contains("RuleCallingCachedExt"),
+                    "Parent ID must NOT contain outer rule name: " + parentId);
+            assertFalse(parentId.contains("/items/"),
+                    "Parent ID must NOT contain 'items' name: " + parentId);
+        }
     }
 
     // ==================== Transformation Classes ====================
@@ -992,6 +1100,61 @@ class StructuredIdTest {
          */
         public static EPackage getEquivalent(EClass self, TransformationContext ctx) {
             return ctx.executeParentRule("ParentRuleViaHelper", self);
+        }
+    }
+
+    /**
+     * Extension method class with @Cached annotation for testing through ctx.call().
+     */
+    @hu.blackbelt.judo.zeta.annotation.ExtensionMethod(EClass.class)
+    public static class CachedExtensionMethods {
+        @hu.blackbelt.judo.zeta.annotation.Cached
+        public static EPackage getCachedEquivalent(EClass self, TransformationContext ctx) {
+            return ctx.executeParentRule("ParentRuleViaCachedExt", self);
+        }
+    }
+
+    /**
+     * Rule that calls executeParentRule through ctx.call() with @Cached extension.
+     * This tests the exact pattern where @Cached might interfere.
+     */
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EReference.class, target = EAnnotation.class)
+    public static class RuleCallingCachedExtension {
+        @TransformRule(name = "RuleCallingCachedExt")
+        @Transform(type = EReference.class)
+        public TransformFunction<EReference, EAnnotation> ruleCallingCachedExt() {
+            return (source, ctx) -> {
+                EAnnotation ann = ctx.createTarget(EAnnotation.class);
+                ann.setSource("outer_" + source.getName());
+
+                EClassifier targetType = source.getEType();
+                if (targetType instanceof EClass) {
+                    // Call through ctx.call() - goes through ExtensionMethodRegistry with @Cached
+                    EPackage result = ctx.call((EClass) targetType, "getCachedEquivalent", ctx);
+                    if (result != null) {
+                        ann.getReferences().add(result);
+                    }
+                }
+
+                return ann;
+            };
+        }
+    }
+
+    /**
+     * Parent rule called via the @Cached extension method.
+     */
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
+    public static class ParentRuleForCachedExtension {
+        @TransformRule(name = "ParentRuleViaCachedExt")
+        @Transform(type = EClass.class)
+        @Lazy
+        public TransformFunction<EClass, EPackage> parentRule() {
+            return (source, ctx) -> {
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setName("mapped_" + source.getName());
+                return pkg;
+            };
         }
     }
 
