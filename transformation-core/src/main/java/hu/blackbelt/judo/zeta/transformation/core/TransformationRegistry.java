@@ -26,6 +26,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Method;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -147,7 +149,7 @@ public class TransformationRegistry {
             transforms.add(new TransformDefinition("source", defaultSourceType));
         }
 
-        // Priority: @To annotations > targetTypes attribute > default from @TransformationContext
+        // Priority: @To annotations > targetTypes attribute > method return type > default from @TransformationContext
         if (!tos.isEmpty()) {
             targetType = tos.get(0).getType();
         } else if (targetTypes.length > 0) {
@@ -157,8 +159,17 @@ public class TransformationRegistry {
                 tos.add(new ToDefinition("target", tt));
             }
         } else {
-            targetType = defaultTargetType;
-            tos.add(new ToDefinition("target", defaultTargetType));
+            // Try to extract target type from method return type (TransformFunction<Source, Target>)
+            Class<? extends EObject> extractedTargetType = extractTargetTypeFromReturnType(ruleMethod);
+            if (extractedTargetType != null) {
+                targetType = extractedTargetType;
+                tos.add(new ToDefinition("target", extractedTargetType));
+                log.debug("Extracted target type from method return type: {} for rule: {}",
+                        extractedTargetType.getSimpleName(), name);
+            } else {
+                targetType = defaultTargetType;
+                tos.add(new ToDefinition("target", defaultTargetType));
+            }
         }
 
         // Find guard method if specified
@@ -301,5 +312,57 @@ public class TransformationRegistry {
                 log.error("Failed to invoke post-transformation hook: {}", hook.getName(), e);
             }
         }
+    }
+
+    /**
+     * Extract the target type from a rule method's return type.
+     *
+     * <p>For methods returning {@code TransformFunction<SourceType, TargetType>},
+     * extracts TargetType as the second generic type argument.</p>
+     *
+     * <p>This enables lazy rules to declare their target type via the method signature
+     * without requiring explicit @To annotations, e.g.:</p>
+     * <pre>{@code
+     * public TransformFunction<ActorType, UnmappedTransferObjectType> createMetadataType() {
+     *     // Target type UnmappedTransferObjectType is extracted from the return type
+     * }
+     * }</pre>
+     *
+     * @param ruleMethod the rule method
+     * @return the extracted target type, or null if extraction fails
+     */
+    @SuppressWarnings("unchecked")
+    private Class<? extends EObject> extractTargetTypeFromReturnType(Method ruleMethod) {
+        Type returnType = ruleMethod.getGenericReturnType();
+
+        // Check if return type is parameterized (e.g., TransformFunction<S, T>)
+        if (returnType instanceof ParameterizedType) {
+            ParameterizedType parameterizedType = (ParameterizedType) returnType;
+            Type[] typeArgs = parameterizedType.getActualTypeArguments();
+
+            // TransformFunction has 2 type parameters: <SourceType, TargetType>
+            // We want the second one (index 1)
+            if (typeArgs.length >= 2) {
+                Type targetTypeArg = typeArgs[1];
+
+                // Handle direct class reference
+                if (targetTypeArg instanceof Class) {
+                    Class<?> targetClass = (Class<?>) targetTypeArg;
+                    if (EObject.class.isAssignableFrom(targetClass)) {
+                        return (Class<? extends EObject>) targetClass;
+                    }
+                }
+
+                // Handle parameterized types (e.g., if target is itself generic)
+                if (targetTypeArg instanceof ParameterizedType) {
+                    Type rawType = ((ParameterizedType) targetTypeArg).getRawType();
+                    if (rawType instanceof Class && EObject.class.isAssignableFrom((Class<?>) rawType)) {
+                        return (Class<? extends EObject>) rawType;
+                    }
+                }
+            }
+        }
+
+        return null;
     }
 }

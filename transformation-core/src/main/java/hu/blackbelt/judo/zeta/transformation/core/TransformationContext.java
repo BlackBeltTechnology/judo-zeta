@@ -1114,6 +1114,11 @@ public class TransformationContext {
      * }
      * }</pre>
      *
+     * <p><b>Important:</b> When invoking a lazy rule WITHOUT a pre-created target,
+     * this method resets the inheritance context so the lazy rule can create its own
+     * target independently. This fixes issues where nested lazy rule invocations
+     * would incorrectly inherit the caller's inheritance state.</p>
+     *
      * @param parentRuleName the parent rule name
      * @param source the source element
      * @param target the pre-created target (parent's createTarget() will return this)
@@ -1138,13 +1143,25 @@ public class TransformationContext {
             return (T) cached;
         }
 
-        // If target provided, set up inheritance context so parent's createTarget() returns it
+        // Save current inheritance state to restore later
         boolean wasInInheritance = isInInheritanceExecution();
         EObject previousPreCreated = getPreCreatedTarget();
 
         if (target != null) {
+            // If target provided, set up inheritance context so parent's createTarget() returns it
             setPreCreatedTarget(target);
             setInInheritanceExecution(true);
+        } else if (wasInInheritance && previousPreCreated != null && parentRule.isLazy()) {
+            // IMPORTANT: When invoking a LAZY rule from within an inheritance context,
+            // ALWAYS reset the context so the lazy rule creates its own independent target.
+            // This is crucial because lazy rules are meant to create separate objects,
+            // not share the caller's pre-created target.
+            //
+            // Without this fix, two lazy rules with the same target type (e.g., both creating
+            // UnmappedTransferObjectType) would incorrectly share the same pre-created target,
+            // with the second rule overwriting the first rule's properties.
+            clearPreCreatedTarget();
+            setInInheritanceExecution(false);
         }
 
         try {
@@ -1156,14 +1173,12 @@ public class TransformationContext {
             return (T) result;
         } finally {
             // Restore previous inheritance state
-            if (target != null) {
-                if (previousPreCreated != null) {
-                    setPreCreatedTarget(previousPreCreated);
-                } else {
-                    clearPreCreatedTarget();
-                }
-                setInInheritanceExecution(wasInInheritance);
+            if (previousPreCreated != null) {
+                setPreCreatedTarget(previousPreCreated);
+            } else {
+                clearPreCreatedTarget();
             }
+            setInInheritanceExecution(wasInInheritance);
         }
     }
 
