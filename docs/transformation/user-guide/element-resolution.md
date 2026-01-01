@@ -67,15 +67,31 @@ Column col2 = ctx.equivalent(attr, Column.class);
 assert col1 == col2;  // Same object reference
 ```
 
+### XMI ID-based Lookup (ETL Semantics)
+
+When `useStructuredIds` is enabled (default), `equivalent()` uses XMI ID-based lookup before executing lazy rules. This matches ETL semantics where equivalent lookups find elements by their XMI IDs.
+
+```java
+// Element is found by its structured XMI ID: Customer/(esm/_abc123)/Entity2Table
+Table table = ctx.equivalent(customerEntity, Table.class);
+```
+
+This enables:
+- Cross-phase element discovery (elements created in previous phases are found)
+- Cross-rule references work correctly regardless of rule execution order
+- Manually created elements with matching XMI IDs are discovered
+
 ### Rule Selection
 
 When `equivalent()` is called:
 
-1. Look up source element in cache
+1. Look up source element in object-reference cache
 2. If cached, return the `@Primary` result (or first result if no primary)
 3. If not cached:
    - Find rules matching source type
-   - If rule is `@Lazy`, execute it now
+   - If `useStructuredIds` is enabled, generate expected XMI ID and look up by ID
+   - If found by XMI ID, cache it and return
+   - Otherwise, if rule is `@Lazy`, execute it now
    - If rule is not lazy but not yet executed, this is an ordering issue
 
 ## equivalents() - Multiple Target Resolution
@@ -190,6 +206,8 @@ public TransformFunction<EntityType, Table> entity2Table() {
 
 ## equivalentDiscriminated() - Multiple Outputs from Same Source
 
+> **Note**: Discriminated equivalence is a **Zeta-specific workaround**, not part of the original Epsilon ETL specification. In ETL, you can create multiple targets using `to t1, t2, t3` syntax in a single rule. Since Zeta follows a single-source-single-target pattern, `equivalentDiscriminated()` provides an alternative mechanism for creating multiple related target elements from a single source element.
+
 Create multiple distinct targets from the same source using discriminators:
 
 ```java
@@ -274,6 +292,34 @@ Operation createOp = ctx.equivalentDiscriminated(
 );
 // Returns cached createOperation
 ```
+
+## Structured XMI IDs
+
+ZETA generates ETL-style structured XMI IDs for traceability and ID-based lookup:
+
+```
+Format: <source-name>/(<alias>/<source-id>)/<rule-name>
+Example: Customer/(esm/_abc123)/Entity2Table
+```
+
+The `<alias>` is the registered resource alias (e.g., "esm", "asm", "mapping", "source").
+
+For discriminated equivalents, the discriminator is appended:
+
+```
+Format: <base-id>/(discriminator/<discriminator-value>)
+Example: Customer/(esm/_abc123)/TableAction/(discriminator/relation1)
+```
+
+### Disabling Structured IDs
+
+To use sequence-based IDs instead (for compatibility or debugging):
+
+```java
+context.setUseStructuredIds(false);  // Uses _seq0, _seq1, etc.
+```
+
+When disabled, XMI ID-based lookup is also disabled, falling back to object-reference caching only.
 
 ## Resolution with @Greedy Rules
 
