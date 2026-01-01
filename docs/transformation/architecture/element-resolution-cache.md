@@ -48,6 +48,31 @@ EObject target = cache.get(sourceElement, "EntityType2Table", "");
 EObject createOp = cache.get(sourceElement, "RelationCRUD", "create");
 ```
 
+### XMI ID-based Lookup (ETL Semantics)
+
+When `useStructuredIds` is enabled (default), `equivalent()` also searches by XMI ID:
+
+```java
+// 1. Check object-reference cache first
+EObject cached = cache.get(sourceElement, ruleName, "");
+if (cached != null) return cached;
+
+// 2. Generate expected structured XMI ID
+String xmiId = generateStructuredId(sourceElement, ruleName);
+// Example: Customer/(esm/_abc123)/Entity2Table
+
+// 3. Look up by XMI ID in target resource and pending IDs
+EObject existing = findByXmiId(xmiId, targetType);
+if (existing != null) {
+    cache.store(sourceElement, ruleName, "", existing);  // Cache for future
+    return existing;
+}
+
+// 4. Execute rule if not found
+```
+
+This enables cross-phase element discovery when elements are created in separate transformation phases.
+
 ## Example Cache State
 
 After transforming Customer entity with relations:
@@ -98,12 +123,30 @@ public class ElementResolutionCache {
 }
 ```
 
+## Structured XMI ID Format
+
+ZETA generates ETL-style structured XMI IDs for traceability:
+
+```
+Standard:      <source-name>/(<alias>/<source-id>)/<rule-name>
+Discriminated: <source-name>/(<alias>/<source-id>)/<rule-name>/(discriminator/<value>)
+
+Examples:
+  Customer/(esm/_abc123)/Entity2Table
+  Customer/(esm/_abc123)/TableAction/(discriminator/relation1)
+```
+
+The `<alias>` is the registered resource alias (e.g., "esm", "asm", "mapping", "source").
+
+When `useStructuredIds` is disabled, sequence-based IDs are used instead (`_seq0`, `_seq1`, etc.).
+
 ## Performance
 
 | Operation | Complexity |
 |-----------|------------|
 | Store | O(1) amortized |
-| Lookup | O(1) |
+| Object-reference lookup | O(1) |
+| XMI ID-based lookup | O(n) in pending IDs, O(1) in committed resource |
 | Memory | O(n) where n = number of transformations |
 
 ---
