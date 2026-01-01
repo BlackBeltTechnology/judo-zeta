@@ -1,11 +1,8 @@
-# activity-based-greedy Specification Delta
+# activity-based-greedy Specification
 
 ## Purpose
-
-Adds activity-based processing mode for `@Greedy @Lazy` rules, matching Epsilon ETL's implicit filtering behavior where only elements referenced via `equivalent()` are processed.
-
-## ADDED Requirements
-
+TBD - created by archiving change add-activity-based-greedy. Update Purpose after archive.
+## Requirements
 ### Requirement: @ActivityBased Annotation
 
 The framework MUST provide an `@ActivityBased` annotation that enables activity-based processing for `@Greedy @Lazy` rules.
@@ -154,9 +151,7 @@ Activity-based rules MUST cache their results like any other rule.
 
 ---
 
-## MODIFIED Requirements
-
-### Requirement: Standard @Greedy Behavior Unchanged (from etl-patterns)
+### Requirement: Standard @Greedy Behavior Unchanged
 
 Standard `@Greedy` rules (without `@ActivityBased`) MUST continue to process ALL matching elements.
 
@@ -171,7 +166,3 @@ Standard `@Greedy` rules (without `@ActivityBased`) MUST continue to process ALL
 
 ---
 
-## Cross-References
-
-- **etl-patterns**: This capability extends the existing `@Greedy` and `@Lazy` annotations
-- **Epsilon ETL**: The `@ActivityBased` mode matches Epsilon's implicit `@greedy @lazy` filtering behavior
