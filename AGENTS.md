@@ -336,6 +336,8 @@ try {
 | `@PreExecution` | Method runs before transformation starts |
 | `@PostExecution` | Method runs after transformation completes |
 
+> **@Greedy vs @Lazy Semantics**: `@Greedy` controls **type matching only** (kind-of vs type-of) - it matches subtypes, not just exact types. `@Lazy` controls **execution timing** (on-demand vs eager phase). These are orthogonal - a rule can be both `@Greedy` AND `@Lazy`. Unlike Epsilon ETL which may skip unreferenced elements, Zeta's eager phase processes ALL matching instances regardless of reachability.
+
 ### Dependency Resolution
 
 The framework topologically sorts rules based on `@Satisfies` annotations:
