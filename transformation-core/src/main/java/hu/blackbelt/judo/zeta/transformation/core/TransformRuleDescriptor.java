@@ -473,6 +473,19 @@ public class TransformRuleDescriptor {
         EObject previousSource = context.getCurrentSource();
         context.setCurrentSource(source);
 
+        // CRITICAL: Save and RESET inheritance state for nested transformation support
+        // When a transform function triggers another transformation (via equivalent()),
+        // the nested transformation should start FRESH, not inherit the outer's inheritance
+        // context. Without this reset, executeWithInheritance() would see inInheritanceExecution=true
+        // and assume it's being called as a parent rule, skipping target creation and reusing
+        // the outer transformation's preCreatedTarget - causing target sharing bugs.
+        boolean previousInInheritance = context.isInInheritanceExecution();
+        EObject previousPreCreatedTarget = context.getPreCreatedTarget();
+
+        // Reset inheritance state - this transformation starts fresh
+        context.setInInheritanceExecution(false);
+        context.clearPreCreatedTarget();
+
         try {
             // Check if this rule extends parent rules
             if (!extendsRules.isEmpty() && context.getTransformationRegistry() != null) {
@@ -482,6 +495,14 @@ public class TransformRuleDescriptor {
             // No inheritance - execute normally
             return getFunction().transform(source, context);
         } finally {
+            // Restore inheritance state (for nested rule execution)
+            context.setInInheritanceExecution(previousInInheritance);
+            if (previousPreCreatedTarget != null) {
+                context.setPreCreatedTarget(previousPreCreatedTarget);
+            } else {
+                context.clearPreCreatedTarget();
+            }
+
             // Restore previous source (for nested rule execution)
             if (previousSource != null) {
                 context.setCurrentSource(previousSource);
