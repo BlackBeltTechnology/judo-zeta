@@ -142,6 +142,79 @@ public TransformFunction<Reference, ForeignKey> validReference2ForeignKey() { ..
 public TransformFunction<Reference, ForeignKey> reference2MainForeignKey() { ... }
 ```
 
+## @Detached Annotation
+
+The `@Detached` annotation marks lazy rules whose output should **NOT** be automatically added to `Resource.contents`. The caller is responsible for adding the object to its proper container.
+
+### When to Use @Detached
+
+Use `@Detached` for objects that should only exist within a parent container, not at the resource root:
+
+```java
+@TransformRule(name = "TableRowCallAction")
+@Lazy
+@Detached  // Output NOT added to Resource.contents
+public TransformFunction<OperationForm, Action> tableRowCallAction() {
+    return (source, ctx) -> {
+        Action target = ctx.createTarget(Action.class);
+        target.setName(source.getName() + "::TableRowCallAction");
+        // Will NOT be added to Resource because @Detached
+        return target;
+    };
+}
+```
+
+### Adding Detached Objects to Containers
+
+The caller retrieves the detached object via `equivalent()` or `equivalentDiscriminated()` and adds it to the appropriate container:
+
+```java
+@TransformRule(name = "Form2Page")
+public TransformFunction<Form, Page> form2Page() {
+    return (form, ctx) -> {
+        Page page = ctx.createTarget(Page.class);
+        page.setName(form.getName());
+
+        // Get detached action - NOT in Resource.contents
+        Action action = ctx.equivalentDiscriminated(
+            form, Action.class, "TableRowCallAction", "relation1");
+        action.setName(action.getName() + "::MyRelation");
+
+        // Caller adds to container
+        page.getActions().add(action);
+
+        ctx.addToResource(page);
+        return page;
+    };
+}
+```
+
+### ETL Semantics
+
+In Epsilon ETL, lazy rules don't automatically add output to the resource root. The `@Detached` annotation provides the same behavior in ZETA:
+
+| Annotation | createTarget() behavior | Use case |
+|------------|------------------------|----------|
+| `@Lazy` only | Adds to Resource.contents (if autoAddRootElements=true) | Root-level objects created on-demand |
+| `@Lazy @Detached` | Does NOT add to Resource.contents | Child objects that belong in containers |
+
+### Discriminated Equivalence with @Detached
+
+When using `equivalentDiscriminated()` with `@Detached` rules, each discriminated clone is created without being added to the resource:
+
+```java
+// Create multiple actions from same source, none added to Resource
+Action createAction = ctx.equivalentDiscriminated(
+    relation, Action.class, "RelationAction", "create");
+createAction.setName(baseName + "::Create");
+page.getActions().add(createAction);  // Caller adds
+
+Action updateAction = ctx.equivalentDiscriminated(
+    relation, Action.class, "RelationAction", "update");
+updateAction.setName(baseName + "::Update");
+page.getActions().add(updateAction);  // Caller adds
+```
+
 ## Performance Benefits
 
 ```java
