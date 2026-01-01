@@ -34,7 +34,7 @@ public TransformFunction<EntityType, Table> entityType2Table() { ... }
 
 ## @Lazy
 
-Rule executes on-demand via `equivalent()` calls.
+Rule executes on-demand via `equivalent()` calls, not during the eager transformation phase.
 
 ```java
 @TransformRule(name = "Reference2ForeignKey")
@@ -43,6 +43,8 @@ public TransformFunction<Reference, ForeignKey> reference2ForeignKey() { ... }
 ```
 
 No parameters.
+
+**Epsilon ETL Comparison**: Both frameworks use `@lazy`/`@Lazy` identically - rules are excluded from the main transformation pass and only execute when explicitly requested via `equivalent()`.
 
 ## @Abstract
 
@@ -70,7 +72,7 @@ No parameters.
 
 ## @Greedy
 
-Matches source type AND all subtypes.
+Matches source type AND all subtypes (kind-of semantics vs type-of semantics).
 
 ```java
 @TransformRule(name = "NamedElement2NamedType")
@@ -79,6 +81,10 @@ public TransformFunction<NamedElement, NamedType> namedElement2NamedType() { ...
 ```
 
 No parameters.
+
+**Epsilon ETL Comparison**: Both frameworks use `@greedy`/`@Greedy` for the same purpose - enabling kind-of type matching instead of exact type-of matching. This allows a rule declared for `NamedElement` to also match `EntityType`, `ActorType`, and other subtypes.
+
+> **Note**: `@Greedy` relates **only to type matching** in inheritance hierarchies. It does NOT affect whether elements are processed eagerly or lazily - that is controlled by `@Lazy`. A rule can be both `@Greedy` (match subtypes) and `@Lazy` (on-demand execution).
 
 ## @Extends
 
