@@ -888,9 +888,156 @@ class StructuredIdTest {
             assertFalse(parentId.contains("_rel123"),
                     "Parent ID must NOT contain relation's source ID: " + parentId);
         }
+
+        /**
+         * EXACT BUG REPRODUCTION: executeParentRule called through static helper method.
+         * This matches the judo-tatami bug where @ExtensionMethod calls executeParentRule.
+         *
+         * Call chain:
+         * Rule A (processing items) -> helper method -> static method -> executeParentRule(RuleB, orderItemTO)
+         */
+        @Test
+        @DisplayName("executeParentRule via static helper method uses correct source context")
+        void executeParentRuleViaStaticHelperUsesCorrectContext() {
+            // Create the outer rule's source (relation member "items")
+            EReference itemsRelation = EcoreFactory.eINSTANCE.createEReference();
+            itemsRelation.setName("items");
+            sourceResource.getContents().add(itemsRelation);
+            if (sourceResource instanceof XMIResource) {
+                ((XMIResource) sourceResource).setID(itemsRelation, "_items_source_id");
+            }
+
+            // Create the target type - NOT a primary element
+            EClass orderItemTO = EcoreFactory.eINSTANCE.createEClass();
+            orderItemTO.setName("OrderItem");
+            EPackage container = EcoreFactory.eINSTANCE.createEPackage();
+            container.setName("types");
+            container.getEClassifiers().add(orderItemTO);
+            sourceResource.getContents().add(container);
+            if (sourceResource instanceof XMIResource) {
+                ((XMIResource) sourceResource).setID(orderItemTO, "_orderitem_source_id");
+            }
+            itemsRelation.setEType(orderItemTO);
+
+            registry.register(RuleCallingStaticHelper.class);
+            registry.register(ParentRuleForStaticHelper.class);
+            context.setTransformationRegistry(registry);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            // Get targets
+            EAnnotation outerTarget = null;
+            EPackage parentTarget = null;
+            for (EObject obj : targetResource.getContents()) {
+                if (obj instanceof EAnnotation) {
+                    outerTarget = (EAnnotation) obj;
+                } else if (obj instanceof EPackage) {
+                    parentTarget = (EPackage) obj;
+                }
+            }
+
+            assertNotNull(outerTarget, "Outer rule should create annotation");
+            if (parentTarget == null && outerTarget != null) {
+                for (EObject ref : outerTarget.getReferences()) {
+                    if (ref instanceof EPackage) {
+                        parentTarget = (EPackage) ref;
+                    }
+                }
+            }
+            assertNotNull(parentTarget, "Parent rule should create package via static helper");
+
+            String outerId = getXmiId(outerTarget);
+            String parentId = getXmiId(parentTarget);
+
+            // Outer ID should contain items' source ID and outer rule name
+            assertTrue(outerId.contains("_items_source_id"),
+                    "Outer ID should contain items' source ID: " + outerId);
+            assertTrue(outerId.contains("RuleCallingHelper"),
+                    "Outer ID should contain outer rule name: " + outerId);
+
+            // Parent ID MUST contain OrderItem's source ID and parent rule name
+            // NOT the caller's (items) context!
+            assertTrue(parentId.contains("_orderitem_source_id"),
+                    "Parent ID should contain OrderItem's source ID: " + parentId);
+            assertTrue(parentId.contains("ParentRuleViaHelper"),
+                    "Parent ID should contain ParentRuleViaHelper: " + parentId);
+            assertTrue(parentId.contains("OrderItem"),
+                    "Parent ID should contain 'OrderItem' name: " + parentId);
+
+            // Parent ID must NOT contain the caller's (items) context
+            assertFalse(parentId.contains("_items_source_id"),
+                    "Parent ID must NOT contain items' source ID: " + parentId);
+            assertFalse(parentId.contains("RuleCallingHelper"),
+                    "Parent ID must NOT contain outer rule name: " + parentId);
+            assertFalse(parentId.contains("items"),
+                    "Parent ID must NOT contain 'items' name: " + parentId);
+        }
     }
 
     // ==================== Transformation Classes ====================
+
+    /**
+     * Static helper simulating @ExtensionMethod behavior.
+     * This is the pattern that caused the bug in judo-tatami.
+     */
+    static class ExtensionMethodHelper {
+        /**
+         * Simulates @Cached @ExtensionMethod getPSMTransferObjectTypeEquivalent.
+         */
+        public static EPackage getEquivalent(EClass self, TransformationContext ctx) {
+            return ctx.executeParentRule("ParentRuleViaHelper", self);
+        }
+    }
+
+    /**
+     * Rule that calls executeParentRule through a static helper method.
+     * Simulates the judo-tatami pattern where @ExtensionMethod calls executeParentRule.
+     */
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EReference.class, target = EAnnotation.class)
+    public static class RuleCallingStaticHelper {
+        @TransformRule(name = "RuleCallingHelper")
+        @Transform(type = EReference.class)
+        public TransformFunction<EReference, EAnnotation> ruleCallingHelper() {
+            return (source, ctx) -> {
+                EAnnotation ann = ctx.createTarget(EAnnotation.class);
+                ann.setSource("outer_" + source.getName());
+
+                EClassifier targetType = source.getEType();
+                if (targetType instanceof EClass) {
+                    // Call through static helper - simulates @ExtensionMethod
+                    EPackage result = ExtensionMethodHelper.getEquivalent((EClass) targetType, ctx);
+                    if (result != null) {
+                        ann.getReferences().add(result);
+                    }
+                }
+
+                return ann;
+            };
+        }
+    }
+
+    /**
+     * Parent rule called via the static helper.
+     */
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
+    public static class ParentRuleForStaticHelper {
+        @TransformRule(name = "ParentRuleViaHelper")
+        @Transform(type = EClass.class)
+        @Lazy
+        public TransformFunction<EClass, EPackage> parentRule() {
+            return (source, ctx) -> {
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setName("mapped_" + source.getName());
+                return pkg;
+            };
+        }
+    }
 
     /**
      * Outer rule that calls executeParentRule on a @Lazy rule with @Extends.
