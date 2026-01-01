@@ -636,6 +636,10 @@ class StructuredIdTest {
          * Outer rule calls executeParentRule() with a DIFFERENT source element.
          * The parent rule's target should have ID generated from the passed source,
          * not from the outer rule's source.
+         *
+         * NOTE: This test has OrderItem in sourceResource.getContents(), so it gets
+         * processed as a primary element BEFORE the relation calls executeParentRule.
+         * See executeParentRuleCreatesNewElementWithCorrectContext for the failing case.
          */
         @Test
         @DisplayName("executeParentRule() with different source uses correct source for ID")
@@ -709,9 +713,246 @@ class StructuredIdTest {
             assertFalse(parentId.contains("OuterRule"),
                     "Parent ID must NOT contain outer rule name: " + parentId);
         }
+
+        /**
+         * CRITICAL TEST: Reproduces the Northwind bug where:
+         * 1. Only the relation is processed as a primary element
+         * 2. The target type is NOT in sourceResource.getContents() (not a primary element)
+         * 3. executeParentRule creates it on-demand
+         * 4. The ID must use the NEW source's context, not the caller's context
+         *
+         * This is the exact scenario that fails in Northwind where:
+         * - TransferObjectRelation 'items' is processed
+         * - It calls executeParentRule("CreateMappedTransferObjectType", orderItemTO)
+         * - OrderItem TO wasn't processed yet as a primary element
+         * - The created element incorrectly gets items' ID instead of OrderItem's ID
+         */
+        @Test
+        @DisplayName("executeParentRule() creating NEW element uses newSource context (not caller's)")
+        void executeParentRuleCreatesNewElementWithCorrectContext() {
+            // Create the outer rule's source (relation member "items") - THIS is the primary element
+            EReference itemsRelation = EcoreFactory.eINSTANCE.createEReference();
+            itemsRelation.setName("items");
+            sourceResource.getContents().add(itemsRelation);
+            if (sourceResource instanceof XMIResource) {
+                ((XMIResource) sourceResource).setID(itemsRelation, "_s8FI9v8MEem4dONaAfrVDg");
+            }
+
+            // Create the target type (OrderItem) - NOT added to sourceResource.getContents()!
+            // It's only reachable via the relation's eType reference
+            EClass orderItemEntity = EcoreFactory.eINSTANCE.createEClass();
+            orderItemEntity.setName("OrderItem");
+            // Add to a separate container, not sourceResource.getContents()
+            EPackage container = EcoreFactory.eINSTANCE.createEPackage();
+            container.setName("types");
+            container.getEClassifiers().add(orderItemEntity);
+            sourceResource.getContents().add(container);
+            if (sourceResource instanceof XMIResource) {
+                ((XMIResource) sourceResource).setID(orderItemEntity, "_s8FwAv8MEem4dONaAfrVDg");
+            }
+            itemsRelation.setEType(orderItemEntity);
+
+            // Register ONLY the outer rule - no rule for EClass directly
+            // This ensures OrderItem is NOT processed as a primary element
+            registry.register(OuterRuleWithExecuteParentRule.class);
+            registry.register(ParentRuleForExecuteParentRule.class);
+            context.setTransformationRegistry(registry);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            // Get targets
+            EAnnotation outerTarget = null;
+            EPackage parentTarget = null;
+            for (EObject obj : targetResource.getContents()) {
+                if (obj instanceof EAnnotation) {
+                    outerTarget = (EAnnotation) obj;
+                } else if (obj instanceof EPackage) {
+                    parentTarget = (EPackage) obj;
+                }
+            }
+
+            assertNotNull(outerTarget, "Outer rule should create annotation");
+            assertNotNull(parentTarget, "Parent rule should create package (via executeParentRule)");
+
+            // Get their XMI IDs
+            String outerId = getXmiId(outerTarget);
+            String parentId = getXmiId(parentTarget);
+
+            assertNotNull(outerId, "Outer target should have XMI ID");
+            assertNotNull(parentId, "Parent target should have XMI ID");
+
+            // CRITICAL: IDs must be DIFFERENT
+            assertNotEquals(outerId, parentId,
+                    "Outer (items) and parent (OrderItem) must have different XMI IDs!");
+
+            // Outer ID should contain outer rule's source ID and rule name
+            assertTrue(outerId.contains("_s8FI9v8MEem4dONaAfrVDg"),
+                    "Outer ID should contain items' source ID: " + outerId);
+            assertTrue(outerId.contains("OuterRule"),
+                    "Outer ID should contain OuterRule: " + outerId);
+
+            // CRITICAL: Parent ID must contain OrderItem's source ID and ParentRule name
+            // NOT the caller's (items) context!
+            assertTrue(parentId.contains("_s8FwAv8MEem4dONaAfrVDg"),
+                    "Parent ID should contain OrderItem's source ID (_s8FwAv8MEem4dONaAfrVDg): " + parentId);
+            assertTrue(parentId.contains("ParentRule"),
+                    "Parent ID should contain ParentRule: " + parentId);
+            assertTrue(parentId.contains("OrderItem"),
+                    "Parent ID should contain 'OrderItem' name: " + parentId);
+
+            // Parent ID must NOT contain the caller's (items) context
+            assertFalse(parentId.contains("_s8FI9v8MEem4dONaAfrVDg"),
+                    "Parent ID must NOT contain items' source ID: " + parentId);
+            assertFalse(parentId.contains("OuterRule"),
+                    "Parent ID must NOT contain OuterRule: " + parentId);
+            assertFalse(parentId.contains("items"),
+                    "Parent ID must NOT contain 'items' name: " + parentId);
+        }
+
+        /**
+         * Test executeParentRule with a parent rule that has @Extends.
+         * This exercises the executeWithInheritance() code path.
+         */
+        @Test
+        @DisplayName("executeParentRule() with @Extends parent rule uses correct source for ID")
+        void executeParentRuleWithExtendsUsesCorrectContext() {
+            // Create the outer rule's source (relation member "items")
+            EReference itemsRelation = EcoreFactory.eINSTANCE.createEReference();
+            itemsRelation.setName("items");
+            sourceResource.getContents().add(itemsRelation);
+            if (sourceResource instanceof XMIResource) {
+                ((XMIResource) sourceResource).setID(itemsRelation, "_rel123");
+            }
+
+            // Create the target type - NOT a primary element
+            EClass orderItemEntity = EcoreFactory.eINSTANCE.createEClass();
+            orderItemEntity.setName("OrderItem");
+            EPackage container = EcoreFactory.eINSTANCE.createEPackage();
+            container.setName("types");
+            container.getEClassifiers().add(orderItemEntity);
+            sourceResource.getContents().add(container);
+            if (sourceResource instanceof XMIResource) {
+                ((XMIResource) sourceResource).setID(orderItemEntity, "_orderItem789");
+            }
+            itemsRelation.setEType(orderItemEntity);
+
+            registry.register(OuterRuleCallingExtendsParent.class);
+            registry.register(BaseRuleForExtends.class);
+            registry.register(ChildRuleWithExtends.class);
+            context.setTransformationRegistry(registry);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            // Get targets - package may be in references if rule is detached
+            EAnnotation outerTarget = null;
+            EPackage parentTarget = null;
+            for (EObject obj : targetResource.getContents()) {
+                if (obj instanceof EAnnotation) {
+                    outerTarget = (EAnnotation) obj;
+                } else if (obj instanceof EPackage) {
+                    parentTarget = (EPackage) obj;
+                }
+            }
+
+            assertNotNull(outerTarget, "Outer rule should create annotation");
+            // Check references for the package (may not be in resource contents)
+            if (parentTarget == null && outerTarget != null) {
+                for (EObject ref : outerTarget.getReferences()) {
+                    if (ref instanceof EPackage) {
+                        parentTarget = (EPackage) ref;
+                    }
+                }
+            }
+            assertNotNull(parentTarget, "Parent rule with @Extends should create package");
+
+            String outerId = getXmiId(outerTarget);
+            String parentId = getXmiId(parentTarget);
+
+            // Parent ID must use OrderItem's context, not items' context
+            assertTrue(parentId.contains("_orderItem789"),
+                    "Parent ID should contain OrderItem's source ID: " + parentId);
+            assertTrue(parentId.contains("ChildRule"),
+                    "Parent ID should contain ChildRule: " + parentId);
+            assertFalse(parentId.contains("_rel123"),
+                    "Parent ID must NOT contain relation's source ID: " + parentId);
+        }
     }
 
     // ==================== Transformation Classes ====================
+
+    /**
+     * Outer rule that calls executeParentRule on a @Lazy rule with @Extends.
+     */
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EReference.class, target = EAnnotation.class)
+    public static class OuterRuleCallingExtendsParent {
+        @TransformRule(name = "OuterRuleForExtends")
+        @Transform(type = EReference.class)
+        public TransformFunction<EReference, EAnnotation> outerRule() {
+            return (source, ctx) -> {
+                EAnnotation ann = ctx.createTarget(EAnnotation.class);
+                ann.setSource("outer_" + source.getName());
+
+                EClassifier targetType = source.getEType();
+                if (targetType instanceof EClass) {
+                    // Call executeParentRule on a rule that has @Extends
+                    EPackage parentResult = ctx.executeParentRule("ChildRule", (EClass) targetType);
+                    if (parentResult != null) {
+                        ann.getReferences().add(parentResult);
+                    }
+                }
+
+                return ann;
+            };
+        }
+    }
+
+    /**
+     * Base rule for testing @Extends inheritance.
+     */
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
+    public static class BaseRuleForExtends {
+        @TransformRule(name = "BaseRule")
+        @Transform(type = EClass.class)
+        @Lazy
+        @Abstract
+        public TransformFunction<EClass, EPackage> baseRule() {
+            return (source, ctx) -> {
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setName("base_" + source.getName());
+                return pkg;
+            };
+        }
+    }
+
+    /**
+     * Child rule with @Extends that should use the correct source context.
+     */
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
+    public static class ChildRuleWithExtends {
+        @TransformRule(name = "ChildRule")
+        @Transform(type = EClass.class)
+        @Lazy
+        @Extends("BaseRule")
+        public TransformFunction<EClass, EPackage> childRule() {
+            return (source, ctx) -> {
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setName("child_" + source.getName());
+                return pkg;
+            };
+        }
+    }
 
     /**
      * Simulates outer rule that calls executeParentRule() with a different source.
@@ -745,11 +986,14 @@ class StructuredIdTest {
 
     /**
      * Parent rule called via executeParentRule().
+     * Marked @Lazy so it's NOT automatically executed by the executor -
+     * it's only invoked via executeParentRule() from the outer rule.
      */
     @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
     public static class ParentRuleForExecuteParentRule {
         @TransformRule(name = "ParentRule")
         @Transform(type = EClass.class)
+        @Lazy
         public TransformFunction<EClass, EPackage> parentRule() {
             return (source, ctx) -> {
                 EPackage pkg = ctx.createTarget(EPackage.class);
