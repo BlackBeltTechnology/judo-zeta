@@ -187,6 +187,47 @@ graph TD
 
 Rules are topologically sorted to ensure parents execute before children.
 
+## Inheritance State Isolation
+
+When a transform function calls `equivalent()` to look up related elements, the nested transformation starts with a **fresh inheritance state**. This ensures that:
+
+- Nested transformations create their **own targets**, not reuse the caller's pre-created target
+- Properties set by the nested rule don't overwrite the caller's properties
+- Each `equivalent()` call is independent, regardless of the caller's inheritance context
+
+### Example: Bidirectional Reference Lookup
+
+```java
+@TransformRule(name = "AssociationEnd")
+@Extends("BaseAssociationEnd")
+public TransformFunction<EReference, AssociationEnd> associationEnd() {
+    return (ref, ctx) -> {
+        // This rule has a pre-created target from @Extends
+        AssociationEnd end = ctx.createTarget(AssociationEnd.class);
+        end.setName(ref.getName());
+
+        // Look up the bidirectional partner via equivalent()
+        // IMPORTANT: This nested transformation is ISOLATED
+        // It will NOT reuse our pre-created target
+        EReference opposite = ref.getEOpposite();
+        if (opposite != null) {
+            AssociationEnd partner = ctx.equivalent(opposite, AssociationEnd.class);
+            end.setPartner(partner);  // partner is a DIFFERENT object
+        }
+
+        return end;
+    };
+}
+```
+
+### How It Works
+
+1. **Parent rules in @Extends chain**: Share the pre-created target (as expected)
+2. **equivalent() calls**: Always start fresh, creating independent targets
+3. **State restoration**: After the nested transformation completes, the caller's inheritance state is restored
+
+This behavior matches Epsilon ETL semantics where each `equivalent()` call produces independent results.
+
 ## Best Practices
 
 ### Extract Common Logic

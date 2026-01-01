@@ -163,6 +163,36 @@ public void setup(TransformationContext ctx) {
 3. Use `@Lazy` for conditionally-needed rules
 4. Avoid `getAllSource()` in rule bodies - use `@PreExecution`
 
+## 11. Nested equivalent() Returns Wrong Target
+
+**Symptom**: When calling `equivalent()` from within a rule that uses `@Extends`, the returned target is the same object as the caller's target, causing property overwrites.
+
+**Example of the bug pattern**:
+```java
+@TransformRule(name = "OrderItem")
+@Extends("BaseElement")
+public TransformFunction<EReference, OrderItem> orderItem() {
+    return (ref, ctx) -> {
+        OrderItem item = ctx.createTarget(OrderItem.class);
+        item.setName("item_" + ref.getName());
+
+        // BUG: If equivalent() incorrectly inherits caller's state,
+        // 'product' might be the SAME object as 'item'!
+        Product product = ctx.equivalent(ref.getEType(), Product.class);
+        item.setProduct(product);  // Might be setting item.setProduct(item)!
+
+        return item;
+    };
+}
+```
+
+**Cause**: This was a framework bug where inheritance state (pre-created target) was not properly isolated for nested `equivalent()` calls.
+
+**Solution**: This issue was fixed in the framework. If you're experiencing this issue:
+1. Update to the latest version of the transformation framework
+2. Verify that nested `equivalent()` calls produce independent targets
+3. See [Rule Inheritance - Inheritance State Isolation](../user-guide/rule-inheritance.md#inheritance-state-isolation) for details
+
 ## Debug Logging
 
 Enable debug logging for troubleshooting:
