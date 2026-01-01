@@ -510,9 +510,176 @@ class StructuredIdTest {
             }
             return id;
         }
+
+        /**
+         * Test for TransferObjectRelation bug pattern:
+         * Rule processes RelationMember, calls equivalent() on target EntityType.
+         * IDs must use the correct source element for each target.
+         */
+        @Test
+        @DisplayName("Relation member rule resolving target type uses correct source for ID")
+        void relationMemberResolvingTargetTypeUsesCorrectSource() {
+            // Simulate: RelationMember "items" referencing EntityType "Product"
+            EClass productEntity = createEClass("Product", "_sRDt4PKfEeqHK7TZJcAcOA");
+            EReference itemsRelation = EcoreFactory.eINSTANCE.createEReference();
+            itemsRelation.setName("items");
+            itemsRelation.setEType(productEntity);
+            sourceResource.getContents().add(itemsRelation);
+            if (sourceResource instanceof XMIResource) {
+                ((XMIResource) sourceResource).setID(itemsRelation, "_s8FI9v8MEem4dONaAfrVDg");
+            }
+
+            registry.register(RelationMemberTransformation.class);
+            registry.register(EntityTypeTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            // Get the transformed relation and entity type
+            EAnnotation relationTarget = context.equivalent(itemsRelation, EAnnotation.class);
+            EPackage entityTarget = context.equivalent(productEntity, EPackage.class);
+
+            assertNotNull(relationTarget, "Relation should be transformed");
+            assertNotNull(entityTarget, "EntityType should be transformed");
+
+            // Get their XMI IDs
+            String relationId = getXmiId(relationTarget);
+            String entityId = getXmiId(entityTarget);
+
+            assertNotNull(relationId, "Relation target should have XMI ID");
+            assertNotNull(entityId, "EntityType target should have XMI ID");
+
+            // CRITICAL: IDs must be DIFFERENT
+            assertNotEquals(relationId, entityId,
+                    "Relation and EntityType targets must have different XMI IDs! " +
+                    "Relation ID: " + relationId + ", Entity ID: " + entityId);
+
+            // Relation ID should contain relation's source ID
+            assertTrue(relationId.contains("_s8FI9v8MEem4dONaAfrVDg"),
+                    "Relation ID should contain relation's source ID: " + relationId);
+
+            // Entity ID should contain entity's source ID (NOT relation's ID!)
+            assertTrue(entityId.contains("_sRDt4PKfEeqHK7TZJcAcOA"),
+                    "Entity ID should contain entity's source ID: " + entityId);
+            assertFalse(entityId.contains("_s8FI9v8MEem4dONaAfrVDg"),
+                    "Entity ID must NOT contain relation's source ID: " + entityId);
+        }
+
+        /**
+         * Test multiple relations referencing the same target type.
+         * All relation targets should have unique IDs, and target type should have its own ID.
+         */
+        @Test
+        @DisplayName("Multiple relations to same target type all get unique IDs")
+        void multipleRelationsToSameTargetGetUniqueIds() {
+            // Create target entity type
+            EClass productEntity = createEClass("Product", "_product123");
+
+            // Create two relations both pointing to Product
+            EReference itemsRelation = EcoreFactory.eINSTANCE.createEReference();
+            itemsRelation.setName("items");
+            itemsRelation.setEType(productEntity);
+            sourceResource.getContents().add(itemsRelation);
+            if (sourceResource instanceof XMIResource) {
+                ((XMIResource) sourceResource).setID(itemsRelation, "_items456");
+            }
+
+            EReference productsRelation = EcoreFactory.eINSTANCE.createEReference();
+            productsRelation.setName("products");
+            productsRelation.setEType(productEntity);
+            sourceResource.getContents().add(productsRelation);
+            if (sourceResource instanceof XMIResource) {
+                ((XMIResource) sourceResource).setID(productsRelation, "_products789");
+            }
+
+            registry.register(RelationMemberTransformation.class);
+            registry.register(EntityTypeTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            // Get all targets
+            EAnnotation itemsTarget = context.equivalent(itemsRelation, EAnnotation.class);
+            EAnnotation productsTarget = context.equivalent(productsRelation, EAnnotation.class);
+            EPackage productTarget = context.equivalent(productEntity, EPackage.class);
+
+            // Get IDs
+            String itemsId = getXmiId(itemsTarget);
+            String productsId = getXmiId(productsTarget);
+            String productId = getXmiId(productTarget);
+
+            // All three must be different
+            assertNotEquals(itemsId, productsId, "items and products must have different IDs");
+            assertNotEquals(itemsId, productId, "items and Product must have different IDs");
+            assertNotEquals(productsId, productId, "products and Product must have different IDs");
+
+            // Each ID should contain its own source ID
+            assertTrue(itemsId.contains("_items456"), "items ID incorrect: " + itemsId);
+            assertTrue(productsId.contains("_products789"), "products ID incorrect: " + productsId);
+            assertTrue(productId.contains("_product123"), "Product ID incorrect: " + productId);
+        }
     }
 
     // ==================== Transformation Classes ====================
+
+    /**
+     * Simulates CreateTransferObjectRelationFromBoundTo* rules.
+     * Rule processes EReference (relation member), calls equivalent() on target EClass.
+     */
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EReference.class, target = EAnnotation.class)
+    public static class RelationMemberTransformation {
+        @TransformRule(name = "RelationMember2Annotation")
+        @Transform(type = EReference.class)
+        @Lazy
+        public TransformFunction<EReference, EAnnotation> relationMember2Annotation() {
+            return (source, ctx) -> {
+                EAnnotation ann = ctx.createTarget(EAnnotation.class);
+                ann.setSource("relation_" + source.getName());
+
+                // This is where the bug manifested:
+                // Call equivalent() on a DIFFERENT source element (the target type)
+                // The ID generated for targetPkg should use targetType's ID, not source's ID
+                EClassifier targetType = source.getEType();
+                if (targetType instanceof EClass) {
+                    EPackage targetPkg = ctx.equivalent((EClass) targetType, EPackage.class);
+                    if (targetPkg != null) {
+                        ann.getReferences().add(targetPkg);
+                    }
+                }
+
+                return ann;
+            };
+        }
+    }
+
+    /**
+     * Rule for transforming EntityType to MappedTransferObjectType equivalent.
+     */
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
+    public static class EntityTypeTransformation {
+        @TransformRule(name = "EntityType2Package")
+        @Transform(type = EClass.class)
+        @Lazy
+        public TransformFunction<EClass, EPackage> entityType2Package() {
+            return (source, ctx) -> {
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setName("mapped_" + source.getName());
+                return pkg;
+            };
+        }
+    }
 
     /**
      * Transformation that calls equivalent() on supertype during transformation.
