@@ -213,6 +213,132 @@ ValidationExecutor executor = ValidationExecutor.builder()
 List<ValidationResult> results = executor.validate(modelElements);
 ```
 
+## Transformation Framework
+
+### Transformation Core Architecture
+
+The `transformation-core` module provides annotation-based model-to-model transformations:
+
+```
+transformation-core/src/main/java/hu/blackbelt/judo/zeta/transformation/core/
+├── TransformationExecutor.java        # Parallel execution engine with staging
+├── TransformationContext.java         # Execution context with staging infrastructure
+├── TransformationRegistry.java        # Rule registration and discovery
+├── TransformationResult.java          # Result wrapper
+├── TransformationTrace.java           # Source-to-target mapping export
+├── TransformationException.java       # Fail-fast error handling
+├── TransformRuleDescriptor.java       # Rule metadata
+├── ElementResolutionCache.java        # Thread-safe source→target cache
+└── RuleInheritanceGraph.java          # Rule dependency resolution
+```
+
+### Parallel Transformation Execution
+
+The transformation framework uses a **two-phase staging approach** for thread-safe parallel execution:
+
+**Phase 1 (Parallel):**
+- Elements are created in parallel threads
+- Created elements are staged in `ConcurrentLinkedQueue`
+- Element ordering tracked via `AtomicLong` sequence numbers
+- XMI IDs stored in `ConcurrentHashMap` for deferred assignment
+
+**Phase 2 (Sequential):**
+- Staged elements sorted by creation sequence
+- Elements committed to target Resource (single-threaded)
+- XMI IDs applied after elements added to Resource
+
+**Post-Transformation XMI ID Application:**
+- Elements added through containment references (not via `addToResource()`) may have pending XMI IDs
+- Call `applyAllPendingXmiIds()` after transformation completes to ensure all elements have their XMI IDs properly set
+- This method iterates through the target resource and applies any pending IDs that weren't applied during the commit phase
+
+```java
+// Configure parallel transformation
+TransformationExecutor executor = TransformationExecutor.builder()
+    .registry(registry)
+    .context(context)
+    .parallel(true)                    // Enable parallel (default: true)
+    .parallelThreshold(1000)           // Min elements for parallel (default: 1000)
+    .chunkSize(100)                    // Elements per work unit (default: 100)
+    .build();
+
+// Execute - executor is reusable
+TransformationResult result = executor.transform(sourceElements);
+```
+
+### Package Resolution
+
+**Generated Metamodels** - No registration needed, EPackage is auto-discovered:
+```java
+Table table = ctx.createTarget(Table.class);  // Auto-discovers SchemaPackage
+Column col = ctx.create(Column.class);        // Auto-discovers SchemaPackage
+```
+
+**Dynamic EMF** - Register packages explicitly:
+```java
+ctx.registerTargetPackage(dynamicPackage);
+EObject obj = ctx.createTarget(dynamicType, dynamicPackage);
+```
+
+### Thread-Safety in Transformation Rules
+
+**Safe Operations:**
+- `ctx.createTarget()` - Creates staged elements
+- `ctx.createTarget(Class, EPackage)` - Creates in specific package
+- `ctx.equivalent()` - Thread-safe lazy rule execution via `computeIfAbsent`
+- `ctx.equivalentDiscriminated()` - Thread-safe discriminated equivalence
+- Setting properties on elements you created
+- Reading from source elements
+
+**Unsafe Operations (avoid):**
+- Modifying source elements
+- Modifying target elements created by other rules
+- Shared mutable state between rules
+
+### Fail-Fast Error Handling
+
+```java
+try {
+    TransformationResult result = executor.transform(sourceElements);
+} catch (TransformationException e) {
+    EObject failedElement = e.getFailedElement();
+    String ruleName = e.getRuleName();
+    Throwable cause = e.getCause();
+    // Handle error with full context
+}
+```
+
+### Key Classes
+
+| Class | Purpose |
+|-------|---------|
+| `TransformationExecutor` | Parallel execution engine with Builder pattern |
+| `TransformationContext` | Execution context with staging infrastructure |
+| `TransformationException` | RuntimeException with element/rule context |
+| `ElementResolutionCache` | Thread-safe ConcurrentHashMap-based cache |
+| `TransformationTrace` | JSON-exportable source→target mapping |
+
+### Transformation Annotations
+
+| Annotation | Description |
+|------------|-------------|
+| `@TransformationContext` | Marks a class as containing transformation rules |
+| `@TransformRule` | Defines a transformation rule method |
+| `@Lazy` | Rule executes on-demand via `equivalent()` calls |
+| `@Abstract` | Rule only executes via parent rule inheritance |
+| `@Primary` | Rule's result takes precedence in `equivalent()` |
+| `@Greedy` | Matches source type AND all subtypes |
+| `@ActivityBased` | Only processes elements activated via `equivalent()` (use with @Greedy @Lazy) |
+| `@Extends` | Inherits from parent rules (automatic execution) |
+| `@Guard` | Conditional execution based on guard method |
+| `@Detached` | Output NOT added to Resource.contents (caller adds to container) |
+| `@Transform` | Specifies source type and resource alias |
+| `@To` | Specifies target type and resource alias |
+| `@PreExecution` | Method runs before transformation starts |
+| `@PostExecution` | Method runs after transformation completes |
+
+> **@Greedy vs @Lazy Semantics**: `@Greedy` controls **type matching only** (kind-of vs type-of) - it matches subtypes, not just exact types. `@Lazy` controls **execution timing** (on-demand vs eager phase). These are orthogonal - a rule can be both `@Greedy` AND `@Lazy`. **Key difference from Epsilon ETL**: Zeta's eager phase processes ALL matching instances regardless of reachability, while Epsilon ETL may skip elements that are never referenced via `equivalent()`. To match ETL behavior, use `@ActivityBased` annotation with `@Greedy @Lazy` rules, or enable `etlCompatibilityMode(true)` on the executor.
+
 ### Dependency Resolution
 
 The framework topologically sorts rules based on `@Satisfies` annotations:
