@@ -630,9 +630,134 @@ class StructuredIdTest {
             assertTrue(productsId.contains("_products789"), "products ID incorrect: " + productsId);
             assertTrue(productId.contains("_product123"), "Product ID incorrect: " + productId);
         }
+
+        /**
+         * Test for executeParentRule() bug pattern:
+         * Outer rule calls executeParentRule() with a DIFFERENT source element.
+         * The parent rule's target should have ID generated from the passed source,
+         * not from the outer rule's source.
+         */
+        @Test
+        @DisplayName("executeParentRule() with different source uses correct source for ID")
+        void executeParentRuleWithDifferentSourceUsesCorrectId() {
+            // Create the outer rule's source (relation member "items")
+            EReference itemsRelation = EcoreFactory.eINSTANCE.createEReference();
+            itemsRelation.setName("items");
+            sourceResource.getContents().add(itemsRelation);
+            if (sourceResource instanceof XMIResource) {
+                ((XMIResource) sourceResource).setID(itemsRelation, "_s8FI9v8MEem4dONaAfrVDg");
+            }
+
+            // Create the target type (OrderItem) that executeParentRule will be called with
+            EClass orderItemEntity = createEClass("OrderItem", "_orderItem123");
+            itemsRelation.setEType(orderItemEntity);
+
+            registry.register(OuterRuleWithExecuteParentRule.class);
+            registry.register(ParentRuleForExecuteParentRule.class);
+            context.setTransformationRegistry(registry);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            // Get targets - outer rule creates an annotation, parent rule creates a package
+            // The outer rule calls executeParentRule for the target type
+            EAnnotation outerTarget = null;
+            EPackage parentTarget = null;
+            for (EObject obj : targetResource.getContents()) {
+                if (obj instanceof EAnnotation) {
+                    outerTarget = (EAnnotation) obj;
+                } else if (obj instanceof EPackage) {
+                    parentTarget = (EPackage) obj;
+                }
+            }
+
+            assertNotNull(outerTarget, "Outer rule should create annotation");
+            assertNotNull(parentTarget, "Parent rule should create package");
+
+            // Get their XMI IDs
+            String outerId = getXmiId(outerTarget);
+            String parentId = getXmiId(parentTarget);
+
+            assertNotNull(outerId, "Outer target should have XMI ID");
+            assertNotNull(parentId, "Parent target should have XMI ID");
+
+            // CRITICAL: IDs must be DIFFERENT
+            assertNotEquals(outerId, parentId,
+                    "Outer and parent targets must have different XMI IDs!");
+
+            // Outer ID should contain outer rule's source ID and rule name
+            assertTrue(outerId.contains("_s8FI9v8MEem4dONaAfrVDg"),
+                    "Outer ID should contain outer source ID: " + outerId);
+            assertTrue(outerId.contains("OuterRule"),
+                    "Outer ID should contain outer rule name: " + outerId);
+
+            // Parent ID should contain PARENT RULE's source ID (OrderItem) and rule name
+            // NOT the outer rule's source ID!
+            assertTrue(parentId.contains("_orderItem123"),
+                    "Parent ID should contain OrderItem's source ID: " + parentId);
+            assertTrue(parentId.contains("ParentRule"),
+                    "Parent ID should contain parent rule name: " + parentId);
+
+            // Parent ID must NOT contain outer rule's source ID or name
+            assertFalse(parentId.contains("_s8FI9v8MEem4dONaAfrVDg"),
+                    "Parent ID must NOT contain outer source ID: " + parentId);
+            assertFalse(parentId.contains("OuterRule"),
+                    "Parent ID must NOT contain outer rule name: " + parentId);
+        }
     }
 
     // ==================== Transformation Classes ====================
+
+    /**
+     * Simulates outer rule that calls executeParentRule() with a different source.
+     * This is the pattern in CreateTransferObjectRelationFromBoundTo* rules.
+     */
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EReference.class, target = EAnnotation.class)
+    public static class OuterRuleWithExecuteParentRule {
+        @TransformRule(name = "OuterRule")
+        @Transform(type = EReference.class)
+        public TransformFunction<EReference, EAnnotation> outerRule() {
+            return (source, ctx) -> {
+                // Create outer rule's own target
+                EAnnotation ann = ctx.createTarget(EAnnotation.class);
+                ann.setSource("outer_" + source.getName());
+
+                // Call executeParentRule with a DIFFERENT source element
+                // This is where the bug manifested - the parent rule's target
+                // should get ID from targetType, not from this rule's source
+                EClassifier targetType = source.getEType();
+                if (targetType instanceof EClass) {
+                    EPackage parentResult = ctx.executeParentRule("ParentRule", (EClass) targetType);
+                    if (parentResult != null) {
+                        ann.getReferences().add(parentResult);
+                    }
+                }
+
+                return ann;
+            };
+        }
+    }
+
+    /**
+     * Parent rule called via executeParentRule().
+     */
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
+    public static class ParentRuleForExecuteParentRule {
+        @TransformRule(name = "ParentRule")
+        @Transform(type = EClass.class)
+        public TransformFunction<EClass, EPackage> parentRule() {
+            return (source, ctx) -> {
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setName("parent_" + source.getName());
+                return pkg;
+            };
+        }
+    }
 
     /**
      * Simulates CreateTransferObjectRelationFromBoundTo* rules.
