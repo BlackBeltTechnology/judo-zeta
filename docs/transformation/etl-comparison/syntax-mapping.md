@@ -38,6 +38,20 @@ public TransformFunction<EntityType, Table> entityType2Table() {
 | `extends RuleName` | `@Extends("RuleName")` |
 | `guard: condition` | `@Guard(method = "guardMethod")` |
 
+### Behavioral Differences
+
+While the annotations map directly between Epsilon ETL and Zeta, there are subtle behavioral differences:
+
+| Aspect | Epsilon ETL | Zeta |
+|--------|-------------|------|
+| **@lazy** | On-demand via `equivalent()` | Same |
+| **@greedy** | Kind-of type matching (matches subtypes) | Same |
+| **Eager phase coverage** | May skip unreferenced elements | Processes ALL matching instances |
+
+**Key difference**: In Epsilon ETL, even with `@greedy`, a rule may not execute for elements that are never "activated" during transformation (never referenced via `equivalent()`). Zeta's eager phase processes ALL instances matching the source type, regardless of reachability.
+
+> **Important**: `@Greedy` controls **type matching only** (kind-of vs type-of). It does NOT control eager vs lazy execution - that's `@Lazy`'s role. These annotations are orthogonal and can be combined.
+
 ### @lazy
 
 **ETL**:
