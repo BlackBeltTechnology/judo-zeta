@@ -338,7 +338,244 @@ class StructuredIdTest {
         }
     }
 
+    // ==================== Nested Equivalent ID Tests ====================
+
+    /**
+     * Tests for the Company/Customer inheritance bug fix.
+     *
+     * <p>When Company's rule calls ctx.equivalent(customer, ...) to get Customer's
+     * equivalent, the XMI IDs must be generated from the CORRECT source elements:</p>
+     * <ul>
+     *   <li>Customer's target: ID generated from Customer source</li>
+     *   <li>Company's target: ID generated from Company source</li>
+     * </ul>
+     *
+     * <p>Before the fix, both would incorrectly use Company's source ID because
+     * currentSource was not properly scoped during nested rule execution.</p>
+     */
+    @Nested
+    @DisplayName("Nested Equivalent ID Generation Tests (Company/Customer Bug)")
+    class NestedEquivalentIdTests {
+
+        @Test
+        @DisplayName("Nested equivalent() generates ID from correct source element")
+        void nestedEquivalentUsesCorrectSourceForId() {
+            // Create Customer (base) and Company (extends Customer)
+            EClass customer = createEClass("Customer", "_JYmqeeq1EemUZMITjXqp8w");
+            EClass company = createEClass("Company", "_JYmDhOq1EemUZMITjXqp8w");
+
+            // Set up inheritance: Company extends Customer
+            company.getESuperTypes().add(customer);
+
+            registry.register(InheritanceTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            // Get the transformed targets
+            EPackage customerPkg = context.equivalent(customer, EPackage.class);
+            EPackage companyPkg = context.equivalent(company, EPackage.class);
+
+            assertNotNull(customerPkg, "Customer should have been transformed");
+            assertNotNull(companyPkg, "Company should have been transformed");
+
+            // Get their XMI IDs
+            String customerId = context.getPendingXmiId(customerPkg);
+            String companyId = context.getPendingXmiId(companyPkg);
+
+            if (customerId == null && targetResource instanceof XMIResource) {
+                customerId = ((XMIResource) targetResource).getID(customerPkg);
+            }
+            if (companyId == null && targetResource instanceof XMIResource) {
+                companyId = ((XMIResource) targetResource).getID(companyPkg);
+            }
+
+            assertNotNull(customerId, "Customer target should have XMI ID");
+            assertNotNull(companyId, "Company target should have XMI ID");
+
+            // CRITICAL: IDs must be DIFFERENT (generated from respective sources)
+            assertNotEquals(customerId, companyId,
+                    "Customer and Company must have different XMI IDs! " +
+                    "Customer ID: " + customerId + ", Company ID: " + companyId);
+
+            // Verify IDs contain correct source element IDs
+            assertTrue(customerId.contains("_JYmqeeq1EemUZMITjXqp8w"),
+                    "Customer ID should contain Customer's source ID: " + customerId);
+            assertTrue(companyId.contains("_JYmDhOq1EemUZMITjXqp8w"),
+                    "Company ID should contain Company's source ID: " + companyId);
+
+            // Verify IDs contain correct source names
+            assertTrue(customerId.contains("Customer"),
+                    "Customer ID should contain 'Customer': " + customerId);
+            assertTrue(companyId.contains("Company"),
+                    "Company ID should contain 'Company': " + companyId);
+        }
+
+        @Test
+        @DisplayName("Supertype reference resolves to correct target (not self-reference)")
+        void supertypeReferenceResolvesCorrectly() {
+            // Create Customer (base) and Company (extends Customer)
+            EClass customer = createEClass("Customer", "_customer123");
+            EClass company = createEClass("Company", "_company456");
+
+            // Set up inheritance: Company extends Customer
+            company.getESuperTypes().add(customer);
+
+            registry.register(InheritanceTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            // Get the transformed targets
+            EPackage customerPkg = context.equivalent(customer, EPackage.class);
+            EPackage companyPkg = context.equivalent(company, EPackage.class);
+
+            // Verify they are different instances
+            assertNotSame(customerPkg, companyPkg,
+                    "Customer and Company targets must be different instances");
+
+            // Verify no duplicate XMI IDs in target resource
+            java.util.Set<String> xmiIds = new java.util.HashSet<>();
+            for (EObject obj : targetResource.getContents()) {
+                String id = context.getPendingXmiId(obj);
+                if (id == null && targetResource instanceof XMIResource) {
+                    id = ((XMIResource) targetResource).getID(obj);
+                }
+                if (id != null) {
+                    assertTrue(xmiIds.add(id),
+                            "Duplicate XMI ID found: " + id);
+                }
+            }
+        }
+
+        @Test
+        @DisplayName("Deeply nested equivalent() calls maintain correct source context")
+        void deeplyNestedEquivalentMaintainsContext() {
+            // Create 3-level inheritance: Person -> Customer -> Company
+            EClass person = createEClass("Person", "_person001");
+            EClass customer = createEClass("Customer", "_customer002");
+            EClass company = createEClass("Company", "_company003");
+
+            customer.getESuperTypes().add(person);
+            company.getESuperTypes().add(customer);
+
+            registry.register(DeepInheritanceTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            // Get all transformed targets
+            EPackage personPkg = context.equivalent(person, EPackage.class);
+            EPackage customerPkg = context.equivalent(customer, EPackage.class);
+            EPackage companyPkg = context.equivalent(company, EPackage.class);
+
+            // Get their XMI IDs
+            String personId = getXmiId(personPkg);
+            String customerId = getXmiId(customerPkg);
+            String companyId = getXmiId(companyPkg);
+
+            // All three must have different IDs
+            assertNotEquals(personId, customerId, "Person and Customer must have different IDs");
+            assertNotEquals(customerId, companyId, "Customer and Company must have different IDs");
+            assertNotEquals(personId, companyId, "Person and Company must have different IDs");
+
+            // Verify each ID contains correct source element ID
+            assertTrue(personId.contains("_person001"), "Person ID incorrect: " + personId);
+            assertTrue(customerId.contains("_customer002"), "Customer ID incorrect: " + customerId);
+            assertTrue(companyId.contains("_company003"), "Company ID incorrect: " + companyId);
+        }
+
+        private String getXmiId(EObject obj) {
+            String id = context.getPendingXmiId(obj);
+            if (id == null && targetResource instanceof XMIResource) {
+                id = ((XMIResource) targetResource).getID(obj);
+            }
+            return id;
+        }
+    }
+
     // ==================== Transformation Classes ====================
+
+    /**
+     * Transformation that calls equivalent() on supertype during transformation.
+     * Simulates the Company/Customer scenario where Company's rule looks up Customer's equivalent.
+     */
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
+    public static class InheritanceTransformation {
+        @TransformRule(name = "Entity2Package")
+        @Transform(type = EClass.class)
+        @Lazy
+        public TransformFunction<EClass, EPackage> entity2Package() {
+            return (source, ctx) -> {
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setName(source.getName());
+
+                // If this entity has a supertype, get its equivalent
+                // This is where the bug manifested: equivalent() would use
+                // the wrong source for ID generation
+                for (EClass superType : source.getESuperTypes()) {
+                    EPackage superPkg = ctx.equivalent(superType, EPackage.class);
+                    if (superPkg != null) {
+                        // Store reference via annotation (EPackage has no direct super reference)
+                        EAnnotation ann = EcoreFactory.eINSTANCE.createEAnnotation();
+                        ann.setSource("superPackage");
+                        ann.getReferences().add(superPkg);
+                        pkg.getEAnnotations().add(ann);
+                    }
+                }
+
+                return pkg;
+            };
+        }
+    }
+
+    /**
+     * Transformation for 3-level deep inheritance testing.
+     */
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
+    public static class DeepInheritanceTransformation {
+        @TransformRule(name = "DeepEntity2Package")
+        @Transform(type = EClass.class)
+        @Lazy
+        public TransformFunction<EClass, EPackage> deepEntity2Package() {
+            return (source, ctx) -> {
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setName(source.getName());
+
+                // Recursively get supertype equivalents
+                for (EClass superType : source.getESuperTypes()) {
+                    EPackage superPkg = ctx.equivalent(superType, EPackage.class);
+                    if (superPkg != null) {
+                        // Store reference via annotation (EPackage has no direct super reference)
+                        EAnnotation ann = EcoreFactory.eINSTANCE.createEAnnotation();
+                        ann.setSource("superPackage");
+                        ann.getReferences().add(superPkg);
+                        pkg.getEAnnotations().add(ann);
+                    }
+                }
+
+                return pkg;
+            };
+        }
+    }
 
     @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
     public static class SimpleTransformation {
