@@ -1599,6 +1599,47 @@ public class TransformationContext {
     }
 
     /**
+     * Apply all pending XMI IDs to elements in the target resource.
+     *
+     * <p>This should be called after the transformation completes to ensure all elements
+     * have their XMI IDs properly set. Elements added through containment references
+     * (not via addToResource()) may have pending IDs that were never applied.</p>
+     *
+     * <p>This method iterates through all elements in the target resource and applies
+     * any pending IDs that haven't been applied yet.</p>
+     */
+    public void applyAllPendingXmiIds() {
+        if (targetResourceSet.getResources().isEmpty()) {
+            return;
+        }
+
+        Resource targetResource = targetResourceSet.getResources().get(0);
+        if (!(targetResource instanceof XMIResource)) {
+            return;
+        }
+
+        XMIResource xmiResource = (XMIResource) targetResource;
+
+        // Apply pending IDs to all elements in the resource
+        int appliedCount = 0;
+        for (Map.Entry<EObject, String> entry : pendingXmiIds.entrySet()) {
+            EObject element = entry.getKey();
+            String pendingId = entry.getValue();
+
+            // Only apply if the element is in this resource and doesn't already have an ID set
+            if (element.eResource() == targetResource) {
+                String existingId = xmiResource.getID(element);
+                if (existingId == null || !existingId.equals(pendingId)) {
+                    xmiResource.setID(element, pendingId);
+                    appliedCount++;
+                }
+            }
+        }
+
+        // Note: Applied appliedCount pending XMI IDs to elements
+    }
+
+    /**
      * Clear lazy rule execution tracking (called on reset).
      */
     void clearExecutingLazyRules() {
