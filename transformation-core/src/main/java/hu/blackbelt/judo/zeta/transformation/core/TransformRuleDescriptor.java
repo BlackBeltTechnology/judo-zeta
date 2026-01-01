@@ -46,6 +46,7 @@ public class TransformRuleDescriptor {
     private final boolean isPrimary;
     private final boolean isGreedy;
     private final boolean isDetached;
+    private final boolean isActivityBased;
     private final List<String> extendsRules;
 
     /**
@@ -79,7 +80,7 @@ public class TransformRuleDescriptor {
             List<String> extendsRules
     ) {
         this(instance, ruleMethod, name, description, sourceType, targetType, guardMethod,
-                isLazy, isAbstract, isPrimary, isGreedy, false, extendsRules,
+                isLazy, isAbstract, isPrimary, isGreedy, false, false, extendsRules,
                 Collections.emptyList(), Collections.emptyList());
     }
 
@@ -99,7 +100,7 @@ public class TransformRuleDescriptor {
             List<String> extendsRules
     ) {
         this(instance, ruleMethod, name, description, sourceType, targetType, guardMethod,
-                isLazy, isAbstract, isPrimary, isGreedy, isDetached, extendsRules,
+                isLazy, isAbstract, isPrimary, isGreedy, isDetached, false, extendsRules,
                 Collections.emptyList(), Collections.emptyList());
     }
 
@@ -116,6 +117,7 @@ public class TransformRuleDescriptor {
             boolean isPrimary,
             boolean isGreedy,
             boolean isDetached,
+            boolean isActivityBased,
             List<String> extendsRules,
             List<TransformDefinition> transforms,
             List<ToDefinition> tos
@@ -132,6 +134,7 @@ public class TransformRuleDescriptor {
         this.isPrimary = isPrimary;
         this.isGreedy = isGreedy;
         this.isDetached = isDetached;
+        this.isActivityBased = isActivityBased;
         this.extendsRules = extendsRules;
         this.transforms = transforms != null ? transforms : Collections.emptyList();
         this.tos = tos != null ? tos : Collections.emptyList();
@@ -184,6 +187,21 @@ public class TransformRuleDescriptor {
      */
     public boolean isDetached() {
         return isDetached;
+    }
+
+    /**
+     * Check if this rule uses activity-based processing.
+     *
+     * <p>Activity-based rules only process elements that are "activated" via
+     * {@code equivalent()} calls. Elements never referenced are not processed.</p>
+     *
+     * <p><b>Note:</b> This annotation only has effect when used with both
+     * {@code @Greedy} and {@code @Lazy}.</p>
+     *
+     * @return true if the rule is marked with @ActivityBased
+     */
+    public boolean isActivityBased() {
+        return isActivityBased;
     }
 
     public List<String> getExtendsRules() {
@@ -673,6 +691,7 @@ public class TransformRuleDescriptor {
                 ", isAbstract=" + isAbstract +
                 ", isPrimary=" + isPrimary +
                 ", isGreedy=" + isGreedy +
+                ", isActivityBased=" + isActivityBased +
                 '}';
     }
 }

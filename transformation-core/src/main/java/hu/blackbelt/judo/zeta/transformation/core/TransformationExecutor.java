@@ -63,7 +63,14 @@ public class TransformationExecutor {
     private final boolean parallel;
     private final int parallelThreshold;
     private final int chunkSize;
+    private final boolean etlCompatibilityMode;
     private volatile ExecutorService executor;
+
+    /**
+     * Maximum iterations for the activity-based fixpoint loop.
+     * Prevents infinite loops if rules keep activating each other.
+     */
+    private static final int MAX_ACTIVITY_BASED_ITERATIONS = 100;
 
     /**
      * Shared exception holder for fail-fast error handling.
@@ -87,6 +94,7 @@ public class TransformationExecutor {
         this.parallel = parallel;
         this.parallelThreshold = DEFAULT_PARALLEL_THRESHOLD;
         this.chunkSize = DEFAULT_CHUNK_SIZE;
+        this.etlCompatibilityMode = false;
     }
 
     private TransformationExecutor(Builder builder) {
@@ -95,6 +103,7 @@ public class TransformationExecutor {
         this.parallel = builder.parallel;
         this.parallelThreshold = builder.parallelThreshold;
         this.chunkSize = builder.chunkSize;
+        this.etlCompatibilityMode = builder.etlCompatibilityMode;
     }
 
     /**
@@ -115,6 +124,7 @@ public class TransformationExecutor {
         private boolean parallel = true;
         private int parallelThreshold = DEFAULT_PARALLEL_THRESHOLD;
         private int chunkSize = DEFAULT_CHUNK_SIZE;
+        private boolean etlCompatibilityMode = false;
 
         public Builder registry(TransformationRegistry registry) {
             this.registry = registry;
@@ -141,9 +151,143 @@ public class TransformationExecutor {
             return this;
         }
 
+        /**
+         * Enable ETL compatibility mode.
+         *
+         * <p>When enabled, all {@code @Greedy @Lazy} rules are treated as if they
+         * also had {@code @ActivityBased}. This means they only process elements
+         * that are "activated" via {@code equivalent()} calls, matching Epsilon ETL
+         * behavior.</p>
+         *
+         * @param enabled true to enable ETL compatibility mode
+         * @return this builder
+         */
+        public Builder etlCompatibilityMode(boolean enabled) {
+            this.etlCompatibilityMode = enabled;
+            return this;
+        }
+
         public TransformationExecutor build() {
             return new TransformationExecutor(this);
         }
+    }
+
+    /**
+     * Check if a rule is effectively activity-based.
+     *
+     * <p>A rule is effectively activity-based if:</p>
+     * <ul>
+     *   <li>It has the {@code @ActivityBased} annotation, OR</li>
+     *   <li>ETL compatibility mode is enabled AND the rule is both {@code @Greedy} and {@code @Lazy}</li>
+     * </ul>
+     *
+     * @param rule the rule to check
+     * @return true if the rule should use activity-based processing
+     */
+    private boolean isEffectivelyActivityBased(TransformRuleDescriptor rule) {
+        if (rule.isActivityBased()) {
+            return true;
+        }
+        // In ETL compatibility mode, all @Greedy @Lazy rules are activity-based
+        return etlCompatibilityMode && rule.isGreedy() && rule.isLazy();
+    }
+
+    /**
+     * Execute Phase 2: Process activity-based rules for activated elements.
+     *
+     * <p>This method runs after Phase 1 (eager execution) completes. It processes only
+     * the source elements that were "activated" via {@code equivalent()} calls during
+     * Phase 1.</p>
+     *
+     * <p>Uses a fixpoint loop to handle late activations - if an activity-based rule
+     * activates another activity-based rule via {@code equivalent()}, the newly activated
+     * elements are processed in subsequent iterations.</p>
+     */
+    private void executeActivityBasedRules() {
+        ActivationTracker tracker = context.getActivationTracker();
+
+        // Find all effectively activity-based rules
+        List<TransformRuleDescriptor> activityBasedRules = registry.getAllRules().stream()
+                .filter(this::isEffectivelyActivityBased)
+                .collect(Collectors.toList());
+
+        if (activityBasedRules.isEmpty()) {
+            return;
+        }
+
+        log.debug("Executing Phase 2: {} activity-based rules with {} total activations",
+                activityBasedRules.size(), tracker.getTotalActivationCount());
+
+        // Track which (source, rule) pairs have been processed to avoid re-execution
+        Set<String> processedKeys = new HashSet<>();
+
+        // Fixpoint loop: continue until no new activations are processed
+        int iteration = 0;
+        boolean madeProgress;
+
+        do {
+            madeProgress = false;
+            iteration++;
+
+            if (iteration > MAX_ACTIVITY_BASED_ITERATIONS) {
+                log.warn("Activity-based execution exceeded {} iterations, stopping to prevent infinite loop",
+                        MAX_ACTIVITY_BASED_ITERATIONS);
+                break;
+            }
+
+            for (TransformRuleDescriptor rule : activityBasedRules) {
+                if (firstError.get() != null) {
+                    return;
+                }
+
+                Set<EObject> activated = tracker.getActivated(rule.getName());
+                for (EObject source : activated) {
+                    String key = rule.getName() + ":" + System.identityHashCode(source);
+
+                    // Skip if already processed
+                    if (processedKeys.contains(key)) {
+                        continue;
+                    }
+
+                    // Skip if already in cache (executed via equivalent() during Phase 1)
+                    if (context.getElementResolutionCache().getByRule(source, rule.getName()) != null) {
+                        processedKeys.add(key);
+                        continue;
+                    }
+
+                    // Check if rule applies and guard passes
+                    if (!rule.appliesTo(source)) {
+                        processedKeys.add(key);
+                        continue;
+                    }
+
+                    if (!rule.evaluateGuard(source, context)) {
+                        processedKeys.add(key);
+                        continue;
+                    }
+
+                    // Execute the rule
+                    try {
+                        EObject target = rule.execute(source, context);
+                        if (target != null) {
+                            context.getElementResolutionCache().addMapping(
+                                    source, rule.getName(), target, rule.isPrimary());
+                            madeProgress = true;
+                            log.trace("Activity-based rule {} processed activated element {}",
+                                    rule.getName(), source);
+                        }
+                    } catch (Exception e) {
+                        firstError.compareAndSet(null, e);
+                        return;
+                    }
+
+                    processedKeys.add(key);
+                }
+            }
+        } while (madeProgress);
+
+        log.debug("Phase 2 completed after {} iteration(s), processed {} elements",
+                iteration, processedKeys.size());
     }
 
     /**
@@ -156,6 +300,9 @@ public class TransformationExecutor {
         context.clearElementOrder();
         context.clearPendingXmiIds();
         context.clearExecutingLazyRules();
+        context.getActivationTracker().clear();
+        // Propagate ETL compatibility mode to context for equivalent() calls
+        context.setEtlCompatibilityMode(etlCompatibilityMode);
     }
 
     /**
@@ -241,6 +388,11 @@ public class TransformationExecutor {
                 executeMultiSourceRule(rule);
             }
 
+            // Phase 2: Execute activity-based rules for activated elements only
+            // This matches ETL semantics where @greedy @lazy rules only process
+            // elements referenced via equivalent() during Phase 1
+            executeActivityBasedRules();
+
             // Check for errors (fail-fast)
             Throwable error = firstError.get();
             if (error != null) {
@@ -295,6 +447,11 @@ public class TransformationExecutor {
             } else {
                 transformSequential(sourceElements);
             }
+
+            // Phase 2: Execute activity-based rules for activated elements only
+            // This matches ETL semantics where @greedy @lazy rules only process
+            // elements referenced via equivalent() during Phase 1
+            executeActivityBasedRules();
 
             // Check for errors (fail-fast)
             Throwable error = firstError.get();
@@ -545,6 +702,11 @@ public class TransformationExecutor {
 
             // Skip abstract rules - they only execute via executeParentRule()
             if (rule.isAbstract()) continue;
+
+            // Skip activity-based rules - they execute only for activated elements in Phase 2
+            // This matches ETL semantics where @greedy @lazy rules only process
+            // elements that were referenced via equivalent()
+            if (isEffectivelyActivityBased(rule)) continue;
 
             // Check if already transformed (idempotent)
             EObject cached = context.getElementResolutionCache().getByRule(source, rule.getName());

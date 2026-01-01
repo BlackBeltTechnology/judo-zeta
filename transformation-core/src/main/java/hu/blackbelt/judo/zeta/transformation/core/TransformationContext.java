@@ -134,6 +134,12 @@ public class TransformationContext {
     private TransformationRegistry transformationRegistry;
 
     /**
+     * Tracks which source elements have been "activated" for activity-based rules.
+     * Used with {@code @Greedy @Lazy @ActivityBased} rules to match ETL semantics.
+     */
+    private final ActivationTracker activationTracker = new ActivationTracker();
+
+    /**
      * List of registered target EPackages for element creation (for dynamic models).
      * Thread-safe for parallel transformation support.
      */
@@ -164,6 +170,13 @@ public class TransformationContext {
      * Default is true (ETL semantics for traceability).
      */
     private volatile boolean useStructuredIds = true;
+
+    /**
+     * When true, treat all @Greedy @Lazy rules as activity-based.
+     * This matches Epsilon ETL behavior where greedy lazy rules only process
+     * elements that are referenced via equivalent() calls.
+     */
+    private volatile boolean etlCompatibilityMode = false;
 
     /**
      * Wrapper for staged elements with ordering metadata.
@@ -279,6 +292,28 @@ public class TransformationContext {
      */
     public void setTransformationRegistry(TransformationRegistry registry) {
         this.transformationRegistry = registry;
+    }
+
+    /**
+     * Get the activation tracker for activity-based rules.
+     *
+     * @return the activation tracker
+     */
+    public ActivationTracker getActivationTracker() {
+        return activationTracker;
+    }
+
+    /**
+     * Record that a source element was activated for an activity-based rule.
+     *
+     * <p>This is a convenience method that delegates to the activation tracker.
+     * Called from {@code equivalent()} when a matching activity-based rule is found.</p>
+     *
+     * @param ruleName the name of the activity-based rule
+     * @param source the source element that was activated
+     */
+    public void activate(String ruleName, EObject source) {
+        activationTracker.activate(ruleName, source);
     }
 
     /**
@@ -400,6 +435,47 @@ public class TransformationContext {
      */
     public boolean isUseStructuredIds() {
         return useStructuredIds;
+    }
+
+    /**
+     * Enable or disable ETL compatibility mode.
+     *
+     * <p>When enabled, all @Greedy @Lazy rules are treated as activity-based,
+     * meaning they only process elements that are referenced via equivalent()
+     * calls during transformation. This matches Epsilon ETL behavior.</p>
+     *
+     * @param enabled true to enable ETL compatibility mode
+     */
+    public void setEtlCompatibilityMode(boolean enabled) {
+        this.etlCompatibilityMode = enabled;
+    }
+
+    /**
+     * Check if ETL compatibility mode is enabled.
+     *
+     * @return true if ETL compatibility mode is active
+     */
+    public boolean isEtlCompatibilityMode() {
+        return etlCompatibilityMode;
+    }
+
+    /**
+     * Check if a rule is effectively activity-based.
+     *
+     * <p>A rule is effectively activity-based if:</p>
+     * <ul>
+     *   <li>It has the @ActivityBased annotation, OR</li>
+     *   <li>ETL compatibility mode is enabled AND the rule is @Greedy @Lazy</li>
+     * </ul>
+     *
+     * @param rule the rule to check
+     * @return true if the rule should be treated as activity-based
+     */
+    public boolean isEffectivelyActivityBased(TransformRuleDescriptor rule) {
+        if (rule.isActivityBased()) {
+            return true;
+        }
+        return etlCompatibilityMode && rule.isGreedy() && rule.isLazy();
     }
 
     /**
@@ -773,6 +849,12 @@ public class TransformationContext {
             Collection<TransformRuleDescriptor> rules = transformationRegistry.getRulesForSource(source.getClass());
             for (TransformRuleDescriptor rule : rules) {
                 if (rule.appliesTo(source) && targetType.isAssignableFrom(rule.getTargetType())) {
+                    // Record activation for activity-based rules
+                    // This tracks which elements were referenced via equivalent()
+                    if (rule.isActivityBased()) {
+                        activate(rule.getName(), source);
+                    }
+
                     if (rule.evaluateGuard(source, this)) {
                         // When structured IDs are enabled, try XMI ID-based lookup first (ETL semantics)
                         if (useStructuredIds) {
@@ -892,6 +974,16 @@ public class TransformationContext {
             return null;
         }
 
+        // Record activation for effectively activity-based rules
+        // This tracks which elements were referenced via equivalent()
+        // For activity-based rules, we ONLY record activation and return null
+        // The actual execution happens in Phase 2 (executeActivityBasedRules)
+        if (isEffectivelyActivityBased(rule)) {
+            activate(rule.getName(), source);
+            // Don't execute now - Phase 2 will execute for activated elements
+            return null;
+        }
+
         // When structured IDs are enabled, try XMI ID-based lookup first (ETL semantics)
         if (useStructuredIds) {
             String structuredId = generateStructuredId(source, ruleName);
@@ -1004,6 +1096,13 @@ public class TransformationContext {
         T original = null;
         if (ruleName != null && transformationRegistry != null) {
             TransformRuleDescriptor rule = transformationRegistry.getRuleByName(ruleName);
+            if (rule != null && rule.appliesTo(source)) {
+                // Record activation for activity-based rules
+                // This tracks which elements were referenced via equivalent()
+                if (rule.isActivityBased()) {
+                    activate(rule.getName(), source);
+                }
+            }
             // ETL semantics: guards ARE evaluated at invocation time for @lazy rules
             if (rule != null && rule.appliesTo(source) && rule.evaluateGuard(source, this)) {
                 // Check if already in cache by rule name

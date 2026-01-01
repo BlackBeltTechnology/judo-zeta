@@ -205,6 +205,13 @@ public class TransformationRegistry {
         boolean isPrimary = ruleMethod.isAnnotationPresent(Primary.class);
         boolean isGreedy = ruleMethod.isAnnotationPresent(Greedy.class);
         boolean isDetached = ruleMethod.isAnnotationPresent(Detached.class);
+        boolean isActivityBased = ruleMethod.isAnnotationPresent(ActivityBased.class);
+
+        // Warn if @ActivityBased is used without required @Greedy and @Lazy
+        if (isActivityBased && (!isGreedy || !isLazy)) {
+            log.warn("Rule '{}' has @ActivityBased but is missing @Greedy and/or @Lazy. " +
+                    "@ActivityBased only has effect when used with both @Greedy and @Lazy.", name);
+        }
 
         // Get extends rules
         Extends extendsAnnotation = ruleMethod.getAnnotation(Extends.class);
@@ -225,6 +232,7 @@ public class TransformationRegistry {
                 isPrimary,
                 isGreedy,
                 isDetached,
+                isActivityBased,
                 extendsRules,
                 transforms,
                 tos

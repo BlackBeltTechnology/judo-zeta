@@ -328,6 +328,7 @@ try {
 | `@Abstract` | Rule only executes via parent rule inheritance |
 | `@Primary` | Rule's result takes precedence in `equivalent()` |
 | `@Greedy` | Matches source type AND all subtypes |
+| `@ActivityBased` | Only processes elements activated via `equivalent()` (use with @Greedy @Lazy) |
 | `@Extends` | Inherits from parent rules (automatic execution) |
 | `@Guard` | Conditional execution based on guard method |
 | `@Detached` | Output NOT added to Resource.contents (caller adds to container) |
@@ -336,7 +337,7 @@ try {
 | `@PreExecution` | Method runs before transformation starts |
 | `@PostExecution` | Method runs after transformation completes |
 
-> **@Greedy vs @Lazy Semantics**: `@Greedy` controls **type matching only** (kind-of vs type-of) - it matches subtypes, not just exact types. `@Lazy` controls **execution timing** (on-demand vs eager phase). These are orthogonal - a rule can be both `@Greedy` AND `@Lazy`. **Key difference from Epsilon ETL**: Zeta's eager phase processes ALL matching instances regardless of reachability, while Epsilon ETL may skip elements that are never referenced via `equivalent()`.
+> **@Greedy vs @Lazy Semantics**: `@Greedy` controls **type matching only** (kind-of vs type-of) - it matches subtypes, not just exact types. `@Lazy` controls **execution timing** (on-demand vs eager phase). These are orthogonal - a rule can be both `@Greedy` AND `@Lazy`. **Key difference from Epsilon ETL**: Zeta's eager phase processes ALL matching instances regardless of reachability, while Epsilon ETL may skip elements that are never referenced via `equivalent()`. To match ETL behavior, use `@ActivityBased` annotation with `@Greedy @Lazy` rules, or enable `etlCompatibilityMode(true)` on the executor.
 
 ### Dependency Resolution
 

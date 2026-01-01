@@ -35,20 +35,24 @@ public TransformFunction<EntityType, Table> entityType2Table() {
 | `@abstract` | `@Abstract` |
 | `@primary` | `@Primary` |
 | `@greedy` | `@Greedy` |
+| `@greedy @lazy` (activity-based) | `@Greedy @Lazy @ActivityBased` or `etlCompatibilityMode(true)` |
 | `extends RuleName` | `@Extends("RuleName")` |
 | `guard: condition` | `@Guard(method = "guardMethod")` |
 
 ### Behavioral Differences
 
-While the annotations map directly between Epsilon ETL and Zeta, there is one key behavioral difference:
+While the annotations map directly between Epsilon ETL and Zeta, there are behavioral differences to be aware of:
 
-| Aspect | Epsilon ETL | Zeta |
-|--------|-------------|------|
-| **@lazy semantics** | On-demand via `equivalent()` | On-demand via `equivalent()` |
-| **@greedy semantics** | Kind-of type matching (subtypes) | Kind-of type matching (subtypes) |
-| **Eager phase coverage** | May skip unreferenced elements | **Processes ALL matching instances** |
+| Aspect | Epsilon ETL | Zeta (default) | Zeta (with @ActivityBased or etlCompatibilityMode) |
+|--------|-------------|----------------|---------------------------------------------------|
+| **@lazy semantics** | On-demand via `equivalent()` | On-demand via `equivalent()` | On-demand via `equivalent()` |
+| **@greedy semantics** | Kind-of type matching (subtypes) | Kind-of type matching (subtypes) | Kind-of type matching (subtypes) |
+| **@greedy @lazy coverage** | Only activated elements | **ALL matching instances** | Only activated elements (ETL-matching) |
 
-**Key difference**: In Epsilon ETL, non-lazy rules may not execute for elements that are never "activated" during transformation (never referenced via `equivalent()`). Zeta's eager phase processes ALL instances matching the source type, regardless of whether they're reachable through the transformation graph.
+**Key difference**: In Epsilon ETL, `@greedy @lazy` rules use activity-based semantics - they only process elements that are "activated" during transformation (referenced via `equivalent()`). By default, Zeta processes ALL instances matching the source type. To match ETL behavior, use either:
+
+1. **Explicit annotation**: Add `@ActivityBased` to individual rules
+2. **Global mode**: Use `etlCompatibilityMode(true)` on the executor
 
 > **Important**: `@Greedy` controls **type matching only** (kind-of vs type-of). It does NOT control eager vs lazy execution - that's `@Lazy`'s role. These annotations are orthogonal and can be combined.
 
@@ -140,6 +144,50 @@ private boolean isAbstract(EObject element, TransformationContext ctx) {
 }
 ```
 
+### @greedy @lazy (Activity-Based Processing)
+
+In Epsilon ETL, `@greedy @lazy` rules implicitly use activity-based semantics - only elements referenced via `equivalent()` are processed. Zeta makes this behavior explicit.
+
+**ETL** (implicit activity-based):
+```etl
+@greedy
+@lazy
+rule ClassType2TransferObject
+    transform c : ESM!ClassType
+    to t : PSM!TransferObjectType {
+    t.name = c.name;
+}
+```
+
+**Zeta Option 1** - Explicit annotation:
+```java
+@TransformRule(name = "ClassType2TransferObject")
+@Greedy
+@Lazy
+@ActivityBased
+public TransformFunction<ClassType, TransferObjectType> classType2TransferObject() {
+    return (c, ctx) -> {
+        TransferObjectType t = ctx.createTarget(TransferObjectType.class);
+        t.setName(c.getName());
+        return t;
+    };
+}
+```
+
+**Zeta Option 2** - ETL compatibility mode (applies to ALL `@Greedy @Lazy` rules):
+```java
+TransformationExecutor executor = TransformationExecutor.builder()
+    .registry(registry)
+    .context(context)
+    .etlCompatibilityMode(true)  // All @Greedy @Lazy rules become activity-based
+    .build();
+```
+
+**How it works**:
+1. **Phase 1**: Eager rules execute. When they call `equivalent()` for an activity-based rule, the element is recorded as "activated" but execution is deferred.
+2. **Phase 2**: After Phase 1 completes, activity-based rules execute only for activated elements.
+3. **Fixpoint loop**: If activity-based rules activate each other, Phase 2 continues until no new activations occur.
+
 ## Element Resolution
 
 | ETL | Zeta |
@@ -198,6 +246,7 @@ public void post(TransformationContext ctx) {
 | `@abstract` | `@Abstract` |
 | `@primary` | `@Primary` |
 | `@greedy` | `@Greedy` |
+| `@greedy @lazy` (activity-based) | `@Greedy @Lazy @ActivityBased` or `etlCompatibilityMode(true)` |
 | `extends ParentRule` | `@Extends("ParentRule")` |
 | `guard: condition` | `@Guard(method = "methodName")` |
 | `s.equivalent()` | `ctx.equivalent(s, TargetType.class)` |
