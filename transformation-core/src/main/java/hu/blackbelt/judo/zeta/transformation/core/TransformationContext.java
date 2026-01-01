@@ -810,13 +810,33 @@ public class TransformationContext {
                                 return cachedAgain;
                             }
 
-                            // Execute the rule
-                            EObject result = rule.execute(source, this);
-                            if (result != null) {
-                                resolutionCache.addMapping(source, rule.getName(), result, rule.isPrimary());
-                                executingLazyRules.put(key, result);
+                            // CRITICAL: Save and reset inheritance state for equivalent() calls.
+                            // When a transform function calls equivalent() to look up related elements,
+                            // the nested transformation should start FRESH, not inherit the caller's
+                            // inheritance context. Without this reset, the nested rule would see
+                            // inInheritanceExecution=true and potentially reuse the caller's preCreatedTarget.
+                            boolean wasInInheritance = isInInheritanceExecution();
+                            EObject savedPreCreated = getPreCreatedTarget();
+                            setInInheritanceExecution(false);
+                            clearPreCreatedTarget();
+
+                            try {
+                                // Execute the rule with clean inheritance state
+                                EObject result = rule.execute(source, this);
+                                if (result != null) {
+                                    resolutionCache.addMapping(source, rule.getName(), result, rule.isPrimary());
+                                    executingLazyRules.put(key, result);
+                                }
+                                return (T) result;
+                            } finally {
+                                // Restore inheritance state for caller
+                                setInInheritanceExecution(wasInInheritance);
+                                if (savedPreCreated != null) {
+                                    setPreCreatedTarget(savedPreCreated);
+                                } else {
+                                    clearPreCreatedTarget();
+                                }
                             }
-                            return (T) result;
                         } finally {
                             inProgress.remove(key);
                         }
@@ -905,12 +925,32 @@ public class TransformationContext {
                 return (T) cached;
             }
 
-            // Execute the rule
-            EObject result = rule.execute(source, this);
-            if (result != null) {
-                resolutionCache.addMapping(source, ruleName, result, rule.isPrimary());
+            // CRITICAL: Save and reset inheritance state for equivalent() calls.
+            // When a transform function calls equivalent() to look up related elements,
+            // the nested transformation should start FRESH, not inherit the caller's
+            // inheritance context. Without this reset, the nested rule would see
+            // inInheritanceExecution=true and potentially reuse the caller's preCreatedTarget.
+            boolean wasInInheritance = isInInheritanceExecution();
+            EObject savedPreCreated = getPreCreatedTarget();
+            setInInheritanceExecution(false);
+            clearPreCreatedTarget();
+
+            try {
+                // Execute the rule with clean inheritance state
+                EObject result = rule.execute(source, this);
+                if (result != null) {
+                    resolutionCache.addMapping(source, ruleName, result, rule.isPrimary());
+                }
+                return (T) result;
+            } finally {
+                // Restore inheritance state for caller
+                setInInheritanceExecution(wasInInheritance);
+                if (savedPreCreated != null) {
+                    setPreCreatedTarget(savedPreCreated);
+                } else {
+                    clearPreCreatedTarget();
+                }
             }
-            return (T) result;
         } finally {
             inProgress.remove(ruleKey);
         }
@@ -987,12 +1027,32 @@ public class TransformationContext {
                         if (existing != null && targetType.isInstance(existing)) {
                             original = (T) existing;
                         } else {
-                            // Execute the specific rule
-                            EObject result = rule.execute(source, this);
-                            if (result != null) {
-                                resolutionCache.addMapping(source, ruleName, result, rule.isPrimary());
-                                if (targetType.isInstance(result)) {
-                                    original = (T) result;
+                            // CRITICAL: Save and reset inheritance state for equivalent() calls.
+                            // When a transform function calls equivalent() to look up related elements,
+                            // the nested transformation should start FRESH, not inherit the caller's
+                            // inheritance context. Without this reset, the nested rule would see
+                            // inInheritanceExecution=true and potentially reuse the caller's preCreatedTarget.
+                            boolean wasInInheritance = isInInheritanceExecution();
+                            EObject savedPreCreated = getPreCreatedTarget();
+                            setInInheritanceExecution(false);
+                            clearPreCreatedTarget();
+
+                            try {
+                                // Execute the specific rule with clean inheritance state
+                                EObject result = rule.execute(source, this);
+                                if (result != null) {
+                                    resolutionCache.addMapping(source, ruleName, result, rule.isPrimary());
+                                    if (targetType.isInstance(result)) {
+                                        original = (T) result;
+                                    }
+                                }
+                            } finally {
+                                // Restore inheritance state for caller
+                                setInInheritanceExecution(wasInInheritance);
+                                if (savedPreCreated != null) {
+                                    setPreCreatedTarget(savedPreCreated);
+                                } else {
+                                    clearPreCreatedTarget();
                                 }
                             }
                         }
