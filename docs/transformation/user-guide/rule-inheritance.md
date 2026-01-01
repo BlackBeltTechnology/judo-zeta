@@ -46,13 +46,71 @@ public TransformFunction<EntityType, Table> entityType2Table() {
 
 ## executeParentRule()
 
+Two overloads are available:
+
 ```java
+// Basic - parent creates target
 <T extends EObject> T executeParentRule(String parentRuleName, EObject source);
+
+// With pre-created target - child creates target, parent modifies it
+<T extends EObject> T executeParentRule(String parentRuleName, EObject source, T target);
 ```
 
-- Executes the parent rule and returns its result
-- Child can then modify/extend the result
-- Parent rule creates the target element
+### Pattern 1: Automatic Inheritance (Concrete Types)
+
+When the child rule has a concrete target type, the framework automatically handles inheritance:
+
+```java
+@TransformRule(name = "EntityType2Table")
+@Extends("NamedElement2NamedType")  // Framework executes parent automatically
+public TransformFunction<EntityType, Table> entityType2Table() {
+    return (entity, ctx) -> {
+        // createTarget() returns the pre-created target shared with parent
+        Table table = ctx.createTarget(Table.class);
+        table.setAbstract(entity.isAbstract());
+        return table;
+    };
+}
+```
+
+### Pattern 2: Manual Inheritance (Abstract Parent Types)
+
+When the parent rule has an abstract target type (e.g., `NamedElement`), use the manual pattern:
+
+```java
+@TransformRule(name = "EntityType2Table")
+public TransformFunction<EntityType, Table> entityType2Table() {
+    return (entity, ctx) -> {
+        // Child creates the CONCRETE target first
+        Table table = ctx.createTarget(Table.class);
+
+        // Pass target to parent - parent's createTarget() returns this same instance
+        ctx.executeParentRule("NamedElement2NamedType", entity, table);
+
+        // Add entity-specific transformations
+        table.setAbstract(entity.isAbstract());
+        return table;
+    };
+}
+
+@TransformRule(name = "NamedElement2NamedType")
+@Abstract
+public TransformFunction<NamedElement, NamedElement> namedElement2NamedType() {
+    return (source, ctx) -> {
+        // createTarget() returns the pre-created target passed by child
+        NamedElement target = ctx.createTarget(NamedElement.class);
+        target.setName(source.getName());
+        return target;
+    };
+}
+```
+
+### When to Use Each Pattern
+
+| Pattern | Use When |
+|---------|----------|
+| Automatic (`@Extends`) | Child's target type is concrete (can be instantiated) |
+| Manual (`executeParentRule(name, source, target)`) | Parent's target type is abstract, or you need explicit control |
 
 ## Multi-Level Inheritance
 
