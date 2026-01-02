@@ -24,6 +24,9 @@ import org.eclipse.emf.ecore.EObject;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
 
 /**
  * Cache for transformation trace (source → target mappings).
@@ -45,8 +48,47 @@ public class ElementResolutionCache {
     // Discriminated cache: source → rule name → discriminator → instance
     private final Map<EObject, Map<String, Map<String, EObject>>> discriminatedCache = new ConcurrentHashMap<>();
 
+    // Per-key locks for atomic getOrCreate operations
+    private final ConcurrentHashMap<CacheKey, ReentrantLock> keyLocks = new ConcurrentHashMap<>();
+
+    // Track rejected (source, ruleName) pairs to avoid re-evaluating guards
+    private final Set<CacheKey> rejectedKeys = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Key for per-element locking using (source identity, ruleName) pair.
+     *
+     * <p>Uses System.identityHashCode for source to ensure consistency
+     * even if the source element's equals/hashCode are overridden.</p>
+     */
+    private static class CacheKey {
+        private final int sourceIdentity;
+        private final String ruleName;
+
+        CacheKey(EObject source, String ruleName) {
+            this.sourceIdentity = System.identityHashCode(source);
+            this.ruleName = ruleName;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            CacheKey cacheKey = (CacheKey) o;
+            return sourceIdentity == cacheKey.sourceIdentity &&
+                    Objects.equals(ruleName, cacheKey.ruleName);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(sourceIdentity, ruleName);
+        }
+    }
+
     /**
      * Add a mapping from source to target.
+     *
+     * <p>Thread-safe: Uses CopyOnWriteArrayList for the type cache lists to allow
+     * concurrent iteration during parallel transformation while adding new mappings.</p>
      *
      * @param source the source element
      * @param ruleName the transformation rule name
@@ -60,6 +102,10 @@ public class ElementResolutionCache {
             T target,
             boolean isPrimary
     ) {
+        // ConcurrentHashMap doesn't allow null keys or values - skip if any are null
+        if (source == null || ruleName == null || target == null) {
+            return;
+        }
         String targetTypeName = target.eClass().getName();
 
         // Add to rule cache (for idempotent equivalent() calls)
@@ -67,8 +113,9 @@ public class ElementResolutionCache {
                 .put(ruleName, target);
 
         // Add to type cache (for equivalents() by type)
+        // Use CopyOnWriteArrayList for thread-safe iteration during parallel transformation
         typeCache.computeIfAbsent(source, k -> new ConcurrentHashMap<>())
-                .computeIfAbsent(targetTypeName, k -> Collections.synchronizedList(new ArrayList<>()))
+                .computeIfAbsent(targetTypeName, k -> new CopyOnWriteArrayList<>())
                 .add(target);
 
         // Add to primary cache if marked
@@ -88,6 +135,10 @@ public class ElementResolutionCache {
      */
     @SuppressWarnings("unchecked")
     public <T extends EObject> T getByRule(EObject source, String ruleName) {
+        // ConcurrentHashMap doesn't allow null keys
+        if (source == null || ruleName == null) {
+            return null;
+        }
         Map<String, EObject> ruleMap = ruleCache.get(source);
         if (ruleMap != null) {
             return (T) ruleMap.get(ruleName);
@@ -96,8 +147,88 @@ public class ElementResolutionCache {
     }
 
     /**
+     * Atomic get-or-create operation with per-key locking.
+     *
+     * <p>This method provides atomic check-and-execute semantics for parallel
+     * transformation. The lock covers the full execution: cache lookup, guard
+     * evaluation, and rule execution. This prevents race conditions where
+     * multiple threads could create duplicate target elements for the same source.</p>
+     *
+     * <p>The supplier is only invoked on cache miss. If the supplier returns null
+     * (e.g., guard rejected), no mapping is added.</p>
+     *
+     * <p>Thread-safe: Uses fine-grained per-(source, ruleName) locks to allow
+     * different sources and rules to execute in parallel without blocking.</p>
+     *
+     * @param source the source element
+     * @param ruleName the transformation rule name
+     * @param ruleExecutor supplier that executes the rule (called under lock)
+     * @param isPrimary whether this is a primary transformation
+     * @param <T> the target type
+     * @return the cached or newly created target, or null if supplier returns null
+     */
+    @SuppressWarnings("unchecked")
+    public <T extends EObject> T getOrCreate(
+            EObject source,
+            String ruleName,
+            Supplier<T> ruleExecutor,
+            boolean isPrimary
+    ) {
+        if (source == null || ruleName == null) {
+            return null;
+        }
+
+        // Fast path: check cache without locking
+        CacheKey key = new CacheKey(source, ruleName);
+
+        // Check if previously rejected (guard returned null)
+        if (rejectedKeys.contains(key)) {
+            return null;
+        }
+
+        T cached = getByRule(source, ruleName);
+        if (cached != null) {
+            return cached;
+        }
+
+        // Acquire per-key lock for atomic check-and-execute
+        ReentrantLock lock = keyLocks.computeIfAbsent(key, k -> new ReentrantLock());
+        lock.lock();
+        try {
+            // Double-check after acquiring lock (another thread may have completed)
+            if (rejectedKeys.contains(key)) {
+                return null;
+            }
+
+            cached = getByRule(source, ruleName);
+            if (cached != null) {
+                return cached;
+            }
+
+            // Execute rule under lock (includes guard evaluation)
+            T target = ruleExecutor.get();
+            if (target != null) {
+                addMapping(source, ruleName, target, isPrimary);
+            } else {
+                // Cache the rejection to prevent redundant guard evaluation
+                rejectedKeys.add(key);
+            }
+            return target;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
      * Get the equivalent target for a source element.
      * Returns the primary target if available, otherwise the first target of the type.
+     *
+     * <p>This method supports type hierarchy lookups. If an EDataType is cached
+     * and EClassifier is requested, the EDataType will be returned since
+     * EDataType extends EClassifier.</p>
+     *
+     * <p>Thread-safe: Uses snapshot-based iteration to avoid ConcurrentModificationException
+     * during parallel transformation.</p>
      *
      * @param source the source element
      * @param targetType the target type class
@@ -107,21 +238,39 @@ public class ElementResolutionCache {
     public <T extends EObject> T getEquivalent(EObject source, Class<T> targetType) {
         String typeName = getTypeName(targetType);
 
-        // Check primary cache first
+        // Check primary cache first (exact match)
         Map<String, EObject> primaryMap = primaryCache.get(source);
         if (primaryMap != null) {
             EObject primary = primaryMap.get(typeName);
             if (primary != null) {
                 return targetType.cast(primary);
             }
+            // Fall back to assignable type check in primary cache
+            // Use snapshot to avoid ConcurrentModificationException
+            for (EObject primary2 : new ArrayList<>(primaryMap.values())) {
+                if (targetType.isInstance(primary2)) {
+                    return targetType.cast(primary2);
+                }
+            }
         }
 
-        // Fall back to first from type cache
+        // Check for assignable types in type cache (e.g., EDataType when requesting EClassifier)
+        // This handles cases where EDataType is cached but EClassifier is requested
         Map<String, List<EObject>> typeMap = typeCache.get(source);
         if (typeMap != null) {
-            List<EObject> targets = typeMap.get(typeName);
-            if (targets != null && !targets.isEmpty()) {
-                return targetType.cast(targets.get(0));
+            // First try exact type match
+            List<EObject> exactTargets = typeMap.get(typeName);
+            if (exactTargets != null && !exactTargets.isEmpty()) {
+                return targetType.cast(exactTargets.get(0));
+            }
+            // Fall back to assignable type check
+            // CopyOnWriteArrayList is already safe for iteration, but we need snapshot of typeMap.values()
+            for (List<EObject> targets : new ArrayList<>(typeMap.values())) {
+                for (EObject target : targets) {
+                    if (targetType.isInstance(target)) {
+                        return targetType.cast(target);
+                    }
+                }
             }
         }
 
@@ -131,29 +280,39 @@ public class ElementResolutionCache {
     /**
      * Get all equivalent targets for a source element of a given type.
      *
+     * <p>This method supports type hierarchy lookups. If an EDataType is cached
+     * and EClassifier is requested, the EDataType will be returned since
+     * EDataType extends EClassifier.</p>
+     *
+     * <p>Thread-safe: Uses snapshot-based iteration to avoid ConcurrentModificationException
+     * during parallel transformation.</p>
+     *
      * @param source the source element
      * @param targetType the target type class
      * @param <T> the target type
-     * @return list of equivalent targets
+     * @return list of equivalent targets (includes subtypes)
      */
-    @SuppressWarnings("unchecked")
     public <T extends EObject> List<T> getEquivalents(EObject source, Class<T> targetType) {
-        String typeName = getTypeName(targetType);
         Map<String, List<EObject>> typeMap = typeCache.get(source);
 
         if (typeMap == null) {
             return Collections.emptyList();
         }
 
-        List<EObject> targets = typeMap.get(typeName);
-        if (targets == null) {
-            return Collections.emptyList();
+        List<T> result = new ArrayList<>();
+        
+        // Check all cached targets for type assignability
+        // This handles cases where EDataType is cached but EClassifier is requested
+        // Use snapshot of typeMap.values() to avoid ConcurrentModificationException
+        for (List<EObject> targets : new ArrayList<>(typeMap.values())) {
+            // CopyOnWriteArrayList is already safe for iteration
+            for (EObject target : targets) {
+                if (targetType.isInstance(target)) {
+                    result.add(targetType.cast(target));
+                }
+            }
         }
-
-        List<T> result = new ArrayList<>(targets.size());
-        for (EObject target : targets) {
-            result.add((T) target);
-        }
+        
         return result;
     }
 
@@ -161,7 +320,7 @@ public class ElementResolutionCache {
      * Add a discriminated mapping.
      *
      * @param source the source element
-     * @param target the target element
+     * @param target the target element (null targets are not cached)
      * @param ruleName the rule name
      * @param discriminator the discriminator value
      * @param <T> the target type
@@ -172,6 +331,10 @@ public class ElementResolutionCache {
             String ruleName,
             String discriminator
     ) {
+        // ConcurrentHashMap doesn't allow null keys or values - skip if any are null
+        if (source == null || target == null || ruleName == null || discriminator == null) {
+            return;
+        }
         discriminatedCache
                 .computeIfAbsent(source, k -> new ConcurrentHashMap<>())
                 .computeIfAbsent(ruleName, k -> new ConcurrentHashMap<>())
@@ -194,6 +357,10 @@ public class ElementResolutionCache {
             String ruleName,
             String discriminator
     ) {
+        // ConcurrentHashMap doesn't allow null keys
+        if (source == null || ruleName == null || discriminator == null) {
+            return null;
+        }
         Map<String, Map<String, EObject>> ruleMap = discriminatedCache.get(source);
         if (ruleMap != null) {
             Map<String, EObject> discMap = ruleMap.get(ruleName);
@@ -259,6 +426,19 @@ public class ElementResolutionCache {
         typeCache.clear();
         primaryCache.clear();
         discriminatedCache.clear();
+        keyLocks.clear();
+        rejectedKeys.clear();
+    }
+
+    /**
+     * Clear only the rejection cache (guard rejections).
+     *
+     * <p>Called at the start of each transformation to allow guards to be
+     * re-evaluated. This is separate from clear() because we may want to
+     * keep element mappings while clearing rejection tracking.</p>
+     */
+    public void clearRejections() {
+        rejectedKeys.clear();
     }
 
     /**
