@@ -1,9 +1,19 @@
 # Proposal: Fix Parallel Transformation EMF Thread-Safety
 
-**Change ID**: `fix-parallel-emf-thread-safety`  
-**Status**: Proposed  
-**Created**: 2025-12-14  
+**Change ID**: `fix-parallel-emf-thread-safety`
+**Status**: Proposed
+**Created**: 2025-12-14
+**Updated**: 2026-01-02
 **Type**: Bug Fix / Enhancement
+
+## Decision Log
+
+| Question | Decision | Rationale |
+|----------|----------|-----------|
+| Approach | **Hybrid (C)** | Start with locking/synchronization, add proxy-based deferred writes later if needed |
+| Cache Key | **`(source, ruleName)`** | Prevents cross-rule cache pollution |
+| Scope | **judo-zeta only (fixes 1-3)** | Framework-level fixes; tatami-base uses synchronized helpers |
+| Testing | **Framework-level tests** | Add parallel safety tests to zeta-core |
 
 ## Summary
 
