@@ -229,7 +229,12 @@ transformation-core/src/main/java/hu/blackbelt/judo/zeta/transformation/core/
 ├── TransformationException.java       # Fail-fast error handling
 ├── TransformRuleDescriptor.java       # Rule metadata
 ├── ElementResolutionCache.java        # Thread-safe source→target cache
-└── RuleInheritanceGraph.java          # Rule dependency resolution
+├── RuleInheritanceGraph.java          # Rule dependency resolution
+└── deferred/                          # Deferred EMF writes infrastructure
+    ├── EMFOperation.java              # Sealed interface with 10 operation record types
+    ├── OperationQueue.java            # Thread-safe queue with sequence ordering
+    ├── DeferredEObject.java           # Dynamic proxy for operation interception
+    └── DeferredEList.java             # EList wrapper for deferred list operations
 ```
 
 ### Parallel Transformation Execution
@@ -285,7 +290,7 @@ EObject obj = ctx.createTarget(dynamicType, dynamicPackage);
 **Safe Operations:**
 - `ctx.createTarget()` - Creates staged elements
 - `ctx.createTarget(Class, EPackage)` - Creates in specific package
-- `ctx.equivalent()` - Thread-safe lazy rule execution via `computeIfAbsent`
+- `ctx.equivalent()` - Thread-safe lazy rule execution with per-element locking
 - `ctx.equivalentDiscriminated()` - Thread-safe discriminated equivalence
 - Setting properties on elements you created
 - Reading from source elements
@@ -294,6 +299,25 @@ EObject obj = ctx.createTarget(dynamicType, dynamicPackage);
 - Modifying source elements
 - Modifying target elements created by other rules
 - Shared mutable state between rules
+
+### Thread-Safety Implementation Details
+
+**Approach 1: Per-Element Locking (Default)**
+- Cache key is `(source, ruleName)` for proper cross-rule isolation
+- Double-check locking pattern in `equivalent()` calls
+- Synchronized XMI ID operations on Resource object
+
+**Approach 2: Deferred EMF Writes (Opt-in)**
+```java
+ctx.enableDeferredWrites();
+Table table = ctx.createTarget(Table.class);  // Returns proxy
+table.setName("Orders");                       // Recorded, not applied
+ctx.commitDeferredOperations();                // Applies all in sequence order
+```
+
+**Guard Rejection Caching:**
+- Guard rejections cached per `(source, ruleName)` pair
+- Avoids redundant guard evaluation in complex transformation graphs
 
 ### Fail-Fast Error Handling
 

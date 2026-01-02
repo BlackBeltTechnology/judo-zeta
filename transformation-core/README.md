@@ -14,6 +14,9 @@ Annotation-based model transformation framework for EMF metamodels. This module 
 - **Primary Rules**: Mark preferred transformations with `@Primary`
 - **Discriminated Equivalence**: Multiple transformations of the same source element
 - **Parallel Execution**: Thread-safe parallel processing for large models with staging infrastructure
+- **Per-Element Locking**: Fine-grained locking per (source, ruleName) pair for thread-safety
+- **Deferred EMF Writes**: Optional proxy-based operation recording with sequential commit
+- **Guard Rejection Caching**: Per-rule caching of guard rejections to avoid redundant evaluation
 - **Transformation Trace**: Automatic source-to-target mapping with JSON export
 - **Extension Methods**: Reusable helper methods with caching support
 - **Fail-Fast Error Handling**: Immediate abort on first error with detailed context
@@ -249,6 +252,12 @@ private boolean isAbstract(EObject element, TransformationContext ctx) {
 **Guard evaluation timing (ETL semantics):**
 - For **non-lazy rules**: Guards are evaluated during initial scheduling
 - For **@Lazy rules**: Guards are evaluated at invocation time (when `equivalent()` is called)
+
+**Guard rejection caching:**
+- Guard rejections are cached per `(source, ruleName)` pair
+- Subsequent `equivalent()` calls for rejected source-rule pairs return `null` immediately
+- Avoids redundant guard evaluation in complex transformation graphs
+- Cache is automatically cleared between transformation executions
 
 ### Lazy Rules and equivalent()
 
@@ -582,6 +591,68 @@ public TransformFunction<EntityType, Table> entityType2Table() {
     };
 }
 ```
+
+### Thread-Safety Implementation
+
+The framework provides two complementary approaches for thread-safe parallel transformation:
+
+#### Approach 1: Per-Element Locking (Default)
+
+Active by default, this approach uses fine-grained locking to ensure thread-safety:
+
+**Cache Key Design:**
+- Cache key is `(source, ruleName)` not `(source, targetType)`
+- Each rule has independent cache entries per source element
+- Prevents cross-rule cache pollution
+
+**Per-Element Locking:**
+```java
+// Internal implementation uses double-check pattern:
+// 1. Check cache (fast path)
+// 2. Acquire lock for (source, ruleName) pair
+// 3. Check cache again (another thread may have completed)
+// 4. Execute rule and cache result
+// 5. Release lock
+```
+
+**Synchronized XMI ID Operations:**
+- All `XMIResource.setID()` calls are synchronized on the Resource
+- Prevents ConcurrentModificationException during ID assignment
+- IDs are applied atomically during commit phase
+
+#### Approach 2: Deferred EMF Writes (Opt-in)
+
+For complete thread isolation, enable deferred writes mode:
+
+```java
+// Enable deferred writes - operations are recorded, not applied
+ctx.enableDeferredWrites();
+
+// All property/list modifications on created elements are deferred
+Table table = ctx.createTarget(Table.class);  // Returns a proxy
+table.setName("Orders");                       // Recorded, not applied
+table.getColumns().add(column);                // Recorded, not applied
+
+// Check pending operations
+int pending = ctx.getPendingOperationCount();  // Returns 2
+
+// Commit all operations atomically in sequence order
+int applied = ctx.commitDeferredOperations();
+
+// Disable deferred mode
+ctx.disableDeferredWrites();
+```
+
+**When to use deferred writes:**
+- When transformation rules need complete isolation
+- When debugging race conditions
+- When deterministic operation ordering is critical
+
+**How it works:**
+1. `createTarget()` returns a dynamic proxy instead of the real object
+2. Proxy intercepts setters and list modifications
+3. Operations are recorded with monotonic sequence numbers
+4. `commit()` sorts by sequence and applies all operations sequentially
 
 ### Error Handling
 

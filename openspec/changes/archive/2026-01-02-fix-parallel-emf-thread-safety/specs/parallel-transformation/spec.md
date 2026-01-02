@@ -41,6 +41,8 @@ The ElementResolutionCache MUST support concurrent read and write access from mu
 
 ---
 
+## ADDED Requirements
+
 ### Requirement: Thread-Safe EMF Operations
 
 EMF operations during parallel transformation MUST be synchronized to prevent NPE and data corruption.

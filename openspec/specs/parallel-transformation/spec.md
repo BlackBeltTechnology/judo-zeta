@@ -63,25 +63,36 @@ The `createTarget()` method MUST be safe for concurrent calls from multiple thre
 
 ### Requirement: Thread-Safe Element Resolution Cache
 
-The ElementResolutionCache MUST support concurrent read and write access from multiple threads.
+The ElementResolutionCache MUST support concurrent read and write access from multiple threads with atomic get-or-create semantics.
 
-#### Scenario: Concurrent cache writes from different threads
+#### Scenario: Cache key includes rule name for isolation
 
-**Given** parallel transformation is in progress  
-**And** multiple threads are adding mappings to the resolution cache  
-**When** each thread calls `addMapping(source, ruleName, target, isPrimary)`  
-**Then** all mappings are stored correctly  
-**And** no data is lost or corrupted  
-**And** no ConcurrentModificationException is thrown  
+**Given** a transformation with multiple rules that transform the same source type
+**And** Rule A and Rule B both apply to the same source element
+**When** `equivalent()` is called for Rule A
+**And** `equivalent()` is called for Rule B
+**Then** each rule has an independent cache entry
+**And** cache key is `(source, ruleName)` not `(source, targetType)`
+**And** cross-rule cache pollution is prevented
 
-#### Scenario: Concurrent cache reads during writes
+#### Scenario: Atomic get-or-create prevents duplicate creation
 
-**Given** parallel transformation is in progress  
-**And** some threads are adding mappings  
-**And** other threads are reading via `equivalent()` or `equivalents()`  
-**When** reads and writes occur simultaneously  
-**Then** reads return consistent results (either before or after a specific write)  
-**And** no ConcurrentModificationException is thrown  
+**Given** parallel transformation is in progress
+**And** Thread A and Thread B call `equivalent()` for the same (source, rule) pair simultaneously
+**When** Thread A begins rule execution
+**Then** Thread B waits for Thread A to complete
+**And** Thread B receives the cached result from Thread A
+**And** only one target element is created
+**And** `computeIfAbsent()` is used for atomic cache operations
+
+#### Scenario: Per-element locking prevents race conditions
+
+**Given** parallel transformation with many threads
+**And** multiple threads request equivalent for same source
+**When** the first thread acquires the lock
+**Then** other threads wait on the lock
+**And** lock is per `(source, ruleName)` pair not global
+**And** unrelated sources execute in parallel without blocking
 
 ---
 
@@ -453,6 +464,28 @@ The transformation framework MUST include tests that verify sequential and paral
 **When** the transformation is executed in sequential and parallel modes  
 **Then** both modes produce structurally equal target models  
 **And** XMI serialization produces identical output
+
+### Requirement: Thread-Safe EMF Operations
+
+EMF operations during parallel transformation MUST be synchronized to prevent NPE and data corruption.
+
+#### Scenario: Element is fully initialized before caching
+
+**Given** a thread creates a new target element
+**When** the element is added to the cache
+**Then** the element's EMF internal state is fully initialized
+**And** `eResource()` returns non-null if attached
+**And** other threads accessing the cached element see a consistent state
+
+#### Scenario: XMI ID operations are synchronized
+
+**Given** parallel transformation setting XMI IDs
+**When** multiple threads set IDs on elements in the same Resource
+**Then** `XMLResource.setID()` calls are synchronized on the Resource
+**And** no ConcurrentModificationException is thrown
+**And** all IDs are correctly set
+
+---
 
 ## Thread-Safety Contracts
 
