@@ -40,6 +40,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
 import static java.util.Optional.ofNullable;
@@ -122,14 +123,23 @@ public class TransformationContext {
 
     /**
      * Map for tracking lazy rule executions to prevent concurrent duplicates.
+     * Key is (source, ruleName) for cross-rule isolation.
      */
-    private final ConcurrentHashMap<LazyRuleKey, EObject> executingLazyRules = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<RuleCacheKey, EObject> executingLazyRules = new ConcurrentHashMap<>();
 
     /**
-     * ThreadLocal set to track lazy rule keys currently being executed in this thread.
-     * Used to detect and handle recursive equivalent() calls.
+     * Per-element locks for thread-safe rule execution.
+     * Key is (source, ruleName) to allow unrelated sources to execute in parallel without blocking.
+     * Uses ReentrantLock to handle recursive equivalent() calls from the same thread.
      */
-    private final ThreadLocal<Set<LazyRuleKey>> inProgressRules = ThreadLocal.withInitial(HashSet::new);
+    private final ConcurrentHashMap<RuleCacheKey, ReentrantLock> ruleLocks = new ConcurrentHashMap<>();
+
+    /**
+     * ThreadLocal set to track rule cache keys currently being executed in this thread.
+     * Used to detect and handle recursive equivalent() calls.
+     * Key is (source, ruleName) for cross-rule isolation.
+     */
+    private final ThreadLocal<Set<RuleCacheKey>> inProgressRules = ThreadLocal.withInitial(HashSet::new);
 
     private TransformationRegistry transformationRegistry;
 
@@ -194,28 +204,38 @@ public class TransformationContext {
     }
 
     /**
-     * Key for tracking lazy rule executions.
+     * Key for tracking lazy rule executions using (source, ruleName) pair.
+     *
+     * <p>Using rule name instead of target type provides proper cross-rule isolation:
+     * different rules transforming the same source element maintain independent cache entries.
+     * This prevents cache pollution when multiple rules (e.g., Rule A and Rule B) both
+     * apply to the same source element.</p>
      */
-    private static class LazyRuleKey {
+    private static class RuleCacheKey {
         final EObject source;
-        final Class<?> targetType;
+        final String ruleName;
 
-        LazyRuleKey(EObject source, Class<?> targetType) {
+        RuleCacheKey(EObject source, String ruleName) {
             this.source = source;
-            this.targetType = targetType;
+            this.ruleName = ruleName;
         }
 
         @Override
         public boolean equals(Object o) {
             if (this == o) return true;
             if (o == null || getClass() != o.getClass()) return false;
-            LazyRuleKey that = (LazyRuleKey) o;
-            return Objects.equals(source, that.source) && Objects.equals(targetType, that.targetType);
+            RuleCacheKey that = (RuleCacheKey) o;
+            return Objects.equals(source, that.source) && Objects.equals(ruleName, that.ruleName);
         }
 
         @Override
         public int hashCode() {
-            return Objects.hash(source, targetType);
+            return Objects.hash(source, ruleName);
+        }
+
+        @Override
+        public String toString() {
+            return "RuleCacheKey{source=" + source + ", ruleName='" + ruleName + "'}";
         }
     }
 
@@ -817,7 +837,7 @@ public class TransformationContext {
                 // Apply pending XMI ID if one was set before adding to resource
                 String pendingId = pendingXmiIds.get(element);
                 if (pendingId != null && targetResource instanceof XMIResource) {
-                    ((XMIResource) targetResource).setID(element, pendingId);
+                    setSynchronizedXmiId((XMIResource) targetResource, element, pendingId);
                 }
             }
         }
@@ -867,60 +887,76 @@ public class TransformationContext {
                             }
                         }
 
-                        LazyRuleKey key = new LazyRuleKey(source, targetType);
+                        // Use (source, ruleName) key for cross-rule cache isolation
+                        RuleCacheKey key = new RuleCacheKey(source, rule.getName());
 
-                        // Check if already executed (from cache or concurrent execution)
+                        // Fast path: check if already executed (from cache or concurrent execution)
                         EObject existing = executingLazyRules.get(key);
                         if (existing != null) {
                             return (T) existing;
                         }
 
                         // Check if this key is currently being executed in this thread (recursion)
-                        Set<LazyRuleKey> inProgress = inProgressRules.get();
+                        Set<RuleCacheKey> inProgress = inProgressRules.get();
                         if (inProgress.contains(key)) {
                             // Recursive call detected - return null to break the cycle
                             // The caller should handle null gracefully
                             return null;
                         }
 
-                        // Mark as in-progress for this thread
-                        inProgress.add(key);
+                        // Acquire per-element lock for thread-safe execution
+                        // Uses computeIfAbsent for atomic lock creation
+                        ReentrantLock lock = ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
+                        lock.lock();
                         try {
-                            // Double-check cache after marking in-progress
+                            // Double-check after acquiring lock (another thread may have completed)
+                            EObject existingAfterLock = executingLazyRules.get(key);
+                            if (existingAfterLock != null) {
+                                return (T) existingAfterLock;
+                            }
+
+                            // Also double-check resolution cache
                             T cachedAgain = resolutionCache.getEquivalent(source, targetType);
                             if (cachedAgain != null) {
                                 return cachedAgain;
                             }
 
-                            // CRITICAL: Save and reset inheritance state for equivalent() calls.
-                            // When a transform function calls equivalent() to look up related elements,
-                            // the nested transformation should start FRESH, not inherit the caller's
-                            // inheritance context. Without this reset, the nested rule would see
-                            // inInheritanceExecution=true and potentially reuse the caller's preCreatedTarget.
-                            boolean wasInInheritance = isInInheritanceExecution();
-                            EObject savedPreCreated = getPreCreatedTarget();
-                            setInInheritanceExecution(false);
-                            clearPreCreatedTarget();
-
+                            // Mark as in-progress for recursion detection
+                            inProgress.add(key);
                             try {
-                                // Execute the rule with clean inheritance state
-                                EObject result = rule.execute(source, this);
-                                if (result != null) {
-                                    resolutionCache.addMapping(source, rule.getName(), result, rule.isPrimary());
-                                    executingLazyRules.put(key, result);
+                                // CRITICAL: Save and reset inheritance state for equivalent() calls.
+                                // When a transform function calls equivalent() to look up related elements,
+                                // the nested transformation should start FRESH, not inherit the caller's
+                                // inheritance context. Without this reset, the nested rule would see
+                                // inInheritanceExecution=true and potentially reuse the caller's preCreatedTarget.
+                                boolean wasInInheritance = isInInheritanceExecution();
+                                EObject savedPreCreated = getPreCreatedTarget();
+                                setInInheritanceExecution(false);
+                                clearPreCreatedTarget();
+
+                                try {
+                                    // Execute the rule with clean inheritance state
+                                    EObject result = rule.execute(source, this);
+                                    if (result != null) {
+                                        // Cache the result atomically
+                                        resolutionCache.addMapping(source, rule.getName(), result, rule.isPrimary());
+                                        executingLazyRules.put(key, result);
+                                    }
+                                    return (T) result;
+                                } finally {
+                                    // Restore inheritance state for caller
+                                    setInInheritanceExecution(wasInInheritance);
+                                    if (savedPreCreated != null) {
+                                        setPreCreatedTarget(savedPreCreated);
+                                    } else {
+                                        clearPreCreatedTarget();
+                                    }
                                 }
-                                return (T) result;
                             } finally {
-                                // Restore inheritance state for caller
-                                setInInheritanceExecution(wasInInheritance);
-                                if (savedPreCreated != null) {
-                                    setPreCreatedTarget(savedPreCreated);
-                                } else {
-                                    clearPreCreatedTarget();
-                                }
+                                inProgress.remove(key);
                             }
                         } finally {
-                            inProgress.remove(key);
+                            lock.unlock();
                         }
                     }
                 }
@@ -1000,6 +1036,15 @@ public class TransformationContext {
             return null;
         }
 
+        // Use (source, ruleName) key for cross-rule cache isolation
+        RuleCacheKey key = new RuleCacheKey(source, ruleName);
+
+        // Fast path: check if already executed
+        EObject existing = executingLazyRules.get(key);
+        if (existing != null) {
+            return (T) existing;
+        }
+
         // Check for recursion - if we're already executing this rule for this source
         NamedRuleKey ruleKey = new NamedRuleKey(source, ruleName);
         Set<NamedRuleKey> inProgress = inProgressNamedRules.get();
@@ -1008,43 +1053,58 @@ public class TransformationContext {
             return null;
         }
 
-        // Mark as in-progress and execute the rule
-        inProgress.add(ruleKey);
+        // Acquire per-element lock for thread-safe execution
+        ReentrantLock lock = ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
+        lock.lock();
         try {
-            // Double-check cache after marking in-progress
+            // Double-check after acquiring lock (another thread may have completed)
+            EObject existingAfterLock = executingLazyRules.get(key);
+            if (existingAfterLock != null) {
+                return (T) existingAfterLock;
+            }
+
+            // Also double-check resolution cache
             cached = resolutionCache.getByRule(source, ruleName);
             if (cached != null) {
                 return (T) cached;
             }
 
-            // CRITICAL: Save and reset inheritance state for equivalent() calls.
-            // When a transform function calls equivalent() to look up related elements,
-            // the nested transformation should start FRESH, not inherit the caller's
-            // inheritance context. Without this reset, the nested rule would see
-            // inInheritanceExecution=true and potentially reuse the caller's preCreatedTarget.
-            boolean wasInInheritance = isInInheritanceExecution();
-            EObject savedPreCreated = getPreCreatedTarget();
-            setInInheritanceExecution(false);
-            clearPreCreatedTarget();
-
+            // Mark as in-progress for recursion detection
+            inProgress.add(ruleKey);
             try {
-                // Execute the rule with clean inheritance state
-                EObject result = rule.execute(source, this);
-                if (result != null) {
-                    resolutionCache.addMapping(source, ruleName, result, rule.isPrimary());
+                // CRITICAL: Save and reset inheritance state for equivalent() calls.
+                // When a transform function calls equivalent() to look up related elements,
+                // the nested transformation should start FRESH, not inherit the caller's
+                // inheritance context. Without this reset, the nested rule would see
+                // inInheritanceExecution=true and potentially reuse the caller's preCreatedTarget.
+                boolean wasInInheritance = isInInheritanceExecution();
+                EObject savedPreCreated = getPreCreatedTarget();
+                setInInheritanceExecution(false);
+                clearPreCreatedTarget();
+
+                try {
+                    // Execute the rule with clean inheritance state
+                    EObject result = rule.execute(source, this);
+                    if (result != null) {
+                        // Cache the result atomically
+                        resolutionCache.addMapping(source, ruleName, result, rule.isPrimary());
+                        executingLazyRules.put(key, result);
+                    }
+                    return (T) result;
+                } finally {
+                    // Restore inheritance state for caller
+                    setInInheritanceExecution(wasInInheritance);
+                    if (savedPreCreated != null) {
+                        setPreCreatedTarget(savedPreCreated);
+                    } else {
+                        clearPreCreatedTarget();
+                    }
                 }
-                return (T) result;
             } finally {
-                // Restore inheritance state for caller
-                setInInheritanceExecution(wasInInheritance);
-                if (savedPreCreated != null) {
-                    setPreCreatedTarget(savedPreCreated);
-                } else {
-                    clearPreCreatedTarget();
-                }
+                inProgress.remove(ruleKey);
             }
         } finally {
-            inProgress.remove(ruleKey);
+            lock.unlock();
         }
     }
 
@@ -1214,7 +1274,7 @@ public class TransformationContext {
 
                     // Apply the discriminated XMI ID
                     if (targetResource instanceof XMIResource) {
-                        ((XMIResource) targetResource).setID(clone, discriminatedId);
+                        setSynchronizedXmiId((XMIResource) targetResource, clone, discriminatedId);
                     }
                 }
             }
@@ -1725,7 +1785,7 @@ public class TransformationContext {
             // Apply pending XMI ID now that element is in resource
             String pendingId = pendingXmiIds.remove(obj);
             if (pendingId != null && xmiResource != null) {
-                xmiResource.setID(obj, pendingId);
+                setSynchronizedXmiId(xmiResource, obj, pendingId);
             }
 
             // Also apply pending IDs to contained elements recursively
@@ -1743,7 +1803,7 @@ public class TransformationContext {
         for (EObject child : parent.eContents()) {
             String pendingId = pendingXmiIds.remove(child);
             if (pendingId != null) {
-                xmiResource.setID(child, pendingId);
+                setSynchronizedXmiId(xmiResource, child, pendingId);
             }
             applyPendingIdsRecursively(child, xmiResource);
         }
@@ -1802,10 +1862,12 @@ public class TransformationContext {
 
             // Only apply if the element is in this resource and doesn't already have an ID set
             if (element.eResource() == targetResource) {
-                String existingId = xmiResource.getID(element);
-                if (existingId == null || !existingId.equals(pendingId)) {
-                    xmiResource.setID(element, pendingId);
-                    appliedCount++;
+                synchronized (xmiResource) {
+                    String existingId = xmiResource.getID(element);
+                    if (existingId == null || !existingId.equals(pendingId)) {
+                        xmiResource.setID(element, pendingId);
+                        appliedCount++;
+                    }
                 }
             }
         }
@@ -1814,10 +1876,11 @@ public class TransformationContext {
     }
 
     /**
-     * Clear lazy rule execution tracking (called on reset).
+     * Clear lazy rule execution tracking and per-element locks (called on reset).
      */
     void clearExecutingLazyRules() {
         executingLazyRules.clear();
+        ruleLocks.clear();
     }
 
     /**
@@ -2141,7 +2204,27 @@ public class TransformationContext {
         // If element is already in a resource, apply the ID now
         Resource resource = element.eResource();
         if (resource instanceof XMIResource) {
-            ((XMIResource) resource).setID(element, id);
+            setSynchronizedXmiId((XMIResource) resource, element, id);
+        }
+    }
+
+    /**
+     * Thread-safe XMI ID setter.
+     *
+     * <p>Synchronizes on the resource to prevent concurrent modification exceptions
+     * when multiple threads set IDs on elements in the same resource during parallel
+     * transformation execution.</p>
+     *
+     * @param resource the XMI resource
+     * @param element the element to set the ID for
+     * @param id the XMI ID to set
+     */
+    private void setSynchronizedXmiId(XMIResource resource, EObject element, String id) {
+        if (resource == null || element == null || id == null) {
+            return;
+        }
+        synchronized (resource) {
+            resource.setID(element, id);
         }
     }
 }
