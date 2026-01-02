@@ -51,6 +51,7 @@ TransformationResult result = executor.transform();
 | `@Extends({"parent"})` | Method | Inherit from parent rule |
 | `@Primary` | Method | Preferred by equivalent() |
 | `@Greedy` | Method | Match subtypes too |
+| `@ActivityBased` | Method | With @Greedy @Lazy: process only activated elements |
 
 ## TransformationContext Key Methods
 
@@ -160,3 +161,47 @@ Operation createOp = ctx.equivalentDiscriminated(
 - Enabled by default
 - Activates when elements >= 1000 (configurable)
 - Uses staging + commit pattern for thread safety
+- Atomic cache operations prevent duplicate elements
+
+## Thread-Safe Rule Guidelines
+
+**Safe** in transformation rules:
+- `ctx.createTarget()` / `ctx.create()`
+- `ctx.equivalent()` / `ctx.equivalents()`
+- `ctx.executeParentRule()` (atomic)
+- Reading source elements
+- Setting properties on own element
+
+**CRITICAL - Avoid** in transformation rules:
+- `factory.createXxx()` - bypasses staging, causes NPE
+- `resource.getContents().add()` - race condition
+- Shared mutable state (ArrayList, HashMap)
+- Static fields
+- Modifying elements from `ctx.equivalent()` result
+
+## Migration from Direct Factory
+
+```java
+// BEFORE (UNSAFE for parallel):
+RdbmsTable table = rdbmsFactory.createRdbmsTable();
+targetResource.getContents().add(table);
+
+// AFTER (SAFE):
+RdbmsTable table = ctx.createTarget(RdbmsTable.class);
+// No resource.add() needed - staging handles it
+```
+
+See PATTERNS.md "Migration from Direct EMF Factory Pattern" for details.
+
+## Error Handling
+
+```java
+try {
+    executor.transform();
+} catch (TransformationException e) {
+    log.error("Rule '{}' failed on {}: {}",
+        e.getRuleName(),
+        e.getFailedElement(),
+        e.getCause().getMessage());
+}
+```

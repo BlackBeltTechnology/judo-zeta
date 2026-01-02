@@ -49,6 +49,21 @@ Task: Convert EOL operations to Java
 Task: Set up dual-engine transformation testing
   → Read: MIGRATION.md (Testing Pattern)
 
+Task: Convert helper method to @Lazy rule
+  → Read: MIGRATION.md (Pattern 1: Helper Method → @Lazy Rule)
+
+Task: Use rule-named equivalent() like ETL
+  → Read: MIGRATION.md (Pattern 2: Rule-Named equivalent() Calls)
+
+Task: Fix @Lazy rule with guard (ETL mismatch)
+  → Read: MIGRATION.md (Pattern 4: @Lazy Rules Have NO Guards)
+
+Task: Avoid fallback creation when equivalent() returns null
+  → Read: MIGRATION.md (Pattern 5: No Fallback Creation)
+
+Task: Use constants for rule names
+  → Read: MIGRATION.md (Pattern 6: Use Constants for Rule Names)
+
 Task: Debug transformation issue
   → Read: TROUBLESHOOTING.md
 
@@ -57,6 +72,33 @@ Task: Understand execution order
 
 Task: Work with resources/aliases
   → Read: CONTEXT-API.md (Resource Management)
+
+Task: ETL-compatible @Greedy @Lazy processing
+  → Read: PATTERNS.md (Activity-Based Greedy)
+
+Task: Handle TransformationException
+  → Read: EXECUTION.md (Error Handling)
+
+Task: Write thread-safe transformation rules
+  → Read: PATTERNS.md (Thread-Safe Pattern)
+
+Task: Fix duplicate elements in parallel mode
+  → Read: TROUBLESHOOTING.md (Race Conditions)
+
+Task: Fix NPE "preparedResult is null" in parallel mode
+  → Read: TROUBLESHOOTING.md (Direct Factory Usage Issues)
+
+Task: Fix "Duplicate key" IllegalStateException
+  → Read: TROUBLESHOOTING.md (Duplicate Key Errors)
+
+Task: Migrate direct factory usage to ctx.createTarget()
+  → Read: PATTERNS.md (Migration from Direct EMF Factory Pattern)
+
+Task: Make legacy transformation parallel-safe
+  → Read: PATTERNS.md (Synchronized Helper Pattern)
+
+Task: Understand safe vs unsafe parallel patterns
+  → Read: QUICK-REF.md (Thread-Safe Rule Guidelines)
 
 === VALIDATION ===
 

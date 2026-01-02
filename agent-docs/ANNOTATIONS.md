@@ -112,6 +112,24 @@ boolean guardName(EObject[] sources, TransformationContext ctx)
 ```
 - Default: Exact type match only
 - @Greedy: Match source type AND all subtypes
+- Combine with `@Lazy @ActivityBased` for ETL-compatible behavior
+
+### @ActivityBased
+```java
+@TransformRule(name = "ClassType")
+@Greedy
+@Lazy
+@ActivityBased
+```
+- **Must combine with `@Greedy @Lazy`**
+- Only processes elements activated via `ctx.equivalent()` calls
+- Matches Epsilon ETL's implicit filtering behavior
+- Use when you want to skip orphan/unreferenced elements
+
+**Standard @Greedy @Lazy**: Processes ALL matching elements
+**@Greedy @Lazy @ActivityBased**: Processes only ACTIVATED elements
+
+Alternative: Use `etlCompatibilityMode(true)` on executor to apply activity-based to all `@Greedy @Lazy` rules.
 
 ### @PreExecution / @PostExecution
 ```java

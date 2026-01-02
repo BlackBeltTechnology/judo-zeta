@@ -42,9 +42,11 @@ Operation createOp = ctx.equivalentDiscriminated(
 
 ```java
 // For rules with @Extends annotation
-// Idempotent: same result on repeated calls
+// Thread-safe and atomic: concurrent calls return same result
 Table base = ctx.executeParentRule("BaseTransform", source);
 ```
+
+**Thread-Safety**: Uses atomic `getOrCreate()` pattern internally. Multiple concurrent calls for the same `(source, parentRuleName)` pair execute the parent rule exactly once - the first thread runs it, others wait and get the cached result.
 
 ## Resource Management
 
@@ -114,6 +116,41 @@ cache.getByRule(source, "RuleName");
 cache.getEquivalent(source, TargetType.class);
 cache.getEquivalents(source, TargetType.class);
 ```
+
+### Atomic getOrCreate() (Thread-Safe Pattern)
+
+```java
+// Atomic check-and-execute: prevents duplicate target creation
+T target = cache.getOrCreate(source, ruleName, () -> {
+    // Supplier executes ONLY on cache miss
+    // Guard evaluation and rule execution happen inside lock
+    if (!evaluateGuard(source)) {
+        return null;  // Rejection cached, won't re-evaluate
+    }
+    return executeRule(source);
+}, isPrimary);
+```
+
+**Signature**:
+```java
+<T extends EObject> T getOrCreate(
+    EObject source,        // Source element (key part 1)
+    String ruleName,       // Rule name (key part 2)
+    Supplier<T> supplier,  // Executes under lock on cache miss
+    boolean isPrimary      // Mark as primary transformation
+)
+```
+
+**Thread-Safety Guarantees**:
+- Per-key locking: `(source, ruleName)` pairs lock independently
+- First thread executes supplier, others wait and get cached result
+- If supplier returns `null`, rejection is cached (guards won't re-run)
+- Fast path: cache hit returns without locking
+
+**When Supplier Executes**:
+- Only on cache miss (after acquiring per-key lock)
+- Never executes more than once per `(source, ruleName)` pair
+- Rejection (`null` return) is cached to avoid redundant guard evaluation
 
 ## Staging (Parallel Execution)
 

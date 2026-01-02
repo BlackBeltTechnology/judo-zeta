@@ -21,8 +21,11 @@ A lightweight, standalone framework for Eclipse Modeling Framework (EMF) metamod
 - **Rule Inheritance** - `@Abstract`, `@Extends` for reusable transformation hierarchies
 - **Lazy Evaluation** - On-demand transformation execution with `@Lazy` annotation
 - **Greedy Matching** - Type hierarchy matching with `@Greedy` annotation
-- **Thread-Safe Parallel Execution** - Two-phase staging approach for EMF thread-safety
-- **Fail-Fast Error Handling** - Immediate abort with element/rule context
+- **Activity-Based Greedy** - ETL-compatible `@ActivityBased` for processing only activated elements
+- **Multi-Model Support** - `@Transform`/`@To` annotations with resource aliases for multi-model transformations
+- **Thread-Safe Parallel Execution** - Two-phase staging approach for EMF thread-safety (threshold: 1000 elements)
+- **Atomic Rule Execution** - Per-key locking prevents duplicate elements in parallel mode
+- **Fail-Fast Error Handling** - Immediate abort with `TransformationException` containing element/rule context
 - **Deterministic Ordering** - Maintains element creation order in parallel mode
 
 ### Shared Features
@@ -92,8 +95,9 @@ TransformationExecutor executor = TransformationExecutor.builder()
 try {
     TransformationResult result = executor.transform(sourceModel);
 } catch (TransformationException e) {
-    // Fail-fast with element/rule context
-    log.error("Failed in rule '{}': {}", e.getRuleName(), e.getMessage());
+    // Fail-fast with full error context
+    log.error("Failed in rule '{}' on element {}: {}",
+        e.getRuleName(), e.getFailedElement(), e.getCause().getMessage());
 }
 ```
 

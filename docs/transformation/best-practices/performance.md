@@ -9,22 +9,160 @@ Optimize transformation performance for large models.
 ### Configuration
 
 ```java
-TransformationExecutor executor = new TransformationExecutor(
-    registry,
-    context,
-    true  // Enable parallel execution
-);
-
-// Parallel execution activates when elements >= 5000
-// Elements are processed in chunks of 100
+TransformationExecutor executor = TransformationExecutor.builder()
+    .registry(registry)
+    .context(context)
+    .parallel(true)            // Enable parallel (default: true)
+    .parallelThreshold(1000)   // Default: 1000 elements
+    .chunkSize(100)            // Default: 100 elements per chunk
+    .build();
 ```
 
 ### Threshold Behavior
 
 | Element Count | Execution Mode |
 |---------------|----------------|
-| < 5000 | Sequential |
-| >= 5000 | Parallel (chunked) |
+| < 1000 | Sequential |
+| >= 1000 | Parallel (chunked) |
+
+### Executor Reuse
+
+Create the executor once and reuse it:
+
+```java
+// Create once (thread pool is lazy-initialized)
+TransformationExecutor executor = TransformationExecutor.builder()
+    .registry(registry)
+    .context(context)
+    .build();
+
+// Reuse for multiple transformations - state resets automatically
+executor.transform();  // First transformation
+executor.transform();  // Second transformation
+
+// Shutdown when completely done
+executor.shutdown();
+```
+
+## Thread-Safety Guidelines
+
+When parallel execution is active, transformation rules must be thread-safe.
+
+### Safe Operations
+
+| Operation | Thread-Safe? | Reason |
+|-----------|--------------|--------|
+| `ctx.createTarget()` | ✅ Yes | Uses staging + atomic sequence |
+| `ctx.equivalent()` | ✅ Yes | Atomic getOrCreate() |
+| `ctx.executeParentRule()` | ✅ Yes | Per-key locking |
+| `ctx.getAttribute()` | ✅ Yes | ConcurrentHashMap |
+| Setting properties on created element | ✅ Yes | Thread-local element |
+
+### Unsafe Operations to Avoid
+
+| Operation | Thread-Safe? | Alternative |
+|-----------|--------------|-------------|
+| Shared mutable fields | ❌ No | Use `ConcurrentHashMap` |
+| Direct Resource modification | ❌ No | Use `ctx.createTarget()` |
+| Static field access | ❌ No | Use `ctx.setAttribute()` |
+| Non-atomic counters | ❌ No | Use `AtomicInteger` |
+
+### Thread-Safe Pattern
+
+```java
+// Use concurrent collections for shared state
+private final Map<String, AtomicInteger> counters = new ConcurrentHashMap<>();
+
+@TransformRule(name = "SafeRule")
+public TransformFunction<EntityType, Table> safeRule() {
+    return (entity, ctx) -> {
+        // SAFE: Atomic operations
+        counters.computeIfAbsent(entity.getNamespace().getName(),
+            k -> new AtomicInteger()).incrementAndGet();
+
+        Table table = ctx.createTarget(Table.class);  // Thread-safe
+        table.setName(entity.getName());
+        return table;
+    };
+}
+```
+
+## Common Parallel Execution Issues
+
+### Issue 1: NPE - preparedResult is null
+
+**Symptom:**
+```
+Cannot invoke "org.eclipse.emf.ecore.InternalEObject.eDirectResource()"
+because "this.preparedResult" is null
+```
+
+**Cause:** Direct EMF factory usage bypasses Zeta's thread-safe staging mechanism.
+
+**Fix:**
+```java
+// BEFORE (UNSAFE):
+RdbmsTable table = rdbmsFactory.createRdbmsTable();
+targetResource.getContents().add(table);
+
+// AFTER (SAFE):
+RdbmsTable table = ctx.createTarget(RdbmsTable.class);
+// No resource.add() needed - staging handles it
+```
+
+### Issue 2: Duplicate Key IllegalStateException
+
+**Symptom:**
+```
+IllegalStateException: Duplicate key rackinspect.entities.DimensionTemplateType
+```
+
+**Cause:** Multiple threads creating targets for same source before cache updated.
+
+**Fix:** Zeta's atomic `getOrCreate()` handles this automatically. Ensure:
+- Using latest Zeta version
+- All creation goes through `ctx.createTarget()` or `ctx.equivalent()`
+- No direct factory calls that bypass the cache
+
+### Issue 3: Extra Elements in Output
+
+**Symptom:** Model has more elements than expected (+10, +13, etc.)
+
+**Cause:** Race conditions in rule execution or cache lookup.
+
+**Fix:**
+- Use `ctx.equivalent()` for lookups (atomic)
+- Use `ctx.executeParentRule()` for inheritance (atomic)
+- Avoid direct factory creation
+
+## Migration from Direct Factory Pattern
+
+For projects using direct EMF factory (like tatami-base), migrate to Zeta patterns:
+
+| Before (Unsafe) | After (Safe) |
+|-----------------|--------------|
+| `factory.createXxx()` | `ctx.createTarget(Xxx.class)` |
+| `factory.createXxx()` (contained) | `ctx.create(Xxx.class)` |
+| `resource.getContents().add(e)` | Return from rule (auto-staged) |
+| Manual trace map | `ctx.equivalent()` |
+
+### Synchronized Helper Pattern (Temporary)
+
+If full migration is not immediately possible:
+
+```java
+public class TransformationHelper {
+    public static void addToResource(Resource resource, EObject element) {
+        synchronized (resource) {
+            if (!resource.getContents().contains(element)) {
+                resource.getContents().add(element);
+            }
+        }
+    }
+}
+```
+
+**Note:** This is a temporary workaround. Prefer full migration to `ctx.createTarget()`.
 
 ## Caching Strategies
 

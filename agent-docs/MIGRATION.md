@@ -184,6 +184,234 @@ public class Psm2AsmZetaTransformation {
 }
 ```
 
+## Critical Migration Patterns
+
+### Pattern 1: Helper Method → @Lazy Rule
+
+**DO NOT use helper methods to create elements that are ETL rules.** Convert them to @Lazy rules.
+
+**WRONG - Helper Method:**
+```java
+// WRONG! This should be a @Lazy rule
+private Button createBackButton(TransferObjectView source, TransformationContext ctx) {
+    Button button = ctx.createTarget(Button.class);
+    button.setName(fqName(source) + "::Back");
+    return button;
+}
+
+// Called from another rule:
+Button backButton = createBackButton(source, ctx);
+```
+
+**CORRECT - @Lazy Rule:**
+```java
+@TransformRule(name = "TransferObjectViewBackButton")
+@Lazy
+public TransformFunction<TransferObjectView, Button> transferObjectViewBackButton() {
+    return (source, ctx) -> {
+        Button target = ctx.createTarget(Button.class);
+        target.setName(fqName(source) + "::Back");
+        return target;
+    };
+}
+
+// Called via equivalent():
+Button backButton = ctx.equivalent(source, "TransferObjectViewBackButton");
+```
+
+**Why This Matters:**
+- **Caching**: `ctx.equivalent()` caches results - helper methods don't
+- **XMI IDs**: @Lazy rules generate consistent XMI IDs based on (source, ruleName)
+- **ETL Semantics**: ETL uses `s.equivalent("RuleName")` - Zeta must match
+
+### Pattern 2: Rule-Named equivalent() Calls
+
+**When ETL uses `s.equivalent("RuleName")`, Zeta must use `ctx.equivalent(source, "RuleName")`.**
+
+**ETL:**
+```etl
+t.icon = s.equivalent("TransferObjectViewBackButtonIcon");
+t.actionDefinition = s.equivalent("TransferObjectViewBackActionDefinition");
+```
+
+**WRONG - Type-based lookup:**
+```java
+// WRONG! This does type-based lookup, not rule-named
+Icon icon = ctx.equivalent(source, Icon.class);
+```
+
+**CORRECT - Rule-named lookup:**
+```java
+// CORRECT! Uses rule name like ETL
+Icon icon = ctx.equivalent(source, "TransferObjectViewBackButtonIcon");
+BackActionDefinition actionDef = ctx.equivalent(source, "TransferObjectViewBackActionDefinition");
+```
+
+### Pattern 3: equivalentDiscriminated with null → equivalent
+
+**When discriminator is null, use `ctx.equivalent(source, ruleName)` instead.**
+
+**WRONG:**
+```java
+// WRONG! When discriminator is null, this falls back to type-based lookup
+BackActionDefinition actionDef = ctx.equivalentDiscriminated(source,
+    BackActionDefinition.class, "RuleName", null);
+```
+
+**CORRECT:**
+```java
+// CORRECT! Use rule-named equivalent when discriminator is null
+BackActionDefinition actionDef = ctx.equivalent(source, "RuleName");
+```
+
+### Pattern 4: @Lazy Rules Have NO Guards
+
+**ETL @lazy rules do NOT have guards - they are invoked on-demand.** Zeta @Lazy rules must follow the same pattern.
+
+**WRONG:**
+```java
+@TransformRule(name = "TransferObjectViewBackActionDefinition")
+@Lazy
+@Guard(method = "viewGuard")  // WRONG! @Lazy rules should not have guards
+public TransformFunction<TransferObjectView, BackActionDefinition> rule() { ... }
+```
+
+**CORRECT:**
+```java
+@TransformRule(name = "TransferObjectViewBackActionDefinition")
+@Lazy  // No @Guard - invoked on-demand via ctx.equivalent()
+public TransformFunction<TransferObjectView, BackActionDefinition> rule() { ... }
+```
+
+### Pattern 5: No Fallback Creation
+
+**If `ctx.equivalent()` returns null, DO NOT create the element inline.** This indicates a missing rule or guard issue.
+
+**WRONG:**
+```java
+Icon icon = ctx.equivalent(source, "VisualElementIcon");
+if (icon == null) {
+    // WRONG! Don't create fallback - investigate why it's null
+    icon = ctx.createTarget(Icon.class);
+    icon.setIconName(source.getIconName());
+}
+target.setIcon(icon);
+```
+
+**CORRECT:**
+```java
+// If equivalent returns null, don't set the icon - investigate why it's null
+Icon icon = ctx.equivalent(source, "VisualElementIcon");
+target.setIcon(icon);  // May be null, that's OK
+```
+
+### Pattern 6: Use Constants for Rule Names
+
+**When calling `ctx.equivalent()` with a rule name, ALWAYS use a constant.** The same constant MUST be used in both `@TransformRule(name = ...)` and `ctx.equivalent()` calls.
+
+**WRONG - String literals:**
+```java
+@TransformRule(name = "TransferObjectViewBackButton")  // String literal
+@Lazy
+public TransformFunction<TransferObjectView, Button> rule() { ... }
+
+// Different string, prone to typos
+Button backButton = ctx.equivalent(source, "TransferObjectViewBackButon");  // Typo!
+```
+
+**CORRECT - Use constants:**
+```java
+// In RuleNames.java
+public static final String TRANSFER_OBJECT_VIEW_BACK_BUTTON = "TransferObjectViewBackButton";
+
+// In TransformationClass.java
+@TransformRule(name = TRANSFER_OBJECT_VIEW_BACK_BUTTON)  // Uses constant
+@Lazy
+public TransformFunction<TransferObjectView, Button> rule() { ... }
+
+// In another file - compile-time checked
+Button backButton = ctx.equivalent(source, TRANSFER_OBJECT_VIEW_BACK_BUTTON);
+```
+
+### Pattern 7: Split Composite Elements into Separate Rules
+
+**When ETL has separate rules for related elements (Button, Icon, ActionDefinition), Zeta must have separate @Lazy rules too.**
+
+**ETL:**
+```etl
+@lazy
+rule TransferObjectViewBackButtonIcon
+    transform s : ESM!TransferObjectView to t : UI!Icon { ... }
+
+@lazy
+rule TransferObjectViewBackButton
+    transform s : ESM!TransferObjectView to t : UI!Button {
+    t.icon = s.equivalent("TransferObjectViewBackButtonIcon");
+}
+```
+
+**ZETA:**
+```java
+@TransformRule(name = "TransferObjectViewBackButtonIcon")
+@Lazy
+public TransformFunction<TransferObjectView, Icon> backButtonIcon() {
+    return (source, ctx) -> {
+        Icon target = ctx.createTarget(Icon.class);
+        target.setIconName("arrow-left");
+        return target;
+    };
+}
+
+@TransformRule(name = "TransferObjectViewBackButton")
+@Lazy
+public TransformFunction<TransferObjectView, Button> backButton() {
+    return (source, ctx) -> {
+        Button target = ctx.createTarget(Button.class);
+        // Get icon via equivalent - NOT inline creation
+        Icon icon = ctx.equivalent(source, "TransferObjectViewBackButtonIcon");
+        target.setIcon(icon);
+        return target;
+    };
+}
+```
+
+### Pattern 8: Container Rules Use equivalent() for Children
+
+**Container rules should get children via `ctx.equivalent()`, not by creating them inline.**
+
+**WRONG:**
+```java
+@TransformRule(name = "TransferObjectViewButtonGroup")
+@Lazy
+public TransformFunction<TransferObjectView, ButtonGroup> buttonGroup() {
+    return (source, ctx) -> {
+        ButtonGroup target = ctx.createTarget(ButtonGroup.class);
+        // WRONG! Don't create buttons inline
+        Button backButton = ctx.createTarget(Button.class);
+        backButton.setName(fqName(source) + "::Back");
+        target.getButtons().add(backButton);
+        return target;
+    };
+}
+```
+
+**CORRECT:**
+```java
+@TransformRule(name = "TransferObjectViewButtonGroup")
+@Lazy
+public TransformFunction<TransferObjectView, ButtonGroup> buttonGroup() {
+    return (source, ctx) -> {
+        ButtonGroup target = ctx.createTarget(ButtonGroup.class);
+        // Get buttons via equivalent - triggers @Lazy rules
+        Button backButton = ctx.equivalent(source, "TransferObjectViewBackButton");
+        if (backButton != null) target.getButtons().add(backButton);
+        Button refreshButton = ctx.equivalent(source, "TransferObjectViewRefreshButton");
+        if (refreshButton != null) target.getButtons().add(refreshButton);
+        return target;
+    };
+}
+```
+
 ## Common Pitfalls
 
 | Issue | Solution |
@@ -193,6 +421,10 @@ public class Psm2AsmZetaTransformation {
 | ConcurrentModificationException | Set bidirectional refs in postProcess() |
 | Wrong order | Register rules in dependency order |
 | Missing container add | `containerPkg.getEClassifiers().add(t);` |
+| Helper method instead of @Lazy | Convert helper to @Lazy rule, call via equivalent() |
+| Type-based equivalent() | Use rule-named equivalent() to match ETL |
+| Guard on @Lazy rule | Remove guard - @Lazy rules are invoked on-demand |
+| Fallback creation | Don't create if equivalent() returns null |
 
 ## Post-Processing Pattern
 

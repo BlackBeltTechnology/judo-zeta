@@ -77,6 +77,62 @@ TransformationExecutor.builder()
 - Staging: ConcurrentLinkedQueue
 - Element ordering: AtomicLong sequence
 - Lazy rule tracking: ConcurrentHashMap
+- Cache operations: Per-key ReentrantLock
+
+## Atomic Cache Operations
+
+### Problem: Race Conditions
+Without atomicity, parallel threads could:
+1. Both check cache (miss)
+2. Both execute same rule
+3. Create duplicate target elements
+
+### Solution: getOrCreate() Pattern
+```java
+// Lock covers: cache check + guard + rule execution
+cache.getOrCreate(source, ruleName, () -> {
+    if (!evaluateGuard(source)) return null;
+    return executeRule(source);
+}, isPrimary);
+```
+
+**Per-Key Locking**:
+- Each `(source, ruleName)` pair has its own `ReentrantLock`
+- Different sources/rules execute in parallel without blocking
+- Same source+rule: first thread executes, others wait
+
+### Guard Rejection Caching
+```java
+// If guard returns null/false, rejection is cached
+rejectedKeys.add(new CacheKey(source, ruleName));
+// Subsequent calls for same (source, ruleName) return null immediately
+```
+
+Benefits:
+- Guards don't re-evaluate for rejected elements
+- Fast path: rejection check before acquiring lock
+
+## Parent Rule Atomicity
+
+`executeParentRule()` and `@Extends` chains use atomic `getOrCreate()`:
+
+```java
+// Multiple concurrent calls → exactly one execution
+ctx.executeParentRule("ParentRule", source);
+```
+
+**Inheritance Chain Atomicity**:
+```
+ChildRule @Extends ParentA, ParentB
+    ↓
+ParentA executes once (getOrCreate)
+    ↓
+ParentB executes once (getOrCreate)
+    ↓
+Child continues with results
+```
+
+Even with 50 concurrent threads calling `executeParentRule("ParentA", sameSource)`, `ParentA` executes exactly once.
 
 ## Cartesian Product Execution
 
@@ -130,6 +186,30 @@ if (firstError.get() != null) {
     throw (TransformationException) firstError.get();
 }
 ```
+
+### TransformationException
+
+```java
+try {
+    executor.transform();
+} catch (TransformationException e) {
+    // Get context about what failed
+    EObject element = e.getFailedElement();  // Source element that caused failure
+    String rule = e.getRuleName();           // Rule name that failed
+    Throwable cause = e.getCause();          // Original exception
+
+    log.error("Rule '{}' failed on element {}: {}",
+        rule, element, cause.getMessage());
+}
+```
+
+**Available Methods**:
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `getFailedElement()` | `EObject` | Source element being transformed |
+| `getRuleName()` | `String` | Name of the failed rule |
+| `getCause()` | `Throwable` | Original exception |
+| `getMessage()` | `String` | Formatted error message |
 
 ## TransformationResult
 

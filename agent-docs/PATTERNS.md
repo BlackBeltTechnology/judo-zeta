@@ -46,7 +46,7 @@ public TransformFunction<EntityType, Table> fullEntity2Table() {
 }
 ```
 
-**Key**: `executeParentRule()` is idempotent - same result on repeated calls.
+**Key**: `executeParentRule()` is idempotent and atomic - same result on repeated calls, even from multiple concurrent threads.
 
 ## Multi-Source (Cartesian Product)
 
@@ -153,6 +153,43 @@ public TransformFunction<EntityType, Table> entityType2Table() { }
 @Transform(type = NamedElement.class)
 @Greedy  // Matches NamedElement, EntityType, DataType, etc.
 public TransformFunction<NamedElement, Named> namedElement2Named() { }
+```
+
+## Activity-Based Greedy (ETL Compatibility)
+
+Standard `@Greedy @Lazy` processes ALL matching elements during lazy phase.
+With `@ActivityBased`, only elements activated via `equivalent()` are processed.
+
+### Standard @Greedy @Lazy (Processes All)
+```java
+@TransformRule(name = "Type2Element")
+@Greedy
+@Lazy
+public TransformFunction<Type, Element> type2Element() { }
+// Processes ALL Type elements and subtypes during lazy phase
+```
+
+### Activity-Based (Processes Only Activated)
+```java
+@TransformRule(name = "Type2Element")
+@Greedy
+@Lazy
+@ActivityBased
+public TransformFunction<Type, Element> type2Element() { }
+// ONLY processes elements that were passed to ctx.equivalent()
+```
+
+### When to Use
+- **Standard**: When all matching elements should be transformed
+- **ActivityBased**: When orphan/unreferenced elements should be skipped
+
+### ETL Compatibility Mode Alternative
+```java
+TransformationExecutor executor = TransformationExecutor.builder()
+    .registry(registry)
+    .context(context)
+    .etlCompatibilityMode(true)  // All @Greedy @Lazy rules become activity-based
+    .build();
 ```
 
 ## Primary Rules
@@ -277,10 +314,220 @@ public class MyTransform {
     
     @PostExecution
     public void cleanup(TransformationContext ctx) {
-        long duration = System.currentTimeMillis() - 
+        long duration = System.currentTimeMillis() -
             (Long) ctx.getAttribute("startTime");
-        log.info("Transformed {} entities in {}ms", 
+        log.info("Transformed {} entities in {}ms",
             stats.get("entities"), duration);
     }
 }
 ```
+
+## Thread-Safe Transformation Pattern
+
+Rules execute in parallel when element count >= 1000. Write rules that are thread-safe.
+
+### Safe Operations
+```java
+@TransformRule(name = "SafeRule")
+public TransformFunction<EntityType, Table> safeRule() {
+    return (source, ctx) -> {
+        // SAFE: All these operations are thread-safe
+        Table table = ctx.createTarget(Table.class);    // Thread-safe
+        table.setName(source.getName());                 // Set own properties
+
+        Column col = ctx.equivalent(attr, Column.class); // Atomic
+        table.getColumns().add(col);                     // Modify own element
+
+        Table parent = ctx.executeParentRule("Base", source); // Atomic
+
+        String mode = ctx.getAttribute("mode");          // Thread-safe read
+        return table;
+    };
+}
+```
+
+### Unsafe Operations to Avoid
+```java
+// BAD: Shared mutable state
+private List<String> processedNames = new ArrayList<>();  // Non-thread-safe
+
+@TransformRule(name = "UnsafeRule")
+public TransformFunction<EntityType, Table> unsafeRule() {
+    return (source, ctx) -> {
+        // UNSAFE: Modifying shared state
+        processedNames.add(source.getName());  // Race condition!
+
+        // UNSAFE: Direct Resource modification
+        ctx.getTargetResourceSet().getResources().get(0)
+            .getContents().add(element);  // Race condition!
+
+        // UNSAFE: Static field access
+        GlobalCounter.increment();  // Race condition!
+
+        return null;
+    };
+}
+```
+
+### Thread-Safe Shared State Pattern
+```java
+// Use ConcurrentHashMap for shared state
+private final Map<String, AtomicInteger> counters = new ConcurrentHashMap<>();
+
+@TransformRule(name = "ThreadSafeCounter")
+public TransformFunction<EntityType, Table> threadSafeCounter() {
+    return (source, ctx) -> {
+        // SAFE: Atomic operations on concurrent map
+        counters.computeIfAbsent(source.getName(), k -> new AtomicInteger())
+                .incrementAndGet();
+        // ...
+    };
+}
+```
+
+## Migration from Direct EMF Factory Pattern
+
+When migrating existing transformations (like tatami-base) from direct EMF factory usage to Zeta's thread-safe patterns.
+
+### Before: Direct Factory (Parallel-Unsafe)
+
+```java
+// OLD PATTERN - NOT thread-safe for parallel execution
+public class Asm2RdbmsTransformation {
+    private RdbmsFactory rdbmsFactory = RdbmsFactory.eINSTANCE;
+    private Resource targetResource;
+
+    public void transformEntityClass(EClass eClass) {
+        // PROBLEM 1: Direct factory bypasses staging
+        RdbmsTable table = rdbmsFactory.createRdbmsTable();
+
+        // PROBLEM 2: Direct property setting (OK if own element)
+        table.setName(eClass.getName());
+        table.setSqlName(toSnakeCase(eClass.getName()));
+
+        // PROBLEM 3: Direct Resource modification - race condition!
+        targetResource.getContents().add(table);
+
+        // PROBLEM 4: Direct child creation without staging
+        RdbmsIdentifierField idField = rdbmsFactory.createRdbmsIdentifierField();
+        idField.setName(eClass.getName() + "_id");
+        table.getFields().add(idField);
+        table.setPrimaryKey(idField);
+    }
+}
+```
+
+### After: Zeta Pattern (Parallel-Safe)
+
+```java
+// NEW PATTERN - Thread-safe for parallel execution
+@TransformationContext(source = EClass.class, target = RdbmsTable.class)
+public class Asm2RdbmsZetaTransform {
+
+    @TransformRule(name = "EClass2RdbmsTable")
+    @Transform(type = EClass.class)
+    @To(type = RdbmsTable.class)
+    public TransformFunction<EClass, RdbmsTable> eClass2RdbmsTable() {
+        return (eClass, ctx) -> {
+            // SAFE: createTarget() uses staging mechanism
+            RdbmsTable table = ctx.createTarget(RdbmsTable.class);
+
+            // SAFE: Setting properties on own element
+            table.setName(eClass.getName());
+            table.setSqlName(toSnakeCase(eClass.getName()));
+
+            // SAFE: Create contained element (no staging needed)
+            RdbmsIdentifierField idField = ctx.create(RdbmsIdentifierField.class);
+            idField.setName(eClass.getName() + "_id");
+
+            // SAFE: Add to own element's list
+            table.getFields().add(idField);
+            table.setPrimaryKey(idField);
+
+            // Return element - staging adds to Resource automatically
+            return table;
+        };
+    }
+}
+```
+
+### Key Migration Steps
+
+| Step | Before (Unsafe) | After (Safe) |
+|------|-----------------|--------------|
+| **1. Element Creation** | `factory.createXxx()` | `ctx.createTarget(Xxx.class)` |
+| **2. Contained Elements** | `factory.createXxx()` | `ctx.create(Xxx.class)` |
+| **3. Resource Addition** | `resource.getContents().add(e)` | Return from rule (automatic) |
+| **4. Caching/Tracing** | Manual `Map<Source, Target>` | `ctx.equivalent()` (automatic) |
+| **5. Lookup Existing** | Manual map lookup | `ctx.equivalent(source, Type.class)` |
+
+### Handling Manual Orchestration (Non-Rule Based)
+
+For transformations that don't use `@TransformRule` but manually orchestrate:
+
+```java
+// Before: Manual orchestration with direct factory
+public void execute() {
+    for (EClass eClass : sourceModel.getContents()) {
+        transformEntityClass(eClass);  // Uses factory directly
+    }
+}
+
+// After: Manual orchestration with ctx helper methods
+public void execute(TransformationContext ctx) {
+    for (EClass eClass : sourceModel.getContents()) {
+        // Use ctx even in manual orchestration
+        RdbmsTable table = ctx.createTarget(RdbmsTable.class);
+        table.setName(eClass.getName());
+
+        // For contained elements
+        RdbmsField field = ctx.create(RdbmsField.class);
+        table.getFields().add(field);
+
+        // Manual tracing if needed
+        ctx.getElementResolutionCache().addMapping(
+            eClass, "EClass2Table", table, true);
+    }
+}
+```
+
+### Synchronized Helper Pattern (For Legacy Code)
+
+If full migration is not possible, use synchronized helpers:
+
+```java
+// Helper class for thread-safe EMF operations
+public class TransformationHelper {
+
+    public static <T extends EObject> void synchronizedAdd(
+            EList<T> list, T element) {
+        synchronized (list) {
+            list.add(element);
+        }
+    }
+
+    public static void addToResource(Resource resource, EObject element) {
+        synchronized (resource) {
+            if (!resource.getContents().contains(element)) {
+                resource.getContents().add(element);
+            }
+        }
+    }
+
+    public static void setXmiId(EObject element, String id) {
+        Resource resource = element.eResource();
+        if (resource instanceof XMLResource) {
+            synchronized (resource) {
+                ((XMLResource) resource).setID(element, id);
+            }
+        }
+    }
+}
+
+// Usage in legacy code
+RdbmsTable table = rdbmsFactory.createRdbmsTable();
+table.setName(eClass.getName());
+TransformationHelper.addToResource(targetResource, table);  // Thread-safe
+```
+
+**Note**: Prefer full migration to `ctx.createTarget()` pattern. Synchronized helpers should be temporary until migration is complete.
