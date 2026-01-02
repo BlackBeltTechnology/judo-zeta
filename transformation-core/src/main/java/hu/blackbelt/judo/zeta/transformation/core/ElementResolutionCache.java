@@ -431,6 +431,17 @@ public class ElementResolutionCache {
     }
 
     /**
+     * Clear only the rejection cache (guard rejections).
+     *
+     * <p>Called at the start of each transformation to allow guards to be
+     * re-evaluated. This is separate from clear() because we may want to
+     * keep element mappings while clearing rejection tracking.</p>
+     */
+    public void clearRejections() {
+        rejectedKeys.clear();
+    }
+
+    /**
      * Trace entry for export.
      */
     public static class TraceEntry {

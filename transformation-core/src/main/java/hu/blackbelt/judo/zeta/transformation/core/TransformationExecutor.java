@@ -303,6 +303,8 @@ public class TransformationExecutor {
         context.getActivationTracker().clear();
         // Clear per-rule guard rejection caches (ETL-compatible)
         registry.clearAllRejectedSets();
+        // Clear atomic cache rejection tracking (for getOrCreate pattern)
+        context.getElementResolutionCache().clearRejections();
         // Propagate ETL compatibility mode to context for equivalent() calls
         context.setEtlCompatibilityMode(etlCompatibilityMode);
     }

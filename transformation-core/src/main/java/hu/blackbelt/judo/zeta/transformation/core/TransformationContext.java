@@ -1886,12 +1886,15 @@ public class TransformationContext {
      * any pending IDs that haven't been applied yet.</p>
      */
     public void applyAllPendingXmiIds() {
+        System.err.println("[DEBUG] applyAllPendingXmiIds() ENTERED");
         if (targetResourceSet.getResources().isEmpty()) {
+            System.err.println("[DEBUG] applyAllPendingXmiIds: targetResourceSet is empty, returning");
             return;
         }
 
         Resource targetResource = targetResourceSet.getResources().get(0);
         if (!(targetResource instanceof XMIResource)) {
+            System.err.println("[DEBUG] applyAllPendingXmiIds: targetResource is not XMIResource, returning");
             return;
         }
 
