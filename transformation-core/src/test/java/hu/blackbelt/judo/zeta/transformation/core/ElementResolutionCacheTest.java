@@ -192,14 +192,102 @@ class ElementResolutionCacheTest {
     @Test
     void testDiscriminatedTraceEntryProperties() {
         cache.addDiscriminatedMapping(sourceElement, targetElement1, "DiscRule", "myDisc");
-        
+
         Collection<ElementResolutionCache.TraceEntry> mappings = cache.getAllMappings();
         ElementResolutionCache.TraceEntry entry = mappings.iterator().next();
-        
+
         assertSame(sourceElement, entry.getSource());
         assertSame(targetElement1, entry.getTarget());
         assertEquals("DiscRule", entry.getRuleName());
         assertEquals("myDisc", entry.getDiscriminator());
         assertFalse(entry.isPrimary());
+    }
+
+    // ==================== Null Parameter Handling Tests ====================
+
+    @Test
+    void testAddDiscriminatedMappingWithNullSourceDoesNotThrow() {
+        // Should not throw NPE - ConcurrentHashMap doesn't allow null keys
+        assertDoesNotThrow(() ->
+            cache.addDiscriminatedMapping(null, targetElement1, "Rule1", "disc1"));
+
+        // Should not be cached
+        assertNull(cache.getEquivalentDiscriminated(null, EClass.class, "Rule1", "disc1"));
+    }
+
+    @Test
+    void testAddDiscriminatedMappingWithNullTargetDoesNotThrow() {
+        // Should not throw NPE - null targets are silently ignored
+        assertDoesNotThrow(() ->
+            cache.addDiscriminatedMapping(sourceElement, null, "Rule1", "disc1"));
+
+        // Should not be cached
+        assertNull(cache.getEquivalentDiscriminated(sourceElement, EClass.class, "Rule1", "disc1"));
+    }
+
+    @Test
+    void testAddDiscriminatedMappingWithNullRuleNameDoesNotThrow() {
+        // Should not throw NPE
+        assertDoesNotThrow(() ->
+            cache.addDiscriminatedMapping(sourceElement, targetElement1, null, "disc1"));
+
+        // Should not be cached under null rule name
+        assertNull(cache.getEquivalentDiscriminated(sourceElement, EClass.class, null, "disc1"));
+    }
+
+    @Test
+    void testAddDiscriminatedMappingWithNullDiscriminatorDoesNotThrow() {
+        // Should not throw NPE
+        assertDoesNotThrow(() ->
+            cache.addDiscriminatedMapping(sourceElement, targetElement1, "Rule1", null));
+
+        // Should not be cached under null discriminator
+        assertNull(cache.getEquivalentDiscriminated(sourceElement, EClass.class, "Rule1", null));
+    }
+
+    @Test
+    void testAddDiscriminatedMappingWithAllNullsDoesNotThrow() {
+        // Should not throw NPE even with all nulls
+        assertDoesNotThrow(() ->
+            cache.addDiscriminatedMapping(null, null, null, null));
+    }
+
+    @Test
+    void testAddMappingWithNullSourceDoesNotThrow() {
+        // Should not throw NPE
+        assertDoesNotThrow(() ->
+            cache.addMapping(null, "Rule1", targetElement1, false));
+    }
+
+    @Test
+    void testAddMappingWithNullTargetDoesNotThrow() {
+        // Should not throw NPE
+        assertDoesNotThrow(() ->
+            cache.addMapping(sourceElement, "Rule1", null, false));
+    }
+
+    @Test
+    void testAddMappingWithNullRuleNameDoesNotThrow() {
+        // Should not throw NPE
+        assertDoesNotThrow(() ->
+            cache.addMapping(sourceElement, null, targetElement1, false));
+    }
+
+    @Test
+    void testGetByRuleWithNullsReturnsNull() {
+        cache.addMapping(sourceElement, "Rule1", targetElement1, false);
+
+        assertNull(cache.getByRule(null, "Rule1"));
+        assertNull(cache.getByRule(sourceElement, null));
+        assertNull(cache.getByRule(null, null));
+    }
+
+    @Test
+    void testGetEquivalentDiscriminatedWithNullsReturnsNull() {
+        cache.addDiscriminatedMapping(sourceElement, targetElement1, "Rule1", "disc1");
+
+        assertNull(cache.getEquivalentDiscriminated(null, EClass.class, "Rule1", "disc1"));
+        assertNull(cache.getEquivalentDiscriminated(sourceElement, EClass.class, null, "disc1"));
+        assertNull(cache.getEquivalentDiscriminated(sourceElement, EClass.class, "Rule1", null));
     }
 }

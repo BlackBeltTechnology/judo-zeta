@@ -26,7 +26,15 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Method;
-import java.util.*;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
@@ -39,11 +47,13 @@ public class TransformationRegistry {
 
     private static final Logger log = LoggerFactory.getLogger(TransformationRegistry.class);
 
-    private final Map<Class<? extends EObject>, List<TransformRuleDescriptor>> rulesBySourceType = new HashMap<>();
-    private final Map<String, TransformRuleDescriptor> rulesByName = new HashMap<>();
+    // Use LinkedHashMap to preserve registration order for deterministic rule execution
+    // This ensures rules execute in the same order as they are defined in the source class
+    private final Map<Class<? extends EObject>, List<TransformRuleDescriptor>> rulesBySourceType = new LinkedHashMap<>();
+    private final Map<String, TransformRuleDescriptor> rulesByName = new LinkedHashMap<>();
     private final List<Method> preTransformationHooks = new ArrayList<>();
     private final List<Method> postTransformationHooks = new ArrayList<>();
-    private final Map<Method, Object> hookInstances = new HashMap<>();
+    private final Map<Method, Object> hookInstances = new LinkedHashMap<>();
 
     /**
      * Register a transformation context class.
@@ -104,26 +114,88 @@ public class TransformationRegistry {
         String name = ruleAnnotation.name();
         String description = ruleAnnotation.description();
 
-        // Determine source and target types
+        // Extract @Transform annotations (new API)
+        List<TransformDefinition> transforms = new ArrayList<>();
+        Transform[] transformAnnotations = ruleMethod.getAnnotationsByType(Transform.class);
+        for (Transform t : transformAnnotations) {
+            transforms.add(new TransformDefinition(t.alias(), t.type()));
+        }
+
+        // Extract @To annotations (new API)
+        List<ToDefinition> tos = new ArrayList<>();
+        To[] toAnnotations = ruleMethod.getAnnotationsByType(To.class);
+        for (To t : toAnnotations) {
+            tos.add(new ToDefinition(t.alias(), t.type()));
+        }
+
+        // Determine source and target types (backward compatibility)
         Class<? extends EObject>[] sourceTypes = ruleAnnotation.sourceTypes();
         Class<? extends EObject>[] targetTypes = ruleAnnotation.targetTypes();
 
-        Class<? extends EObject> sourceType = sourceTypes.length > 0 ? sourceTypes[0] : defaultSourceType;
-        Class<? extends EObject> targetType = targetTypes.length > 0 ? targetTypes[0] : defaultTargetType;
+        Class<? extends EObject> sourceType;
+        Class<? extends EObject> targetType;
+
+        // Priority: @Transform annotations > sourceTypes attribute > default from @TransformationContext
+        if (!transforms.isEmpty()) {
+            sourceType = transforms.get(0).getType();
+        } else if (sourceTypes.length > 0) {
+            sourceType = sourceTypes[0];
+            // Convert sourceTypes to TransformDefinitions with default alias
+            for (Class<? extends EObject> st : sourceTypes) {
+                transforms.add(new TransformDefinition("source", st));
+            }
+        } else {
+            sourceType = defaultSourceType;
+            transforms.add(new TransformDefinition("source", defaultSourceType));
+        }
+
+        // Priority: @To annotations > targetTypes attribute > method return type > default from @TransformationContext
+        if (!tos.isEmpty()) {
+            targetType = tos.get(0).getType();
+        } else if (targetTypes.length > 0) {
+            targetType = targetTypes[0];
+            // Convert targetTypes to ToDefinitions with default alias
+            for (Class<? extends EObject> tt : targetTypes) {
+                tos.add(new ToDefinition("target", tt));
+            }
+        } else {
+            // Try to extract target type from method return type (TransformFunction<Source, Target>)
+            Class<? extends EObject> extractedTargetType = extractTargetTypeFromReturnType(ruleMethod);
+            if (extractedTargetType != null) {
+                targetType = extractedTargetType;
+                tos.add(new ToDefinition("target", extractedTargetType));
+                log.debug("Extracted target type from method return type: {} for rule: {}",
+                        extractedTargetType.getSimpleName(), name);
+            } else {
+                targetType = defaultTargetType;
+                tos.add(new ToDefinition("target", defaultTargetType));
+            }
+        }
 
         // Find guard method if specified
         Guard guardAnnotation = ruleMethod.getAnnotation(Guard.class);
         Method guardMethod = null;
         if (guardAnnotation != null) {
+            // Try multi-source guard signature first (EObject[], TransformationContext)
             try {
                 guardMethod = instance.getClass().getDeclaredMethod(
                         guardAnnotation.method(),
-                        EObject.class,
+                        EObject[].class,
                         TransformationContext.class
                 );
             } catch (NoSuchMethodException e) {
-                throw new RuntimeException(
-                        "Guard method not found: " + guardAnnotation.method() + " for rule: " + name, e);
+                // Fall back to single-source guard signature (EObject, TransformationContext)
+                try {
+                    guardMethod = instance.getClass().getDeclaredMethod(
+                            guardAnnotation.method(),
+                            EObject.class,
+                            TransformationContext.class
+                    );
+                } catch (NoSuchMethodException e2) {
+                    throw new RuntimeException(
+                            "Guard method not found: " + guardAnnotation.method() + " for rule: " + name + 
+                            ". Expected signature: (EObject, TransformationContext) or (EObject[], TransformationContext)", e2);
+                }
             }
         }
 
@@ -132,6 +204,14 @@ public class TransformationRegistry {
         boolean isAbstract = ruleMethod.isAnnotationPresent(Abstract.class);
         boolean isPrimary = ruleMethod.isAnnotationPresent(Primary.class);
         boolean isGreedy = ruleMethod.isAnnotationPresent(Greedy.class);
+        boolean isDetached = ruleMethod.isAnnotationPresent(Detached.class);
+        boolean isActivityBased = ruleMethod.isAnnotationPresent(ActivityBased.class);
+
+        // Warn if @ActivityBased is used without required @Greedy and @Lazy
+        if (isActivityBased && (!isGreedy || !isLazy)) {
+            log.warn("Rule '{}' has @ActivityBased but is missing @Greedy and/or @Lazy. " +
+                    "@ActivityBased only has effect when used with both @Greedy and @Lazy.", name);
+        }
 
         // Get extends rules
         Extends extendsAnnotation = ruleMethod.getAnnotation(Extends.class);
@@ -151,13 +231,19 @@ public class TransformationRegistry {
                 isAbstract,
                 isPrimary,
                 isGreedy,
-                extendsRules
+                isDetached,
+                isActivityBased,
+                extendsRules,
+                transforms,
+                tos
         );
 
         rulesBySourceType.computeIfAbsent(sourceType, k -> new ArrayList<>()).add(descriptor);
         rulesByName.put(name, descriptor);
 
-        log.debug("Registered rule: {} ({} -> {})", name, sourceType.getSimpleName(), targetType.getSimpleName());
+        log.debug("Registered rule: {} ({} -> {}) with {} transforms, {} tos", 
+                name, sourceType.getSimpleName(), targetType.getSimpleName(), 
+                transforms.size(), tos.size());
     }
 
     /**
@@ -172,12 +258,17 @@ public class TransformationRegistry {
         // Get rules for this exact type
         result.addAll(rulesBySourceType.getOrDefault(sourceType, Collections.emptyList()));
 
-        // Get greedy rules from supertypes
+        // Get rules from supertypes/interfaces that apply to this type
+        // For greedy rules: always include if supertype matches
+        // For non-greedy rules: include if the rule's sourceType is assignable from the element type
         for (Map.Entry<Class<? extends EObject>, List<TransformRuleDescriptor>> entry : rulesBySourceType.entrySet()) {
             Class<? extends EObject> ruleSourceType = entry.getKey();
             if (ruleSourceType.isAssignableFrom(sourceType) && !ruleSourceType.equals(sourceType)) {
                 for (TransformRuleDescriptor rule : entry.getValue()) {
-                    if (rule.isGreedy() && !result.contains(rule)) {
+                    // Include all rules whose sourceType matches (via isAssignableFrom)
+                    // This handles cases where rules are defined on interfaces (EClass)
+                    // but elements are implementation classes (EClassImpl)
+                    if (!result.contains(rule)) {
                         result.add(rule);
                     }
                 }
@@ -229,5 +320,57 @@ public class TransformationRegistry {
                 log.error("Failed to invoke post-transformation hook: {}", hook.getName(), e);
             }
         }
+    }
+
+    /**
+     * Extract the target type from a rule method's return type.
+     *
+     * <p>For methods returning {@code TransformFunction<SourceType, TargetType>},
+     * extracts TargetType as the second generic type argument.</p>
+     *
+     * <p>This enables lazy rules to declare their target type via the method signature
+     * without requiring explicit @To annotations, e.g.:</p>
+     * <pre>{@code
+     * public TransformFunction<ActorType, UnmappedTransferObjectType> createMetadataType() {
+     *     // Target type UnmappedTransferObjectType is extracted from the return type
+     * }
+     * }</pre>
+     *
+     * @param ruleMethod the rule method
+     * @return the extracted target type, or null if extraction fails
+     */
+    @SuppressWarnings("unchecked")
+    private Class<? extends EObject> extractTargetTypeFromReturnType(Method ruleMethod) {
+        Type returnType = ruleMethod.getGenericReturnType();
+
+        // Check if return type is parameterized (e.g., TransformFunction<S, T>)
+        if (returnType instanceof ParameterizedType) {
+            ParameterizedType parameterizedType = (ParameterizedType) returnType;
+            Type[] typeArgs = parameterizedType.getActualTypeArguments();
+
+            // TransformFunction has 2 type parameters: <SourceType, TargetType>
+            // We want the second one (index 1)
+            if (typeArgs.length >= 2) {
+                Type targetTypeArg = typeArgs[1];
+
+                // Handle direct class reference
+                if (targetTypeArg instanceof Class) {
+                    Class<?> targetClass = (Class<?>) targetTypeArg;
+                    if (EObject.class.isAssignableFrom(targetClass)) {
+                        return (Class<? extends EObject>) targetClass;
+                    }
+                }
+
+                // Handle parameterized types (e.g., if target is itself generic)
+                if (targetTypeArg instanceof ParameterizedType) {
+                    Type rawType = ((ParameterizedType) targetTypeArg).getRawType();
+                    if (rawType instanceof Class && EObject.class.isAssignableFrom((Class<?>) rawType)) {
+                        return (Class<? extends EObject>) rawType;
+                    }
+                }
+            }
+        }
+
+        return null;
     }
 }
