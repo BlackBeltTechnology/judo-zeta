@@ -693,6 +693,10 @@ public class TransformRuleDescriptor {
     /**
      * Execute parent rules in the inheritance chain.
      * Handles multi-level inheritance by recursively calling execute() on parents.
+     *
+     * <p>Uses atomic getOrCreate to prevent race conditions where multiple threads
+     * executing the same child rule for the same source could cause duplicate
+     * parent rule executions.</p>
      */
     private void executeParentRulesInChain(EObject source, TransformationContext context) {
         if (extendsRules.isEmpty()) {
@@ -703,23 +707,17 @@ public class TransformRuleDescriptor {
         ElementResolutionCache cache = context.getElementResolutionCache();
 
         for (String parentRuleName : extendsRules) {
-            // Check if parent was already executed (idempotency)
-            EObject cached = cache.getByRule(source, parentRuleName);
-            if (cached != null) {
-                continue; // Parent already executed, skip
-            }
-
             TransformRuleDescriptor parentRule = registry.getRuleByName(parentRuleName);
             if (parentRule != null) {
-                // Execute parent - this handles recursive @Extends
-                // If parent also has @Extends, executeWithInheritance detects we're in chain
-                // and recursively executes the grandparent first
-                EObject result = parentRule.execute(source, context);
-
-                // Cache the result for idempotency
-                if (result != null) {
-                    cache.addMapping(source, parentRuleName, result, parentRule.isPrimary());
-                }
+                // Use atomic getOrCreate to prevent race conditions
+                // Multiple concurrent calls for the same (source, parentRuleName) will only execute once.
+                // The first thread's supplier runs and caches the result; other threads get the cached value.
+                cache.getOrCreate(source, parentRuleName, () -> {
+                    // Execute parent - this handles recursive @Extends
+                    // If parent also has @Extends, executeWithInheritance detects we're in chain
+                    // and recursively executes the grandparent first
+                    return parentRule.execute(source, context);
+                }, parentRule.isPrimary());
             }
         }
     }

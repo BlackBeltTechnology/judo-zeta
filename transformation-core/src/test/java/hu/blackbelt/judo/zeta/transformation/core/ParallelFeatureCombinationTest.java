@@ -20,6 +20,7 @@ package hu.blackbelt.judo.zeta.transformation.core;
  * #L%
  */
 
+import hu.blackbelt.judo.zeta.annotation.*;
 import hu.blackbelt.judo.zeta.common.ExtensionMethodRegistry;
 import hu.blackbelt.judo.zeta.common.ModelProvider;
 import org.eclipse.emf.common.util.TreeIterator;
@@ -30,6 +31,7 @@ import org.eclipse.emf.ecore.resource.impl.ResourceSetImpl;
 import org.eclipse.emf.ecore.xmi.impl.XMIResourceFactoryImpl;
 import org.eclipse.emf.common.util.URI;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Nested;
 
@@ -40,6 +42,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.mock;
 
 /**
  * Integration tests for parallel transformation feature combinations.
@@ -648,6 +651,454 @@ class ParallelFeatureCombinationTest {
             }, true);
 
             assertNotNull(target);
+        }
+    }
+
+    // ==================== Parent Rule Race Condition Tests ====================
+
+    /**
+     * Tests that expose race conditions in executeParentRule() and @Extends inheritance.
+     *
+     * <p>These tests verify that concurrent execution of parent rules produces correct results:
+     * <ul>
+     *   <li>Parent rule executes exactly once per (source, rule) pair</li>
+     *   <li>All threads receive the same target instance</li>
+     *   <li>@Extends inheritance chains work correctly under concurrent access</li>
+     * </ul>
+     *
+     * <p>Uses 50 threads with CountDownLatch synchronization to maximize collision probability.
+     */
+    @Nested
+    @DisplayName("Parent Rule Race Condition Tests")
+    class ParentRuleRaceConditionTests {
+
+        private TransformationRegistry registry;
+        private Resource sourceResource;
+
+        @BeforeEach
+        void setUpRegistry() {
+            registry = new TransformationRegistry();
+            sourceResource = sourceResourceSet.createResource(URI.createURI("platform:/resource/test/source.xmi"));
+            // Reset invocation counters before each test
+            ParentRuleInvocationCounter.reset();
+        }
+
+        private EClass createSource(String name) {
+            EClass source = EcoreFactory.eINSTANCE.createEClass();
+            source.setName(name);
+            sourceResource.getContents().add(source);
+            return source;
+        }
+
+        @Test
+        @DisplayName("Concurrent executeParentRule() should invoke parent rule exactly once")
+        void testConcurrentExecuteParentRuleInvokesOnce() throws InterruptedException {
+            // Setup: Single source, parent rule that counts invocations
+            EClass source = createSource("TestEntity");
+
+            registry.register(ConcurrentParentRuleTransformation.class);
+            context.setTransformationRegistry(registry);
+            context.setAutoAddRootElements(false);
+
+            int threadCount = 50;
+            ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+            CountDownLatch startLatch = new CountDownLatch(1);
+            CountDownLatch doneLatch = new CountDownLatch(threadCount);
+            Set<EObject> results = ConcurrentHashMap.newKeySet();
+            AtomicInteger successCount = new AtomicInteger(0);
+
+            // Each thread calls executeParentRule for the same source
+            for (int t = 0; t < threadCount; t++) {
+                executor.submit(() -> {
+                    try {
+                        startLatch.await();
+                        // Directly call executeParentRule
+                        EObject result = context.executeParentRule("CountingParent", source, null);
+                        if (result != null) {
+                            results.add(result);
+                            successCount.incrementAndGet();
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        doneLatch.countDown();
+                    }
+                });
+            }
+
+            // Start all threads simultaneously
+            startLatch.countDown();
+            assertTrue(doneLatch.await(30, TimeUnit.SECONDS), "Threads should complete within timeout");
+            executor.shutdown();
+
+            // Assert: Parent rule should be invoked exactly once
+            int invocationCount = ParentRuleInvocationCounter.getCount("CountingParent");
+            assertEquals(1, invocationCount,
+                    "Parent rule should be invoked exactly once, but was invoked " + invocationCount + " times. " +
+                    "This proves the race condition exists in executeParentRule().");
+
+            // Assert: All threads should receive the same target instance
+            assertEquals(1, results.size(),
+                    "All threads should receive the same target instance, but got " + results.size() + " unique instances. " +
+                    "This proves duplicate targets are being created.");
+        }
+
+        @Test
+        @DisplayName("Concurrent executeParentRule() with pre-created target should work correctly")
+        void testConcurrentExecuteParentRuleWithPreCreatedTarget() throws InterruptedException {
+            EClass source = createSource("TestEntity");
+
+            registry.register(ConcurrentParentRuleTransformation.class);
+            context.setTransformationRegistry(registry);
+            context.setAutoAddRootElements(false);
+
+            // Pre-create a target that will be shared
+            EPackage preCreatedTarget = EcoreFactory.eINSTANCE.createEPackage();
+            preCreatedTarget.setName("PreCreated");
+
+            int threadCount = 50;
+            ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+            CountDownLatch startLatch = new CountDownLatch(1);
+            CountDownLatch doneLatch = new CountDownLatch(threadCount);
+            Set<EObject> results = ConcurrentHashMap.newKeySet();
+
+            for (int t = 0; t < threadCount; t++) {
+                executor.submit(() -> {
+                    try {
+                        startLatch.await();
+                        // Call with pre-created target
+                        EObject result = context.executeParentRule("CountingParent", source, preCreatedTarget);
+                        if (result != null) {
+                            results.add(result);
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        doneLatch.countDown();
+                    }
+                });
+            }
+
+            startLatch.countDown();
+            assertTrue(doneLatch.await(30, TimeUnit.SECONDS));
+            executor.shutdown();
+
+            // Parent should execute exactly once even with pre-created target
+            int invocationCount = ParentRuleInvocationCounter.getCount("CountingParent");
+            assertEquals(1, invocationCount,
+                    "Parent rule with pre-created target should be invoked exactly once, " +
+                    "but was invoked " + invocationCount + " times.");
+
+            // All results should be the same pre-created target
+            assertEquals(1, results.size(), "All threads should receive the same pre-created target");
+            assertTrue(results.contains(preCreatedTarget), "Result should be the pre-created target");
+        }
+
+        @Test
+        @DisplayName("Concurrent @Extends inheritance should execute parent rule exactly once")
+        void testConcurrentExtendsInheritance() throws InterruptedException {
+            EClass source = createSource("InheritanceTest");
+
+            registry.register(ConcurrentExtendsTransformation.class);
+            context.setTransformationRegistry(registry);
+            context.setAutoAddRootElements(false);
+
+            int threadCount = 50;
+            ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+            CountDownLatch startLatch = new CountDownLatch(1);
+            CountDownLatch doneLatch = new CountDownLatch(threadCount);
+            Set<EObject> results = ConcurrentHashMap.newKeySet();
+
+            TransformRuleDescriptor childRule = registry.getRuleByName("ExtendsChild");
+            assertNotNull(childRule, "Child rule should be registered");
+
+            for (int t = 0; t < threadCount; t++) {
+                executor.submit(() -> {
+                    try {
+                        startLatch.await();
+                        // Execute child rule - this triggers parent via @Extends
+                        EObject result = childRule.execute(source, context);
+                        if (result != null) {
+                            results.add(result);
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        doneLatch.countDown();
+                    }
+                });
+            }
+
+            startLatch.countDown();
+            assertTrue(doneLatch.await(30, TimeUnit.SECONDS));
+            executor.shutdown();
+
+            // Parent should execute exactly once via @Extends chain
+            // This is the key assertion - the fix ensures atomic parent rule execution
+            int parentInvocations = ParentRuleInvocationCounter.getCount("ExtendsParent");
+            assertEquals(1, parentInvocations,
+                    "@Extends parent rule should be invoked exactly once, " +
+                    "but was invoked " + parentInvocations + " times. " +
+                    "This proves the race condition exists in executeParentRulesInChain().");
+
+            // Child rule is invoked once per execute() call (50 times total)
+            // This is expected - the test calls execute() from 50 threads
+            // In real transformation, the executor wraps in getOrCreate() for atomicity
+            int childInvocations = ParentRuleInvocationCounter.getCount("ExtendsChild");
+            assertEquals(threadCount, childInvocations,
+                    "Child rule should be invoked once per thread (each calls execute())");
+
+            // Each execute() call creates its own pre-created target, so expect 50 unique results
+            // In real transformation, executor's getOrCreate ensures single execution
+            assertEquals(threadCount, results.size(),
+                    "Each execute() call returns its own target (executor wraps for atomicity)");
+        }
+
+        @Test
+        @DisplayName("Multi-level @Extends chain should execute each level exactly once")
+        void testMultiLevelExtendsChain() throws InterruptedException {
+            EClass source = createSource("MultiLevelTest");
+
+            registry.register(MultiLevelExtendsTransformation.class);
+            context.setTransformationRegistry(registry);
+            context.setAutoAddRootElements(false);
+
+            int threadCount = 50;
+            ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+            CountDownLatch startLatch = new CountDownLatch(1);
+            CountDownLatch doneLatch = new CountDownLatch(threadCount);
+            Set<EObject> results = ConcurrentHashMap.newKeySet();
+
+            TransformRuleDescriptor grandChildRule = registry.getRuleByName("GrandChild");
+            assertNotNull(grandChildRule, "GrandChild rule should be registered");
+
+            for (int t = 0; t < threadCount; t++) {
+                executor.submit(() -> {
+                    try {
+                        startLatch.await();
+                        EObject result = grandChildRule.execute(source, context);
+                        if (result != null) {
+                            results.add(result);
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        doneLatch.countDown();
+                    }
+                });
+            }
+
+            startLatch.countDown();
+            assertTrue(doneLatch.await(30, TimeUnit.SECONDS));
+            executor.shutdown();
+
+            // PARENT rules in the chain should execute exactly once
+            // This is the key assertion - the fix ensures atomic parent rule execution
+            int grandParentInvocations = ParentRuleInvocationCounter.getCount("GrandParent");
+            int parentInvocations = ParentRuleInvocationCounter.getCount("Parent");
+            int grandChildInvocations = ParentRuleInvocationCounter.getCount("GrandChild");
+
+            assertEquals(1, grandParentInvocations,
+                    "GrandParent should be invoked exactly once, but was invoked " + grandParentInvocations + " times.");
+            assertEquals(1, parentInvocations,
+                    "Parent should be invoked exactly once, but was invoked " + parentInvocations + " times.");
+
+            // GrandChild is the entry point - invoked once per execute() call
+            // This is expected - the test calls execute() from 50 threads
+            assertEquals(threadCount, grandChildInvocations,
+                    "GrandChild should be invoked once per thread (each calls execute())");
+
+            // Each execute() call creates its own pre-created target, so expect 50 unique results
+            assertEquals(threadCount, results.size(),
+                    "Each execute() call returns its own target (executor wraps for atomicity)");
+        }
+
+        @Test
+        @DisplayName("equivalent() method locking should prevent race conditions")
+        void testEquivalentMethodLocking() throws InterruptedException {
+            // This test verifies that the existing locking in equivalent() works correctly
+            EClass source = createSource("LazyTest");
+
+            registry.register(LazyRuleTransformation.class);
+            context.setTransformationRegistry(registry);
+            context.setAutoAddRootElements(false);
+
+            int threadCount = 50;
+            ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+            CountDownLatch startLatch = new CountDownLatch(1);
+            CountDownLatch doneLatch = new CountDownLatch(threadCount);
+            Set<EObject> results = ConcurrentHashMap.newKeySet();
+
+            for (int t = 0; t < threadCount; t++) {
+                executor.submit(() -> {
+                    try {
+                        startLatch.await();
+                        // Call equivalent() which uses the per-element locking
+                        EObject result = context.equivalent(source, EPackage.class);
+                        if (result != null) {
+                            results.add(result);
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        doneLatch.countDown();
+                    }
+                });
+            }
+
+            startLatch.countDown();
+            assertTrue(doneLatch.await(30, TimeUnit.SECONDS));
+            executor.shutdown();
+
+            // Lazy rule should execute exactly once
+            int lazyInvocations = ParentRuleInvocationCounter.getCount("LazyRule");
+            assertEquals(1, lazyInvocations,
+                    "Lazy rule via equivalent() should be invoked exactly once, " +
+                    "but was invoked " + lazyInvocations + " times.");
+
+            // All threads should get same result
+            assertEquals(1, results.size(),
+                    "All threads should receive the same lazy-evaluated target");
+        }
+    }
+
+    // ==================== Invocation Counter for Race Condition Tests ====================
+
+    /**
+     * Thread-safe counter for tracking rule invocations across concurrent tests.
+     */
+    static class ParentRuleInvocationCounter {
+        private static final ConcurrentHashMap<String, AtomicInteger> counters = new ConcurrentHashMap<>();
+
+        static void increment(String ruleName) {
+            counters.computeIfAbsent(ruleName, k -> new AtomicInteger(0)).incrementAndGet();
+        }
+
+        static int getCount(String ruleName) {
+            AtomicInteger counter = counters.get(ruleName);
+            return counter != null ? counter.get() : 0;
+        }
+
+        static void reset() {
+            counters.clear();
+        }
+    }
+
+    // ==================== Transformation Classes for Race Condition Tests ====================
+
+    /**
+     * Transformation with a parent rule that counts its invocations.
+     */
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
+    public static class ConcurrentParentRuleTransformation {
+
+        @TransformRule(name = "CountingParent")
+        @Abstract
+        public TransformFunction<EClass, EPackage> countingParent() {
+            return (source, ctx) -> {
+                // Count this invocation
+                ParentRuleInvocationCounter.increment("CountingParent");
+                // Small delay to increase chance of race condition
+                try { Thread.sleep(10); } catch (InterruptedException e) { }
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setName(source.getName() + "_from_parent");
+                return pkg;
+            };
+        }
+    }
+
+    /**
+     * Transformation with @Extends to test inheritance chain race conditions.
+     */
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
+    public static class ConcurrentExtendsTransformation {
+
+        @TransformRule(name = "ExtendsParent")
+        @Abstract
+        public TransformFunction<EClass, EPackage> extendsParent() {
+            return (source, ctx) -> {
+                ParentRuleInvocationCounter.increment("ExtendsParent");
+                try { Thread.sleep(10); } catch (InterruptedException e) { }
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setName(source.getName());
+                return pkg;
+            };
+        }
+
+        @TransformRule(name = "ExtendsChild")
+        @Transform(type = EClass.class)
+        @Extends("ExtendsParent")
+        public TransformFunction<EClass, EPackage> extendsChild() {
+            return (source, ctx) -> {
+                ParentRuleInvocationCounter.increment("ExtendsChild");
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setNsURI("http://child.test");
+                return pkg;
+            };
+        }
+    }
+
+    /**
+     * Multi-level inheritance: GrandChild @Extends Parent @Extends GrandParent.
+     */
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
+    public static class MultiLevelExtendsTransformation {
+
+        @TransformRule(name = "GrandParent")
+        @Abstract
+        public TransformFunction<EClass, EPackage> grandParent() {
+            return (source, ctx) -> {
+                ParentRuleInvocationCounter.increment("GrandParent");
+                try { Thread.sleep(10); } catch (InterruptedException e) { }
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setName(source.getName());
+                return pkg;
+            };
+        }
+
+        @TransformRule(name = "Parent")
+        @Abstract
+        @Extends("GrandParent")
+        public TransformFunction<EClass, EPackage> parent() {
+            return (source, ctx) -> {
+                ParentRuleInvocationCounter.increment("Parent");
+                try { Thread.sleep(5); } catch (InterruptedException e) { }
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setNsURI("http://parent.test");
+                return pkg;
+            };
+        }
+
+        @TransformRule(name = "GrandChild")
+        @Transform(type = EClass.class)
+        @Extends("Parent")
+        public TransformFunction<EClass, EPackage> grandChild() {
+            return (source, ctx) -> {
+                ParentRuleInvocationCounter.increment("GrandChild");
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setNsPrefix("grandchild");
+                return pkg;
+            };
+        }
+    }
+
+    /**
+     * Lazy rule for testing equivalent() locking.
+     */
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
+    public static class LazyRuleTransformation {
+
+        @TransformRule(name = "LazyRule")
+        @Lazy
+        @Transform(type = EClass.class)
+        public TransformFunction<EClass, EPackage> lazyRule() {
+            return (source, ctx) -> {
+                ParentRuleInvocationCounter.increment("LazyRule");
+                try { Thread.sleep(10); } catch (InterruptedException e) { }
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setName(source.getName() + "_lazy");
+                return pkg;
+            };
         }
     }
 }

@@ -821,6 +821,7 @@ public class TransformationContext {
         if (autoAddRootElements && !isDetached) {
             addToResource(instance);
         }
+
         // Otherwise ETL semantics: do NOT add to resource root automatically
         // Elements become part of the model when assigned to containment references
         // Use addToResource() explicitly for true root elements
@@ -1390,14 +1391,8 @@ public class TransformationContext {
             throw new IllegalArgumentException("Parent rule not found: " + parentRuleName);
         }
 
-        // Check cache first to ensure idempotency
-        // This prevents duplicate execution when multiple child rules extend the same parent
-        EObject cached = resolutionCache.getByRule(source, parentRuleName);
-        if (cached != null) {
-            return (T) cached;
-        }
-
         // Save current inheritance state to restore later
+        // ThreadLocal is per-thread, so this is safe to do outside the lock
         boolean wasInInheritance = isInInheritanceExecution();
         EObject previousPreCreated = getPreCreatedTarget();
 
@@ -1419,14 +1414,16 @@ public class TransformationContext {
         }
 
         try {
-            // Execute parent rule and cache the result
-            EObject result = parentRule.execute(source, this);
-            if (result != null) {
-                resolutionCache.addMapping(source, parentRuleName, result, parentRule.isPrimary());
-            }
-            return (T) result;
+            // Use atomic getOrCreate to prevent race conditions
+            // Multiple concurrent calls for the same (source, parentRuleName) will only execute once.
+            // The first thread's supplier runs and caches the result; other threads get the cached value.
+            // ThreadLocal state is already set up above for whichever thread ends up executing.
+            return (T) resolutionCache.getOrCreate(source, parentRuleName, () -> {
+                return parentRule.execute(source, this);
+            }, parentRule.isPrimary());
         } finally {
             // Restore previous inheritance state
+            // ThreadLocal is per-thread, so restoration is safe even if this thread's supplier wasn't called
             if (previousPreCreated != null) {
                 setPreCreatedTarget(previousPreCreated);
             } else {
@@ -1886,58 +1883,67 @@ public class TransformationContext {
      * any pending IDs that haven't been applied yet.</p>
      */
     public void applyAllPendingXmiIds() {
-        System.err.println("[DEBUG] applyAllPendingXmiIds() ENTERED");
         if (targetResourceSet.getResources().isEmpty()) {
-            System.err.println("[DEBUG] applyAllPendingXmiIds: targetResourceSet is empty, returning");
             return;
         }
 
         Resource targetResource = targetResourceSet.getResources().get(0);
         if (!(targetResource instanceof XMIResource)) {
-            System.err.println("[DEBUG] applyAllPendingXmiIds: targetResource is not XMIResource, returning");
             return;
         }
 
         XMIResource xmiResource = (XMIResource) targetResource;
 
-        System.err.println("[DEBUG] applyAllPendingXmiIds: pendingXmiIds.size()=" + pendingXmiIds.size());
-
         // Apply pending IDs to all elements in the resource
-        int appliedCount = 0;
-        int skippedDueToResource = 0;
         for (Map.Entry<EObject, String> entry : pendingXmiIds.entrySet()) {
             EObject element = entry.getKey();
             String pendingId = entry.getValue();
 
-            // Debug logging for ActionDefinition elements
-            String className = element.eClass().getName();
-            if (className.endsWith("ActionDefinition")) {
-                Resource elementResource = element.eResource();
-                boolean inTargetResource = elementResource == targetResource;
-                System.err.println("[DEBUG] applyAllPendingXmiIds: " + className +
-                    " pendingId=" + pendingId +
-                    " inTargetResource=" + inTargetResource +
-                    " elementResource=" + (elementResource != null ? elementResource.getURI() : "null") +
-                    " targetResource=" + targetResource.getURI());
-            }
-
             // Only apply if the element is in this resource and doesn't already have an ID set
-            if (element.eResource() == targetResource) {
+            Resource elementResource = element.eResource();
+            if (elementResource == targetResource) {
                 synchronized (xmiResource) {
                     String existingId = xmiResource.getID(element);
                     if (existingId == null || !existingId.equals(pendingId)) {
                         xmiResource.setID(element, pendingId);
-                        appliedCount++;
                     }
                 }
-            } else {
-                skippedDueToResource++;
-            }
-        }
+            } else if (elementResource == null) {
+                // Element is not in any resource - trace up containment chain
+                // to find if any ancestor is in the target resource
+                EObject ancestor = element.eContainer();
+                int depth = 0;
+                while (ancestor != null && ancestor.eResource() == null && depth < 50) {
+                    ancestor = ancestor.eContainer();
+                    depth++;
+                }
 
-        System.err.println("[DEBUG] applyAllPendingXmiIds: Applied " + appliedCount +
-            " IDs, skipped " + skippedDueToResource + " due to resource mismatch (total pending: " +
-            pendingXmiIds.size() + ")");
+                if (ancestor != null && ancestor.eResource() == targetResource) {
+                    // Ancestor is in resource - the element is transitively in resource
+                    // Apply the XMI ID (EMF should recognize it via containment)
+                    synchronized (xmiResource) {
+                        xmiResource.setID(element, pendingId);
+                    }
+                } else {
+                    // Element is truly orphaned - log for debugging
+                    String className = element.eClass().getName();
+                    if (className.endsWith("ActionDefinition")) {
+                        StringBuilder path = new StringBuilder();
+                        EObject current = element;
+                        int traceDepth = 0;
+                        while (current != null && traceDepth < 10) {
+                            if (path.length() > 0) path.append(" -> ");
+                            path.append(current.eClass().getName());
+                            current = current.eContainer();
+                            traceDepth++;
+                        }
+                        if (current == null) path.append(" -> (root)");
+                        System.err.println("[ORPHAN] " + pendingId + " path=" + path);
+                    }
+                }
+            }
+            // Elements in different resources are skipped
+        }
     }
 
     /**
@@ -2256,7 +2262,17 @@ public class TransformationContext {
         return baseId + "/(discriminator/" + discriminator + ")";
     }
 
-    private void setElementId(EObject element, String id) {
+    /**
+     * Set the XMI ID for an element.
+     *
+     * <p>This method allows explicitly setting unique IDs for elements created inline
+     * (via multiple createTarget calls within the same rule). This is necessary because
+     * generateStructuredId creates the same ID for all elements from the same source/rule.</p>
+     *
+     * @param element the element to set the ID on
+     * @param id the XMI ID to set
+     */
+    public void setElementId(EObject element, String id) {
         // Set "id" structural feature if available
         EStructuralFeature idFeature = element.eClass().getEStructuralFeature("id");
         if (idFeature != null && idFeature.isChangeable()) {
