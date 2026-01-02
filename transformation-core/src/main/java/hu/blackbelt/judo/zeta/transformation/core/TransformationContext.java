@@ -22,6 +22,8 @@ package hu.blackbelt.judo.zeta.transformation.core;
 
 import hu.blackbelt.judo.zeta.common.ExtensionMethodRegistry;
 import hu.blackbelt.judo.zeta.common.ModelProvider;
+import hu.blackbelt.judo.zeta.transformation.core.deferred.DeferredEObject;
+import hu.blackbelt.judo.zeta.transformation.core.deferred.OperationQueue;
 import org.eclipse.emf.ecore.EClass;
 import org.eclipse.emf.ecore.EClassifier;
 import org.eclipse.emf.ecore.EObject;
@@ -187,6 +189,22 @@ public class TransformationContext {
      * elements that are referenced via equivalent() calls.
      */
     private volatile boolean etlCompatibilityMode = false;
+
+    /**
+     * When true, EMF write operations are deferred and recorded as operations
+     * for later replay during the commit phase. This provides complete thread
+     * isolation during parallel transformation execution.
+     *
+     * <p>When enabled, {@code createTarget()} returns proxied EObjects that
+     * intercept setters and list modifications.</p>
+     */
+    private volatile boolean deferredWritesEnabled = false;
+
+    /**
+     * Queue for storing deferred EMF operations during parallel phase.
+     * Operations are replayed in sequence order during commit.
+     */
+    private final OperationQueue operationQueue = new OperationQueue();
 
     /**
      * Wrapper for staged elements with ordering metadata.
@@ -806,6 +824,12 @@ public class TransformationContext {
         // Otherwise ETL semantics: do NOT add to resource root automatically
         // Elements become part of the model when assigned to containment references
         // Use addToResource() explicitly for true root elements
+
+        // Wrap with deferred proxy if deferred writes mode is enabled
+        // The proxy intercepts setter and list operations, deferring them until commit
+        if (deferredWritesEnabled) {
+            return DeferredEObject.createProxy((T) instance, operationQueue);
+        }
 
         return (T) instance;
     }
@@ -2226,5 +2250,108 @@ public class TransformationContext {
         synchronized (resource) {
             resource.setID(element, id);
         }
+    }
+
+    // ==================== Deferred Writes API ====================
+
+    /**
+     * Enable deferred EMF writes mode.
+     *
+     * <p>When enabled, {@code createTarget()} returns proxied EObjects that
+     * intercept setter and list modification calls. Operations are recorded
+     * and replayed during the commit phase.</p>
+     *
+     * <p>This provides complete thread isolation during parallel transformation,
+     * eliminating race conditions without requiring locks on EMF objects.</p>
+     *
+     * @see #disableDeferredWrites()
+     * @see #commitDeferredOperations()
+     */
+    public void enableDeferredWrites() {
+        this.deferredWritesEnabled = true;
+        this.operationQueue.enableDeferredMode();
+    }
+
+    /**
+     * Disable deferred EMF writes mode.
+     *
+     * <p>After disabling, EMF operations are applied immediately as normal.</p>
+     */
+    public void disableDeferredWrites() {
+        this.deferredWritesEnabled = false;
+        this.operationQueue.disableDeferredMode();
+    }
+
+    /**
+     * Check if deferred writes mode is enabled.
+     *
+     * @return true if deferred writes are enabled
+     */
+    public boolean isDeferredWritesEnabled() {
+        return deferredWritesEnabled;
+    }
+
+    /**
+     * Get the operation queue for deferred EMF operations.
+     *
+     * @return the operation queue
+     */
+    public OperationQueue getOperationQueue() {
+        return operationQueue;
+    }
+
+    /**
+     * Commit all deferred EMF operations.
+     *
+     * <p>Operations are sorted by sequence number and applied in order.
+     * This method should be called after the parallel transformation phase
+     * completes, from a single thread.</p>
+     *
+     * @return the number of operations applied
+     */
+    public int commitDeferredOperations() {
+        return operationQueue.commit();
+    }
+
+    /**
+     * Clear all deferred operations without applying them.
+     *
+     * <p>Use this for rollback or cleanup on error.</p>
+     */
+    public void clearDeferredOperations() {
+        operationQueue.clear();
+    }
+
+    /**
+     * Reset deferred writes state.
+     *
+     * <p>Clears the operation queue and disables deferred mode.</p>
+     */
+    public void resetDeferredWrites() {
+        operationQueue.reset();
+        deferredWritesEnabled = false;
+    }
+
+    /**
+     * Get the number of pending deferred operations.
+     *
+     * @return the count of pending operations
+     */
+    public int getPendingOperationCount() {
+        return operationQueue.size();
+    }
+
+    /**
+     * Unwrap a potentially proxied EObject to get the delegate.
+     *
+     * <p>When using deferred writes, EObjects returned from {@code createTarget()}
+     * are proxies. This method returns the underlying delegate object.</p>
+     *
+     * @param object the object (may be a proxy)
+     * @param <T> the type
+     * @return the unwrapped object
+     */
+    public <T> T unwrapProxy(T object) {
+        return DeferredEObject.unwrap(object);
     }
 }
