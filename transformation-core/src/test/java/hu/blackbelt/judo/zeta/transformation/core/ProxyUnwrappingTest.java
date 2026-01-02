@@ -63,13 +63,19 @@ class ProxyUnwrappingTest {
 
     @BeforeEach
     void setUp() {
-        // Register XMI resource factory
+        // Register XMI resource factory globally and per-resourceSet
         Resource.Factory.Registry.INSTANCE.getExtensionToFactoryMap()
                 .put("xmi", new XMIResourceFactoryImpl());
 
         sourceResourceSet = new ResourceSetImpl();
         targetResourceSet = new ResourceSetImpl();
-        targetResource = targetResourceSet.createResource(URI.createURI("test://target.xmi"));
+
+        // Register factory on the resource set for proper URI handling
+        targetResourceSet.getResourceFactoryRegistry().getExtensionToFactoryMap()
+                .put("xmi", new XMIResourceFactoryImpl());
+
+        // Use a proper platform-style URI
+        targetResource = targetResourceSet.createResource(URI.createURI("platform:/resource/test/target.xmi"));
 
         modelProvider = new TestModelProvider();
         extensionRegistry = new ExtensionMethodRegistry();

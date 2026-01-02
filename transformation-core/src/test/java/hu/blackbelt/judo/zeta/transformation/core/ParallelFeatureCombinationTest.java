@@ -70,7 +70,12 @@ class ParallelFeatureCombinationTest {
 
         sourceResourceSet = new ResourceSetImpl();
         targetResourceSet = new ResourceSetImpl();
-        targetResource = targetResourceSet.createResource(URI.createURI("test://target.xmi"));
+
+        // Register factory on the resource set for proper URI handling
+        targetResourceSet.getResourceFactoryRegistry().getExtensionToFactoryMap()
+                .put("xmi", new XMIResourceFactoryImpl());
+
+        targetResource = targetResourceSet.createResource(URI.createURI("platform:/resource/test/target.xmi"));
 
         modelProvider = new TestModelProvider();
         extensionRegistry = new ExtensionMethodRegistry();

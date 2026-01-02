@@ -51,6 +51,9 @@ public class ElementResolutionCache {
     // Per-key locks for atomic getOrCreate operations
     private final ConcurrentHashMap<CacheKey, ReentrantLock> keyLocks = new ConcurrentHashMap<>();
 
+    // Track rejected (source, ruleName) pairs to avoid re-evaluating guards
+    private final Set<CacheKey> rejectedKeys = ConcurrentHashMap.newKeySet();
+
     /**
      * Key for per-element locking using (source identity, ruleName) pair.
      *
@@ -176,17 +179,27 @@ public class ElementResolutionCache {
         }
 
         // Fast path: check cache without locking
+        CacheKey key = new CacheKey(source, ruleName);
+
+        // Check if previously rejected (guard returned null)
+        if (rejectedKeys.contains(key)) {
+            return null;
+        }
+
         T cached = getByRule(source, ruleName);
         if (cached != null) {
             return cached;
         }
 
         // Acquire per-key lock for atomic check-and-execute
-        CacheKey key = new CacheKey(source, ruleName);
         ReentrantLock lock = keyLocks.computeIfAbsent(key, k -> new ReentrantLock());
         lock.lock();
         try {
             // Double-check after acquiring lock (another thread may have completed)
+            if (rejectedKeys.contains(key)) {
+                return null;
+            }
+
             cached = getByRule(source, ruleName);
             if (cached != null) {
                 return cached;
@@ -196,6 +209,9 @@ public class ElementResolutionCache {
             T target = ruleExecutor.get();
             if (target != null) {
                 addMapping(source, ruleName, target, isPrimary);
+            } else {
+                // Cache the rejection to prevent redundant guard evaluation
+                rejectedKeys.add(key);
             }
             return target;
         } finally {
@@ -411,6 +427,7 @@ public class ElementResolutionCache {
         primaryCache.clear();
         discriminatedCache.clear();
         keyLocks.clear();
+        rejectedKeys.clear();
     }
 
     /**

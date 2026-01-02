@@ -1897,6 +1897,8 @@ public class TransformationContext {
 
         XMIResource xmiResource = (XMIResource) targetResource;
 
+        System.err.println("[DEBUG] applyAllPendingXmiIds: pendingXmiIds.size()=" + pendingXmiIds.size());
+
         // Apply pending IDs to all elements in the resource
         int appliedCount = 0;
         int skippedDueToResource = 0;
