@@ -840,6 +840,9 @@ public class TransformationContext {
      * <p>Use this for elements that should be root elements in the target model,
      * not contained by other elements.</p>
      *
+     * <p>If the element is a deferred proxy, it is unwrapped before being added
+     * to the resource to prevent serialization failures.</p>
+     *
      * @param element the element to add as root
      */
     public void addToResource(EObject element) {
@@ -847,21 +850,29 @@ public class TransformationContext {
             return;
         }
 
+        // Unwrap proxy before adding to resource to prevent serialization issues
+        // DeferredEList cannot be cast to InternalEList during XMI serialization
+        EObject unwrapped = DeferredEObject.unwrap(element);
+
         if (stagingEnabled.get()) {
             // Parallel mode: stage for later commit with ordering
             long sequence = creationSequence.getAndIncrement();
-            elementOrder.put(element, sequence);
-            stagedElements.offer(new StagedElement(element, true, sequence));
+            elementOrder.put(unwrapped, sequence);
+            stagedElements.offer(new StagedElement(unwrapped, true, sequence));
         } else {
             // Sequential mode: add directly to Resource
             if (!targetResourceSet.getResources().isEmpty()) {
                 Resource targetResource = targetResourceSet.getResources().get(0);
-                targetResource.getContents().add(element);
+                targetResource.getContents().add(unwrapped);
 
                 // Apply pending XMI ID if one was set before adding to resource
+                // Check both original element and unwrapped element for pending IDs
                 String pendingId = pendingXmiIds.get(element);
+                if (pendingId == null) {
+                    pendingId = pendingXmiIds.get(unwrapped);
+                }
                 if (pendingId != null && targetResource instanceof XMIResource) {
-                    setSynchronizedXmiId((XMIResource) targetResource, element, pendingId);
+                    setSynchronizedXmiId((XMIResource) targetResource, unwrapped, pendingId);
                 }
             }
         }
@@ -1777,6 +1788,9 @@ public class TransformationContext {
      * Commit all staged elements to the target Resource.
      * Elements are sorted by creation sequence for deterministic ordering.
      * Must be called from a single thread after parallel phase completes.
+     *
+     * <p>All staged elements are unwrapped from deferred proxies before being
+     * added to the resource to prevent serialization failures.</p>
      */
     void commitStagedElements() {
         if (targetResourceSet.getResources().isEmpty()) {
@@ -1799,7 +1813,8 @@ public class TransformationContext {
 
         // Add to resource in order
         for (StagedElement element : elementsToCommit) {
-            EObject obj = element.element;
+            // Unwrap proxy before adding to resource
+            EObject obj = DeferredEObject.unwrap(element.element);
 
             // Only add root elements that are not yet contained
             if (element.isRootElement && obj.eContainer() == null) {
@@ -1807,7 +1822,11 @@ public class TransformationContext {
             }
 
             // Apply pending XMI ID now that element is in resource
-            String pendingId = pendingXmiIds.remove(obj);
+            // Check both original and unwrapped element for pending IDs
+            String pendingId = pendingXmiIds.remove(element.element);
+            if (pendingId == null) {
+                pendingId = pendingXmiIds.remove(obj);
+            }
             if (pendingId != null && xmiResource != null) {
                 setSynchronizedXmiId(xmiResource, obj, pendingId);
             }
@@ -1880,9 +1899,22 @@ public class TransformationContext {
 
         // Apply pending IDs to all elements in the resource
         int appliedCount = 0;
+        int skippedDueToResource = 0;
         for (Map.Entry<EObject, String> entry : pendingXmiIds.entrySet()) {
             EObject element = entry.getKey();
             String pendingId = entry.getValue();
+
+            // Debug logging for ActionDefinition elements
+            String className = element.eClass().getName();
+            if (className.endsWith("ActionDefinition")) {
+                Resource elementResource = element.eResource();
+                boolean inTargetResource = elementResource == targetResource;
+                System.err.println("[DEBUG] applyAllPendingXmiIds: " + className +
+                    " pendingId=" + pendingId +
+                    " inTargetResource=" + inTargetResource +
+                    " elementResource=" + (elementResource != null ? elementResource.getURI() : "null") +
+                    " targetResource=" + targetResource.getURI());
+            }
 
             // Only apply if the element is in this resource and doesn't already have an ID set
             if (element.eResource() == targetResource) {
@@ -1893,10 +1925,14 @@ public class TransformationContext {
                         appliedCount++;
                     }
                 }
+            } else {
+                skippedDueToResource++;
             }
         }
 
-        // Note: Applied appliedCount pending XMI IDs to elements
+        System.err.println("[DEBUG] applyAllPendingXmiIds: Applied " + appliedCount +
+            " IDs, skipped " + skippedDueToResource + " due to resource mismatch (total pending: " +
+            pendingXmiIds.size() + ")");
     }
 
     /**
@@ -2353,5 +2389,87 @@ public class TransformationContext {
      */
     public <T> T unwrapProxy(T object) {
         return DeferredEObject.unwrap(object);
+    }
+
+    /**
+     * Unwrap all proxy references in the target model.
+     *
+     * <p>This method traverses all elements in the target resource and replaces
+     * any proxy references with their unwrapped real objects. This is a cleanup
+     * step that should be called after parallel transformation completes to ensure
+     * the model contains no proxy objects that would cause serialization failures.</p>
+     *
+     * <p>Reference values set via deferred writes may contain proxy objects that
+     * weren't unwrapped during the commit phase. This method scans all EReference
+     * values and replaces proxies with their delegates.</p>
+     *
+     * @return the number of proxy references that were unwrapped
+     */
+    @SuppressWarnings("unchecked")
+    public int unwrapAllProxiesInModel() {
+        if (targetResourceSet.getResources().isEmpty()) {
+            return 0;
+        }
+
+        Resource targetResource = targetResourceSet.getResources().get(0);
+        int unwrappedCount = 0;
+
+        // Traverse all elements in the resource
+        for (EObject root : new ArrayList<>(targetResource.getContents())) {
+            unwrappedCount += unwrapProxiesRecursively(root);
+        }
+
+        return unwrappedCount;
+    }
+
+    /**
+     * Recursively unwrap proxy references in an element and its contents.
+     *
+     * @param element the element to process
+     * @return the number of proxy references unwrapped
+     */
+    @SuppressWarnings("unchecked")
+    private int unwrapProxiesRecursively(EObject element) {
+        int count = 0;
+
+        // Check all EReference features
+        for (EStructuralFeature feature : element.eClass().getEAllStructuralFeatures()) {
+            if (!(feature instanceof org.eclipse.emf.ecore.EReference)) {
+                continue;
+            }
+
+            Object value = element.eGet(feature);
+            if (value == null) {
+                continue;
+            }
+
+            if (feature.isMany()) {
+                // Multi-valued reference - check each element
+                org.eclipse.emf.common.util.EList<EObject> list =
+                        (org.eclipse.emf.common.util.EList<EObject>) value;
+                for (int i = 0; i < list.size(); i++) {
+                    EObject refValue = list.get(i);
+                    if (refValue instanceof DeferredEObject.ProxyMarker) {
+                        EObject unwrapped = DeferredEObject.unwrap(refValue);
+                        list.set(i, unwrapped);
+                        count++;
+                    }
+                }
+            } else {
+                // Single-valued reference
+                if (value instanceof DeferredEObject.ProxyMarker) {
+                    EObject unwrapped = DeferredEObject.unwrap((EObject) value);
+                    element.eSet(feature, unwrapped);
+                    count++;
+                }
+            }
+        }
+
+        // Process contained elements recursively
+        for (EObject child : element.eContents()) {
+            count += unwrapProxiesRecursively(child);
+        }
+
+        return count;
     }
 }

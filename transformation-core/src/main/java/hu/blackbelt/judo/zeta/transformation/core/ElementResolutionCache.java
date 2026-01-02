@@ -25,6 +25,8 @@ import org.eclipse.emf.ecore.EObject;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
 
 /**
  * Cache for transformation trace (source → target mappings).
@@ -45,6 +47,39 @@ public class ElementResolutionCache {
 
     // Discriminated cache: source → rule name → discriminator → instance
     private final Map<EObject, Map<String, Map<String, EObject>>> discriminatedCache = new ConcurrentHashMap<>();
+
+    // Per-key locks for atomic getOrCreate operations
+    private final ConcurrentHashMap<CacheKey, ReentrantLock> keyLocks = new ConcurrentHashMap<>();
+
+    /**
+     * Key for per-element locking using (source identity, ruleName) pair.
+     *
+     * <p>Uses System.identityHashCode for source to ensure consistency
+     * even if the source element's equals/hashCode are overridden.</p>
+     */
+    private static class CacheKey {
+        private final int sourceIdentity;
+        private final String ruleName;
+
+        CacheKey(EObject source, String ruleName) {
+            this.sourceIdentity = System.identityHashCode(source);
+            this.ruleName = ruleName;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            CacheKey cacheKey = (CacheKey) o;
+            return sourceIdentity == cacheKey.sourceIdentity &&
+                    Objects.equals(ruleName, cacheKey.ruleName);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(sourceIdentity, ruleName);
+        }
+    }
 
     /**
      * Add a mapping from source to target.
@@ -106,6 +141,66 @@ public class ElementResolutionCache {
             return (T) ruleMap.get(ruleName);
         }
         return null;
+    }
+
+    /**
+     * Atomic get-or-create operation with per-key locking.
+     *
+     * <p>This method provides atomic check-and-execute semantics for parallel
+     * transformation. The lock covers the full execution: cache lookup, guard
+     * evaluation, and rule execution. This prevents race conditions where
+     * multiple threads could create duplicate target elements for the same source.</p>
+     *
+     * <p>The supplier is only invoked on cache miss. If the supplier returns null
+     * (e.g., guard rejected), no mapping is added.</p>
+     *
+     * <p>Thread-safe: Uses fine-grained per-(source, ruleName) locks to allow
+     * different sources and rules to execute in parallel without blocking.</p>
+     *
+     * @param source the source element
+     * @param ruleName the transformation rule name
+     * @param ruleExecutor supplier that executes the rule (called under lock)
+     * @param isPrimary whether this is a primary transformation
+     * @param <T> the target type
+     * @return the cached or newly created target, or null if supplier returns null
+     */
+    @SuppressWarnings("unchecked")
+    public <T extends EObject> T getOrCreate(
+            EObject source,
+            String ruleName,
+            Supplier<T> ruleExecutor,
+            boolean isPrimary
+    ) {
+        if (source == null || ruleName == null) {
+            return null;
+        }
+
+        // Fast path: check cache without locking
+        T cached = getByRule(source, ruleName);
+        if (cached != null) {
+            return cached;
+        }
+
+        // Acquire per-key lock for atomic check-and-execute
+        CacheKey key = new CacheKey(source, ruleName);
+        ReentrantLock lock = keyLocks.computeIfAbsent(key, k -> new ReentrantLock());
+        lock.lock();
+        try {
+            // Double-check after acquiring lock (another thread may have completed)
+            cached = getByRule(source, ruleName);
+            if (cached != null) {
+                return cached;
+            }
+
+            // Execute rule under lock (includes guard evaluation)
+            T target = ruleExecutor.get();
+            if (target != null) {
+                addMapping(source, ruleName, target, isPrimary);
+            }
+            return target;
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
@@ -315,6 +410,7 @@ public class ElementResolutionCache {
         typeCache.clear();
         primaryCache.clear();
         discriminatedCache.clear();
+        keyLocks.clear();
     }
 
     /**

@@ -30,6 +30,12 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Collection;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -289,5 +295,185 @@ class ElementResolutionCacheTest {
         assertNull(cache.getEquivalentDiscriminated(null, EClass.class, "Rule1", "disc1"));
         assertNull(cache.getEquivalentDiscriminated(sourceElement, EClass.class, null, "disc1"));
         assertNull(cache.getEquivalentDiscriminated(sourceElement, EClass.class, "Rule1", null));
+    }
+
+    // ==================== getOrCreate() Atomic Cache Tests ====================
+
+    @Test
+    void testGetOrCreateReturnsSupplierResultOnCacheMiss() {
+        EObject result = cache.getOrCreate(sourceElement, "Rule1", () -> targetElement1, false);
+
+        assertSame(targetElement1, result);
+        // Verify it was cached
+        assertSame(targetElement1, cache.getByRule(sourceElement, "Rule1"));
+    }
+
+    @Test
+    void testGetOrCreateReturnsCachedValueOnHit() {
+        // Pre-populate cache
+        cache.addMapping(sourceElement, "Rule1", targetElement1, false);
+
+        AtomicInteger supplierCalls = new AtomicInteger(0);
+        EObject result = cache.getOrCreate(sourceElement, "Rule1", () -> {
+            supplierCalls.incrementAndGet();
+            return targetElement2; // Would return different element
+        }, false);
+
+        // Should return cached value, not call supplier
+        assertSame(targetElement1, result);
+        assertEquals(0, supplierCalls.get());
+    }
+
+    @Test
+    void testGetOrCreateCachesNullSupplierResult() {
+        EObject result = cache.getOrCreate(sourceElement, "Rule1", () -> null, false);
+
+        assertNull(result);
+        // Null should NOT be cached
+        assertNull(cache.getByRule(sourceElement, "Rule1"));
+    }
+
+    @Test
+    void testGetOrCreateWithNullSourceReturnsNull() {
+        EObject result = cache.getOrCreate(null, "Rule1", () -> targetElement1, false);
+        assertNull(result);
+    }
+
+    @Test
+    void testGetOrCreateWithNullRuleNameReturnsNull() {
+        EObject result = cache.getOrCreate(sourceElement, null, () -> targetElement1, false);
+        assertNull(result);
+    }
+
+    @Test
+    void testGetOrCreateConcurrentCallsReturnSameInstance() throws InterruptedException {
+        int threadCount = 10;
+        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch doneLatch = new CountDownLatch(threadCount);
+        AtomicInteger supplierCalls = new AtomicInteger(0);
+        AtomicReference<EObject>[] results = new AtomicReference[threadCount];
+
+        for (int i = 0; i < threadCount; i++) {
+            final int index = i;
+            results[index] = new AtomicReference<>();
+            executor.submit(() -> {
+                try {
+                    startLatch.await(); // Wait for all threads to start together
+                    EObject result = cache.getOrCreate(sourceElement, "Rule1", () -> {
+                        supplierCalls.incrementAndGet();
+                        // Create a new object each time to detect if supplier runs multiple times
+                        EObject newTarget = EcoreFactory.eINSTANCE.createEClass();
+                        ((EClass) newTarget).setName("Target_" + System.nanoTime());
+                        return newTarget;
+                    }, false);
+                    results[index].set(result);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    doneLatch.countDown();
+                }
+            });
+        }
+
+        // Start all threads at once
+        startLatch.countDown();
+        assertTrue(doneLatch.await(5, TimeUnit.SECONDS));
+        executor.shutdown();
+
+        // All threads should get the same instance
+        EObject firstResult = results[0].get();
+        assertNotNull(firstResult);
+        for (int i = 1; i < threadCount; i++) {
+            assertSame(firstResult, results[i].get(),
+                    "Thread " + i + " should get same instance as thread 0");
+        }
+
+        // Supplier should only be called once
+        assertEquals(1, supplierCalls.get(),
+                "Supplier should only be invoked once despite concurrent calls");
+    }
+
+    @Test
+    void testGetOrCreateDifferentKeysProceedInParallel() throws InterruptedException {
+        int threadCount = 4;
+        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch doneLatch = new CountDownLatch(threadCount);
+        AtomicInteger concurrentExecutions = new AtomicInteger(0);
+        AtomicInteger maxConcurrent = new AtomicInteger(0);
+
+        // Create different source elements for each thread
+        EObject[] sources = new EObject[threadCount];
+        for (int i = 0; i < threadCount; i++) {
+            sources[i] = EcoreFactory.eINSTANCE.createEClass();
+            ((EClass) sources[i]).setName("Source" + i);
+        }
+
+        for (int i = 0; i < threadCount; i++) {
+            final int index = i;
+            executor.submit(() -> {
+                try {
+                    startLatch.await();
+                    cache.getOrCreate(sources[index], "Rule1", () -> {
+                        // Track concurrent executions
+                        int current = concurrentExecutions.incrementAndGet();
+                        maxConcurrent.updateAndGet(max -> Math.max(max, current));
+
+                        // Simulate some work
+                        try {
+                            Thread.sleep(50);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+
+                        concurrentExecutions.decrementAndGet();
+                        EObject target = EcoreFactory.eINSTANCE.createEClass();
+                        ((EClass) target).setName("Target" + index);
+                        return target;
+                    }, false);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    doneLatch.countDown();
+                }
+            });
+        }
+
+        startLatch.countDown();
+        assertTrue(doneLatch.await(5, TimeUnit.SECONDS));
+        executor.shutdown();
+
+        // Different keys should execute in parallel (max concurrent > 1)
+        assertTrue(maxConcurrent.get() > 1,
+                "Different keys should execute concurrently, but maxConcurrent=" + maxConcurrent.get());
+    }
+
+    @Test
+    void testGetOrCreateSetsPrimaryFlag() {
+        cache.getOrCreate(sourceElement, "Rule1", () -> targetElement1, true);
+
+        // Verify primary flag was set correctly
+        EClass equivalent = cache.getEquivalent(sourceElement, EClass.class);
+        assertSame(targetElement1, equivalent);
+
+        Collection<ElementResolutionCache.TraceEntry> entries = cache.getAllMappings();
+        assertEquals(1, entries.size());
+        assertTrue(entries.iterator().next().isPrimary());
+    }
+
+    @Test
+    void testGetOrCreateCacheIsClearedProperly() {
+        cache.getOrCreate(sourceElement, "Rule1", () -> targetElement1, false);
+        assertNotNull(cache.getByRule(sourceElement, "Rule1"));
+
+        cache.clear();
+
+        // After clear, cache should be empty and locks cleared
+        assertNull(cache.getByRule(sourceElement, "Rule1"));
+
+        // Should be able to create new entry
+        EObject newResult = cache.getOrCreate(sourceElement, "Rule1", () -> targetElement2, false);
+        assertSame(targetElement2, newResult);
     }
 }

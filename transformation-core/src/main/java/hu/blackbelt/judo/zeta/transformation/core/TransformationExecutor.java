@@ -696,6 +696,7 @@ public class TransformationExecutor {
                 return;
             }
 
+            // Pre-checks that can be done outside the lock (rule metadata, not source-specific state)
             // Skip multi-source rules - they are handled by executeMultiSourceRule()
             if (rule.isMultiSource()) continue;
 
@@ -710,26 +711,28 @@ public class TransformationExecutor {
             // elements that were referenced via equivalent()
             if (isEffectivelyActivityBased(rule)) continue;
 
-            // Check if already transformed (idempotent)
-            EObject cached = context.getElementResolutionCache().getByRule(source, rule.getName());
-            if (cached != null) continue;
-
-            // Check guard
-            if (!rule.evaluateGuard(source, context)) continue;
-
             // Check if rule applies to this element (type check)
             if (!rule.appliesTo(source)) continue;
 
             // Check if element comes from the correct resource alias
             if (!isFromExpectedAlias(source, rule)) continue;
 
-            // Execute rule and cache result
+            // Atomic get-or-create: lock covers cache check + guard evaluation + rule execution
+            // This prevents race conditions where multiple threads could create duplicate targets
             try {
-                EObject target = rule.execute(source, context);
-                if (target != null) {
-                    context.getElementResolutionCache().addMapping(
-                            source, rule.getName(), target, rule.isPrimary());
-                }
+                context.getElementResolutionCache().getOrCreate(
+                        source,
+                        rule.getName(),
+                        () -> {
+                            // Guard evaluation inside the lock to prevent race conditions
+                            if (!rule.evaluateGuard(source, context)) {
+                                return null;  // Guard rejected - don't execute
+                            }
+                            // Rule execution inside the lock
+                            return rule.execute(source, context);
+                        },
+                        rule.isPrimary()
+                );
             } catch (Exception e) {
                 log.error("Error executing rule '{}' on {}: {}",
                         rule.getName(), source, e.getMessage(), e);
