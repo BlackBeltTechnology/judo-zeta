@@ -841,3 +841,442 @@ Option B Migration for judo-tatami-base:
 - EMF Thread-Safety: [EMF FAQ](https://wiki.eclipse.org/EMF/FAQ#Is_EMF_thread-safe.3F)
 - Previous parallel proposal: `openspec/changes/archive/2025-12-08-parallelize-transformation-execution/`
 - Real transformation example: `judo-tatami-base/.../Asm2RdbmsZetaTransformation.java` (959 lines, 150+ EMF modifications)
+
+---
+
+# Appendix: ESM-to-PSM Parallel Execution Analysis
+
+This appendix documents concrete findings from testing parallel execution in the ESM-to-PSM transformation.
+
+## Current State
+
+| Mode | Status | Performance | Notes |
+|------|--------|-------------|-------|
+| Sequential | ✅ Working | 2,265 ms | 10.72x faster than ETL |
+| Parallel | ❌ Broken | N/A | Element duplication, NPE |
+
+## Identified Issues
+
+### Issue 1: Element Duplication in Parallel Mode
+
+**Symptom:** Parallel execution creates 4 extra elements (22,138 vs 22,134 expected).
+
+**Root Cause:** Multiple threads executing the same transformation rule for the same source element, each creating a target element before the cache is updated.
+
+**Affected Areas:**
+- `@Greedy` rules that create elements based on related source elements
+- Rules with `@Lazy` annotation that are triggered from multiple call sites
+- Rules that use `ctx.executeParentRule()` concurrently
+
+**Evidence:**
+```
+Element count mismatch between ETL and Zeta ==> expected: <22134> but was: <22138>
+```
+
+### Issue 2: NullPointerException - preparedResult is null
+
+**Symptom:** `Cannot invoke "org.eclipse.emf.ecore.InternalEObject.eDirectResource()" because "this.preparedResult" is null`
+
+**Root Cause:** A thread attempts to access an element that another thread is still creating. The element exists in the cache but its internal EMF state is not yet fully initialized.
+
+**Affected Areas:**
+- Element creation in `TransformationContext.create()` or `createTarget()`
+- EMF resource attachment during parallel containment operations
+- XMI ID assignment during element creation
+
+### Issue 3: EMF Collection Concurrent Modification
+
+**Symptom:** `ArrayIndexOutOfBoundsException` or `ConcurrentModificationException` in EMF EList operations.
+
+**Root Cause:** EMF ELists are not thread-safe. Multiple threads adding elements to the same containment reference causes corruption.
+
+**Current Mitigation:** `TransformationHelper.synchronizedAdd()` and related methods provide synchronized access.
+
+**Status:** ✅ Fixed in transformation rules, but Zeta framework may have internal unsynchronized operations.
+
+---
+
+## Required Fixes
+
+### 1. Zeta Framework: Thread-Safe Element Resolution Cache
+
+**Location:** `hu.blackbelt.judo.zeta.transformation.core.ElementResolutionCache`
+
+**Requirements:**
+
+1.1. **Atomic get-or-create operation:**
+```java
+/**
+ * Atomically get existing element or create new one.
+ * Prevents duplicate creation when multiple threads request the same element.
+ */
+<T> T getOrCreate(EObject source, String ruleName, Supplier<T> creator);
+```
+
+1.2. **Thread-safe cache operations:**
+- Use `ConcurrentHashMap` for all internal maps
+- Use `computeIfAbsent()` for atomic insertion
+- Ensure visibility of cached elements across threads
+
+1.3. **Cache key must include rule name:**
+- Key: `(sourceElement, ruleName)` tuple
+- Prevents cache pollution between rules producing different target types
+
+**Example Implementation:**
+```java
+public class ElementResolutionCache {
+    private final ConcurrentHashMap<CacheKey, EObject> cache = new ConcurrentHashMap<>();
+
+    public <T extends EObject> T getOrCreate(EObject source, String ruleName, Supplier<T> creator) {
+        CacheKey key = new CacheKey(source, ruleName);
+        return (T) cache.computeIfAbsent(key, k -> {
+            T result = creator.get();
+            // Ensure element is fully initialized before returning
+            return result;
+        });
+    }
+
+    private static class CacheKey {
+        final EObject source;
+        final String ruleName;
+        // equals() and hashCode() based on both fields
+    }
+}
+```
+
+### 2. Zeta Framework: Thread-Safe Rule Execution
+
+**Location:** `hu.blackbelt.judo.zeta.transformation.core.TransformationExecutor`
+
+**Requirements:**
+
+2.1. **Rule execution locking per source element:**
+```java
+/**
+ * Execute rule with per-element locking to prevent duplicate execution.
+ */
+<T> T executeRule(String ruleName, EObject source, Function<EObject, T> ruleFunction);
+```
+
+2.2. **Lock granularity:**
+- Lock per `(sourceElement, ruleName)` pair, not globally
+- Use `ReentrantLock` or `StampedLock` for each source element
+- Release lock after element is fully created and cached
+
+2.3. **Prevent re-entrant duplicate creation:**
+- If thread A is creating element for source S, thread B requesting same element should wait
+- After thread A completes, thread B gets cached result
+
+**Example Implementation:**
+```java
+public class TransformationExecutor {
+    private final ConcurrentHashMap<CacheKey, ReentrantLock> locks = new ConcurrentHashMap<>();
+
+    public <T> T executeRule(String ruleName, EObject source, Function<EObject, T> ruleFunction) {
+        CacheKey key = new CacheKey(source, ruleName);
+
+        // Check cache first (fast path)
+        T cached = cache.get(key);
+        if (cached != null) {
+            return cached;
+        }
+
+        // Acquire lock for this specific (source, rule) pair
+        ReentrantLock lock = locks.computeIfAbsent(key, k -> new ReentrantLock());
+        lock.lock();
+        try {
+            // Double-check after acquiring lock
+            cached = cache.get(key);
+            if (cached != null) {
+                return cached;
+            }
+
+            // Execute rule and cache result
+            T result = ruleFunction.apply(source);
+            cache.put(key, result);
+            return result;
+        } finally {
+            lock.unlock();
+        }
+    }
+}
+```
+
+### 3. Zeta Framework: Thread-Safe EMF Operations
+
+**Location:** `hu.blackbelt.judo.zeta.transformation.core.TransformationContext`
+
+**Requirements:**
+
+3.1. **Synchronized element creation:**
+```java
+/**
+ * Create element with guaranteed resource attachment.
+ * Element must be fully initialized before returning.
+ */
+<T extends EObject> T create(Class<T> type);
+```
+
+3.2. **Atomic containment operations:**
+- Adding element to containment reference must be atomic
+- Parent's resource must be set before child operations
+- XMI ID must be set after resource attachment
+
+3.3. **Memory barriers:**
+- Use `volatile` or synchronized blocks to ensure visibility
+- Ensure `eResource()` is non-null before element is cached
+
+**Example Implementation:**
+```java
+public <T extends EObject> T create(Class<T> type) {
+    T element = factory.create(type);
+
+    // Ensure element is in a consistent state
+    synchronized (element) {
+        // Initialize any required internal state
+        initializeElement(element);
+    }
+
+    return element;
+}
+
+public void addToContainment(EObject parent, EStructuralFeature feature, EObject child) {
+    synchronized (parent) {
+        EList<EObject> list = (EList<EObject>) parent.eGet(feature);
+        synchronized (list) {
+            list.add(child);
+        }
+    }
+
+    // Set XMI ID after containment (element now has resource)
+    setXmiId(child);
+}
+```
+
+### 4. Transformation Rules: Thread-Safe Helpers
+
+**Location:** `hu.blackbelt.judo.tatami.esm2psm.zeta.extensions.TransformationHelper`
+
+**Current State:** ✅ Already implemented synchronized helpers
+
+**Requirements (already met):**
+
+4.1. `synchronizedAdd(EList, element)` - Thread-safe list addition
+4.2. `addToNamespace(Namespace, element)` - Synchronized namespace operations
+4.3. `addToPackage(Package, element)` - Synchronized package operations
+
+**Additional Requirements:**
+
+4.4. **Synchronized XMI ID operations:**
+```java
+public static void setXmiId(EObject element, String id) {
+    Resource resource = element.eResource();
+    if (resource instanceof XMLResource) {
+        synchronized (resource) {
+            ((XMLResource) resource).setID(element, id);
+        }
+    }
+}
+```
+
+### 5. Transformation Rules: Idempotent Rule Design
+
+**Location:** All rule classes in `hu.blackbelt.judo.tatami.esm2psm.zeta.rules`
+
+**Requirements:**
+
+5.1. **Rules must be idempotent:**
+- Calling a rule twice for the same source must return the same target
+- Rules must check cache before creating new elements
+- Use `ctx.getOrCreate()` pattern instead of direct creation
+
+5.2. **Pattern for idempotent rules:**
+```java
+@TransformRule(name = "CreateEntityType")
+public TransformFunction<EntityType, hu.blackbelt.judo.meta.psm.data.EntityType> createEntityType() {
+    return (source, ctx) -> {
+        // Framework should handle caching - rule just creates
+        // If rule is called, it means cache miss, so create new element
+        var target = ctx.create(hu.blackbelt.judo.meta.psm.data.EntityType.class);
+        // ... set properties ...
+        return target;
+    };
+}
+```
+
+5.3. **Avoid side effects in guards:**
+- Guard methods must be pure functions
+- Guards must not modify state or create elements
+- Guards must be thread-safe (no shared mutable state)
+
+### 6. Post-Processor: Thread-Safe Inheritance Copying
+
+**Location:** `hu.blackbelt.judo.tatami.esm2psm.zeta.Esm2PsmPostProcessor`
+
+**Requirements:**
+
+6.1. **Sequential post-processing is acceptable:**
+- Post-processing runs after main transformation
+- Currently takes ~40ms, optimization not critical
+- Can remain sequential for simplicity
+
+6.2. **If parallelized, needs:**
+- Synchronized access to target TO's collections
+- Copy operations must be atomic
+- Avoid modifying element while another thread reads it
+
+---
+
+## Testing Requirements
+
+### Test 1: Element Count Equivalence
+
+```java
+@Test
+void parallelModeProducesSameElementCount() {
+    // Run sequential
+    PsmModel sequentialResult = runTransformation(parallel=false);
+    int sequentialCount = countElements(sequentialResult);
+
+    // Run parallel
+    PsmModel parallelResult = runTransformation(parallel=true);
+    int parallelCount = countElements(parallelResult);
+
+    assertEquals(sequentialCount, parallelCount);
+}
+```
+
+### Test 2: Structural Equivalence
+
+```java
+@Test
+void parallelModeProducesStructurallyEquivalentModel() {
+    PsmModel sequentialResult = runTransformation(parallel=false);
+    PsmModel parallelResult = runTransformation(parallel=true);
+
+    ComparisonResult result = ModelComparator.compare(
+        sequentialResult, parallelResult, ComparisonMode.STRUCTURAL);
+
+    assertTrue(result.isEquivalent());
+}
+```
+
+### Test 3: Deterministic Output
+
+```java
+@Test
+void parallelModeIsDeterministic() {
+    // Run parallel multiple times
+    List<PsmModel> results = IntStream.range(0, 10)
+        .mapToObj(i -> runTransformation(parallel=true))
+        .collect(toList());
+
+    // All results should be structurally equivalent
+    PsmModel reference = results.get(0);
+    for (PsmModel result : results) {
+        assertTrue(ModelComparator.compare(reference, result).isEquivalent());
+    }
+}
+```
+
+### Test 4: No Duplicate Elements
+
+```java
+@Test
+void parallelModeCreatesNoDuplicates() {
+    PsmModel result = runTransformation(parallel=true);
+
+    // Check for duplicate named elements in same namespace
+    Map<String, List<NamedElement>> byName = new HashMap<>();
+    result.getResource().getAllContents().forEachRemaining(obj -> {
+        if (obj instanceof NamedElement) {
+            NamedElement ne = (NamedElement) obj;
+            String key = getFullPath(ne);
+            byName.computeIfAbsent(key, k -> new ArrayList<>()).add(ne);
+        }
+    });
+
+    byName.forEach((path, elements) -> {
+        assertEquals(1, elements.size(), "Duplicate element at: " + path);
+    });
+}
+```
+
+### Test 5: Stress Test
+
+```java
+@Test
+void parallelModeHandlesHighConcurrency() {
+    // Use large model (10,000+ elements)
+    EsmModel largeModel = RealisticModelGenerator.scaled(10000);
+
+    // Run with high parallelism
+    PsmModel result = runTransformation(largeModel, parallel=true, threads=16);
+
+    // Verify correctness
+    assertNoExceptions();
+    assertCorrectElementCount(result);
+}
+```
+
+---
+
+## Implementation Priority
+
+| Priority | Component | Effort | Impact |
+|----------|-----------|--------|--------|
+| 1 | Thread-safe cache (get-or-create) | Medium | High - Prevents duplicates |
+| 2 | Per-element rule locking | Medium | High - Prevents race conditions |
+| 3 | Synchronized EMF operations | Low | Medium - Prevents NPE |
+| 4 | Transformation rule updates | Low | Low - Mostly done |
+| 5 | Post-processor parallelization | Low | Low - Already fast |
+
+## Success Criteria
+
+1. **Correctness:** Parallel mode produces 100% structurally equivalent output to sequential mode
+2. **No duplicates:** Element count matches exactly between modes
+3. **No exceptions:** No NPE, ArrayIndexOutOfBounds, or ConcurrentModificationException
+4. **Deterministic:** Multiple parallel runs produce identical results
+5. **Performance:** Parallel mode is at least 2x faster than sequential on multi-core systems
+
+---
+
+## Current Workarounds
+
+### Workaround 1: Sequential Mode (Current)
+
+```java
+executeEsm2PsmTransformation(esm2PsmParameter()
+    .esmModel(esmModel)
+    .psmModel(psmModel)
+    .parallel(false)  // Use sequential mode
+    .transformationMode(TransformationMode.ZETA));
+```
+
+**Pros:** Works correctly, 10x faster than ETL
+**Cons:** Doesn't utilize multiple cores
+
+### Workaround 2: ctx.create() instead of ctx.createTarget()
+
+**Location:** `TransformationHelper.createForNamespaceElement()`
+
+```java
+// Use create() to avoid cache pollution from type hierarchy
+T target = ctx.create(targetType);  // NOT ctx.createTarget()
+```
+
+**Status:** ✅ Implemented - Prevents MappedActorType/MappedTransferObjectType cache pollution
+
+### Workaround 3: Synchronized Collection Operations
+
+**Location:** `TransformationHelper`
+
+```java
+public static void addToNamespace(Namespace ns, NamespaceElement element) {
+    synchronized (ns.getElements()) {
+        ns.getElements().add(element);
+    }
+}
+```
+
+**Status:** ✅ Implemented - Prevents EMF collection corruption
