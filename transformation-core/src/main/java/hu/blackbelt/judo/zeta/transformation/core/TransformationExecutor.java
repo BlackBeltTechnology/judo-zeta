@@ -301,6 +301,8 @@ public class TransformationExecutor {
         context.clearPendingXmiIds();
         context.clearExecutingLazyRules();
         context.getActivationTracker().clear();
+        // Clear per-rule guard rejection caches (ETL-compatible)
+        registry.clearAllRejectedSets();
         // Propagate ETL compatibility mode to context for equivalent() calls
         context.setEtlCompatibilityMode(etlCompatibilityMode);
     }

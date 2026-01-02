@@ -295,6 +295,18 @@ public class TransformationRegistry {
     }
 
     /**
+     * Clear all rules' rejected element caches.
+     *
+     * <p>Called during executor reset to ensure fresh state for reused executors.
+     * Each rule maintains its own rejected set for ETL-compatible guard caching.</p>
+     */
+    public void clearAllRejectedSets() {
+        for (TransformRuleDescriptor rule : getAllRules()) {
+            rule.clearRejected();
+        }
+    }
+
+    /**
      * Invoke all pre-transformation hooks.
      */
     public void invokePreTransformationHooks(TransformationContext ctx) {
