@@ -601,6 +601,15 @@ public class TransformRuleDescriptor {
         try {
             // Check if this rule extends parent rules
             if (!extendsRules.isEmpty() && context.getTransformationRegistry() != null) {
+                // ETL Semantics: ALL parent guards must pass before child executes
+                // "the element must also satisfy the guard of the rule (and all the rules it extends)"
+                TransformationRegistry registry = context.getTransformationRegistry();
+                for (String parentRuleName : extendsRules) {
+                    TransformRuleDescriptor parentRule = registry.getRuleByName(parentRuleName);
+                    if (parentRule != null && !parentRule.evaluateGuard(source, context)) {
+                        return null;  // Parent guard rejected - abort entire chain
+                    }
+                }
                 return executeWithInheritance(source, context);
             }
 

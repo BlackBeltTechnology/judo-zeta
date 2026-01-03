@@ -1578,6 +1578,12 @@ public class TransformationContext {
             throw new IllegalArgumentException("Parent rule not found: " + parentRuleName);
         }
 
+        // ETL Semantics: Check parent's guard before execution
+        // "the element must also satisfy the guard of the rule (and all the rules it extends)"
+        if (!parentRule.evaluateGuard(source, this)) {
+            return null;  // Parent guard rejected
+        }
+
         // Save current inheritance state to restore later
         // ThreadLocal is per-thread, so this is safe to do outside the lock
         boolean wasInInheritance = isInInheritanceExecution();

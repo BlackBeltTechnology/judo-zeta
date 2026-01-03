@@ -1,7 +1,7 @@
 # Proposal: Fix @Extends Guard Bypass
 
 **Change ID:** fix-extends-guard-bypass
-**Status:** Proposed
+**Status:** Applied
 **Created:** 2026-01-03
 **Updated:** 2026-01-03
 
