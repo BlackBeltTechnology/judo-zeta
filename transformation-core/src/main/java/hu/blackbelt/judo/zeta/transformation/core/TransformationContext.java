@@ -80,6 +80,12 @@ public class TransformationContext {
     private final Map<String, ResourceSet> resourceRegistry = new ConcurrentHashMap<>();
 
     /**
+     * Reverse index for O(1) ResourceSet → alias lookup.
+     * Populated when resources are registered.
+     */
+    private final Map<ResourceSet, String> resourceSetToAlias = new ConcurrentHashMap<>();
+
+    /**
      * Preferred alias for the source ResourceSet.
      * When set, getResourceAlias() returns this alias for elements from the source ResourceSet.
      * This allows transformations to use a custom alias like "esm" instead of "source".
@@ -202,6 +208,12 @@ public class TransformationContext {
      * When true, IDs are: ElementName/(alias/sourceId)/RuleName
      */
     private volatile boolean includeElementNameInStructuredIds = false;
+
+    /**
+     * Cache for structured ID generation to avoid repeated string building.
+     * Key is (source identity hash, ruleName), value is the generated ID.
+     */
+    private final Map<Long, String> structuredIdCache = new ConcurrentHashMap<>();
 
     /**
      * When true, treat all @Greedy @Lazy rules as activity-based.
@@ -381,6 +393,9 @@ public class TransformationContext {
         // Register default aliases
         resourceRegistry.put("source", sourceResourceSet);
         resourceRegistry.put("target", targetResourceSet);
+        // Populate reverse index for O(1) lookup
+        resourceSetToAlias.put(sourceResourceSet, "source");
+        resourceSetToAlias.put(targetResourceSet, "target");
     }
 
     /**
@@ -1810,6 +1825,8 @@ public class TransformationContext {
             throw new IllegalArgumentException("ResourceSet cannot be null for alias: " + alias);
         }
         resourceRegistry.put(alias, resourceSet);
+        // Populate reverse index for O(1) lookup (first alias wins if same ResourceSet registered twice)
+        resourceSetToAlias.putIfAbsent(resourceSet, alias);
     }
 
     /**
@@ -2400,15 +2417,9 @@ public class TransformationContext {
             }
         }
 
-        // Find the alias for this ResourceSet
-        for (Map.Entry<String, ResourceSet> entry : resourceRegistry.entrySet()) {
-            if (entry.getValue() == elementResourceSet) {
-                return entry.getKey();
-            }
-        }
-
-        // Default to "source" if no matching alias found
-        return "source";
+        // O(1) lookup via reverse index instead of O(n) registry scan
+        String alias = resourceSetToAlias.get(elementResourceSet);
+        return alias != null ? alias : "source";
     }
 
     /**
@@ -2504,6 +2515,28 @@ public class TransformationContext {
             return "_seq" + idSequence.getAndIncrement();
         }
 
+        // Check cache first - use combined hash of source identity and ruleName
+        if (source != null && ruleName != null) {
+            long cacheKey = ((long) System.identityHashCode(source) << 32) | (ruleName.hashCode() & 0xFFFFFFFFL);
+            String cached = structuredIdCache.get(cacheKey);
+            if (cached != null) {
+                return cached;
+            }
+
+            // Generate and cache
+            String id = buildStructuredId(source, ruleName);
+            structuredIdCache.put(cacheKey, id);
+            return id;
+        }
+
+        // Fallback for null source or ruleName (no caching)
+        return buildStructuredId(source, ruleName);
+    }
+
+    /**
+     * Build the structured ID string (internal helper for generateStructuredId).
+     */
+    private String buildStructuredId(EObject source, String ruleName) {
         StringBuilder id = new StringBuilder();
 
         // Add source path
