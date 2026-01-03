@@ -300,6 +300,7 @@ class AbstractTypeInheritanceTest {
             registry.register(AutomaticInheritanceTransformation.class);
             context.setTransformationRegistry(registry);
             context.setUseStructuredIds(true);
+            context.setIncludeElementNameInStructuredIds(true);  // Enable element name in ID for this test
 
             TransformationExecutor executor = TransformationExecutor.builder()
                     .registry(registry)
