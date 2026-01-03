@@ -2,6 +2,8 @@
 
 **Navigation**: [Documentation Hub](../../index.md) > [Transformation](../index.md) > [Examples](simple-transformations.md) > Discriminated Examples
 
+> **Note**: Discriminated equivalence is a **Zeta-specific workaround**, not part of the original Epsilon ETL specification. In ETL, multiple target elements can be created using `to t1, t2, t3` syntax in a single rule. Since Zeta uses a single-source-single-target pattern, discriminators provide an alternative mechanism for creating multiple related target elements from one source.
+
 Examples of creating multiple outputs from a single source using discriminators.
 
 ## CRUD Operations from Relation
