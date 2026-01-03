@@ -4,6 +4,15 @@
 **Status:** In Progress
 **Created:** 2026-01-03
 **Updated:** 2026-01-03
+**Blocked By:** fix-parallel-execution-race-conditions
+
+## Related Proposals
+
+| Proposal | Relationship |
+|----------|--------------|
+| `fix-parallel-execution-race-conditions` | **Blocks this proposal** - Race conditions must be fixed before optimizing performance. Optimizing lock mechanisms before ensuring thread safety could make corruption happen faster or hide bugs with different timing. |
+
+> **Important:** This proposal's lock striping and reduced synchronization optimizations must be revisited after the race conditions fix. Any performance optimization that reduces locking must be validated against the thread safety requirements established by the blocking proposal.
 
 ## Current Performance (After XMI Optimization)
 

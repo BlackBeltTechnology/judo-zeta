@@ -4,6 +4,15 @@
 **Status:** In Progress
 **Created:** 2026-01-03
 **Updated:** 2026-01-03
+**Blocks:** optimize-greedy-rule-performance
+
+## Related Proposals
+
+| Proposal | Relationship |
+|----------|--------------|
+| `optimize-greedy-rule-performance` | **Blocked by this proposal** - Performance optimizations should not proceed until race conditions are fixed. Optimizing before fixing correctness risks making corruption happen faster or hiding bugs with different timing. |
+
+> **Important:** Both proposals involve `getOrCreate()` and locking mechanisms. This proposal adds locking for thread safety, while the performance proposal aims to reduce locking overhead. The performance proposal must be revisited after this fix to ensure optimizations don't reintroduce race conditions.
 
 ## Implementation Progress
 
