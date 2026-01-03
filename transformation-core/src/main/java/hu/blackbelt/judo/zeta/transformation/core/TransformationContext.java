@@ -948,6 +948,7 @@ public class TransformationContext {
 
         if (stagingEnabled.get()) {
             // Parallel mode: stage for later commit with ordering
+            // The commit phase will check eContainer() == null before adding
             long sequence = creationSequence.getAndIncrement();
             elementOrder.put(unwrapped, sequence);
             stagedElements.offer(new StagedElement(unwrapped, true, sequence));
@@ -2047,6 +2048,41 @@ public class TransformationContext {
      */
     void clearStagedElements() {
         stagedElements.clear();
+    }
+
+    /**
+     * Remove contained elements from Resource.contents.
+     *
+     * <p>In sequential mode with autoAddRootElements=true, elements are added to
+     * Resource.contents immediately when created via createTarget(). However, when these
+     * elements are later added to containment references (e.g., pkg.getEClassifiers().add(cls)),
+     * EMF does NOT automatically remove them from Resource.contents.</p>
+     *
+     * <p>This method performs a cleanup phase to remove any elements from Resource.contents
+     * that have been added to containment (i.e., have eContainer != null).</p>
+     *
+     * <p>This is the sequential mode equivalent of the parallel mode commit phase check:
+     * <code>if (element.isRootElement && obj.eContainer() == null)</code></p>
+     *
+     * @see #commitStagedElements() for parallel mode behavior
+     */
+    void cleanupContainedRootElements() {
+        if (targetResourceSet.getResources().isEmpty()) {
+            return;
+        }
+
+        Resource targetResource = targetResourceSet.getResources().get(0);
+
+        // Collect elements to remove (avoid ConcurrentModificationException)
+        List<EObject> toRemove = new ArrayList<>();
+        for (EObject obj : targetResource.getContents()) {
+            if (obj.eContainer() != null) {
+                toRemove.add(obj);
+            }
+        }
+
+        // Remove contained elements from root
+        targetResource.getContents().removeAll(toRemove);
     }
 
     /**

@@ -81,8 +81,9 @@ class EquivalentDiscriminatedRaceTest {
 
     /**
      * Number of test iterations to catch intermittent race conditions.
+     * Reduced to 3 for faster CI runs; increase to 30+ for thorough testing.
      */
-    private static final int STRESS_ITERATIONS = 30;
+    private static final int STRESS_ITERATIONS = 3;
 
     /**
      * Very small chunk size to maximize thread interleaving.

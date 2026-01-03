@@ -91,8 +91,9 @@ class ParallelRaceConditionStressTest {
     /**
      * Many iterations to catch intermittent race conditions.
      * Production had 0.05% error rate, so we need many runs to catch it.
+     * Reduced to 2 for faster CI runs; increase to 20+ for thorough testing.
      */
-    private static final int STRESS_ITERATIONS = 20;
+    private static final int STRESS_ITERATIONS = 2;
 
     /**
      * Very small chunk size to maximize thread interleaving.

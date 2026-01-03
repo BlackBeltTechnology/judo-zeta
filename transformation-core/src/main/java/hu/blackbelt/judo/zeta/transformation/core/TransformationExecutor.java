@@ -429,8 +429,18 @@ public class TransformationExecutor {
                 transformWithStaging(singleSourceElements);
             } else {
                 transformSequential(singleSourceElements);
+
+                // Cleanup contained elements from Resource.contents when autoAddRootElements is enabled.
+                // In sequential mode, createTarget() with autoAddRootElements adds elements directly
+                // to Resource.contents. When elements are later added to containment references,
+                // EMF does NOT automatically remove them from Resource.contents. This cleanup phase
+                // removes any elements that have been added to containment (eContainer != null),
+                // mirroring the parallel mode commit phase check.
+                if (context.isAutoAddRootElements()) {
+                    context.cleanupContainedRootElements();
+                }
             }
-            
+
             // Process multi-source rules with Cartesian product
             for (TransformRuleDescriptor rule : multiSourceRules) {
                 if (firstError.get() != null) {
@@ -500,6 +510,16 @@ public class TransformationExecutor {
                 transformWithStaging(sourceElements);
             } else {
                 transformSequential(sourceElements);
+
+                // Cleanup contained elements from Resource.contents when autoAddRootElements is enabled.
+                // In sequential mode, createTarget() with autoAddRootElements adds elements directly
+                // to Resource.contents. When elements are later added to containment references,
+                // EMF does NOT automatically remove them from Resource.contents. This cleanup phase
+                // removes any elements that have been added to containment (eContainer != null),
+                // mirroring the parallel mode commit phase check.
+                if (context.isAutoAddRootElements()) {
+                    context.cleanupContainedRootElements();
+                }
             }
 
             // Phase 2: Execute activity-based rules for activated elements only

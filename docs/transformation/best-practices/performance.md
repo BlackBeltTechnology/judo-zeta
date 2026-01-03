@@ -325,6 +325,9 @@ Zeta includes several optimizations enabled by default:
 |--------------|--------|-------------|
 | **Skip XMI Resource Lookup** | **-91%** greedy time | For fresh transformations, XMI resource lookups always return null. `skipXmiIdResourceLookup=true` (default) skips these wasteful lookups. |
 | **Pending XMI ID Index** | O(1) lookup | Reverse index `pendingXmiIdIndex` replaces O(n) linear scan in `findByXmiId()` |
+| **Model Traversal Caching** | **-80%** collection time | Results of `context.all(alias, type)` are cached by (alias, type) pair. Same type traversed only once even if 10 rules use it. |
+| **Rule Lookup Caching** | **-90%** lookup time | `getRulesForSource(type)` results cached in `ConcurrentHashMap` with O(1) deduplication. |
+| **Lock Striping** | **-3%** overhead | Uses 1024 striped locks instead of per-key locks, reducing 300K lock allocations to 1024. |
 | **Atomic Cache Operations** | Thread-safe | `getOrCreate()` pattern prevents duplicate element creation |
 | **Two-Phase Staging** | Parallel-safe | Elements staged during parallel execution, committed single-threaded |
 

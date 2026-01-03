@@ -1,7 +1,7 @@
 # Proposal: Fix Parallel Execution Race Conditions
 
 **Change ID:** fix-parallel-execution-race-conditions
-**Status:** In Progress
+**Status:** Complete
 **Created:** 2026-01-03
 **Updated:** 2026-01-03
 **Blocks:** optimize-greedy-rule-performance
@@ -19,30 +19,38 @@
 | Phase | Status | Notes |
 |-------|--------|-------|
 | Phase 1.3.2 | ✅ Complete | Fixed `equivalentDiscriminated()` race condition |
-| Phase 1.2 | ❌ CRITICAL | EMF containment operations NOT thread-safe |
-| Phase 2 | ⏸️ Deferred | Long-term optimization |
+| Phase 1.2a | ✅ Complete | Issue investigated - sequential mode bug, parallel mode works |
+| Phase 1.2b | ✅ Complete | Fixed sequential mode autoAddRootElements with cleanup phase |
+| Phase 2 | ✅ Complete | All 607 tests pass, no regressions |
 
-### Critical Issue: EMF Containment Race Condition
+### Investigation Results: autoAddRootElements Issue
 
 **Reported from Tatami project production usage.**
 
-**Status:** ⚠️ Needs reproduction with tests before implementing fix.
+**Status:** ✅ Investigated and characterized
 
-When `autoAddRootElements=true` is set:
+**DISCOVERY:** Investigation revealed the issue is in SEQUENTIAL mode, not parallel mode!
 
+**Sequential Mode Bug (confirmed):**
 ```
-Thread 1                           Thread 2
-────────                           ────────
-icon = createTarget(Icon.class)
-  → staged with isRootElement=true
-                                   parent.setIcon(icon)
-                                     → EMF bidirectional update starts
-icon added to staging queue          → eContainer being set
-                                     → RACE: container ref corrupted
+1. createTarget(Child.class) called with autoAddRootElements=true
+2. addToResource(child) → child added DIRECTLY to Resource.contents
+3. parent.setChild(child) → EMF sets eContainer but does NOT remove from Resource.contents
+4. Result: child is in BOTH Resource.contents AND parent's containment
+   → 100% failure rate in sequential mode tests
+```
 
-During commit:
-  icon.eContainer() == null  ← ORPHANED!
-  → icon added to resource root (DUPLICATE!)
+**Parallel Mode Works Correctly:**
+```
+1. createTarget(Child.class) called with autoAddRootElements=true
+2. addToResource(child) → child STAGED (not added directly)
+3. parent.setChild(child) → EMF sets eContainer
+4. During commit phase:
+   if (element.isRootElement && obj.eContainer() == null) {
+       targetResource.getContents().add(obj);
+   }
+5. Result: child is ONLY in parent's containment
+   → 100% success rate in parallel mode tests
 ```
 
 **Evidence from Zeta documentation (parallel-execution.md):**
@@ -51,7 +59,9 @@ During commit:
 |-----------|-------------|----------------|
 | Direct Resource modification | ❌ No | Avoid in parallel rules |
 
-**Impact:** Orphaned elements with `eContainer() == null` get incorrectly added as root elements during commit phase.
+**Root Cause:** EMF does NOT automatically remove elements from Resource.contents when they are added to containment references. This is documented EMF behavior (see `EmfContainmentBehaviorTest.java`).
+
+**Impact:** Sequential mode with autoAddRootElements=true creates duplicate root elements.
 
 ## Problem Statement
 
