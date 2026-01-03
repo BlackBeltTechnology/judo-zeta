@@ -1,6 +1,6 @@
 # Thread Safety Specification Delta
 
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: Rule execution MUST use unified locking across all API methods
 

@@ -1,9 +1,19 @@
 # Proposal: Unify Rule Execution Locking
 
 **Change ID:** unify-rule-execution-locking
-**Status:** Proposed
+**Status:** Implemented
 **Created:** 2026-01-03
 **Updated:** 2026-01-03
+
+## Why
+
+Race condition exists when the same (source, ruleName) pair is accessed through different API methods (`equivalent()` vs `executeParentRule()`) concurrently. Each method uses a different locking mechanism that doesn't synchronize with the other, causing duplicate rule executions and potential cache corruption.
+
+## What Changes
+
+- `TransformationContext.executeParentRule()` now uses the same `ruleLocks` mechanism as `equivalent()` instead of `resolutionCache.getOrCreate()`
+- Added fast path checks against `executingLazyRules` cache
+- Added `DualLockingRaceConditionTest` to verify the fix
 
 ## Problem Statement
 
