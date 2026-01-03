@@ -1573,7 +1573,13 @@ public class TransformationContext {
      *   <li>Parent rules that have abstract target types (cannot be instantiated)</li>
      *   <li>Cases where the child needs to control the concrete type</li>
      *   <li>Legacy code migration where rules were designed differently</li>
+     *   <li>Direct lazy rule invocation from helper methods</li>
      * </ul>
+     *
+     * <p><b>Note on Guards:</b> This method does NOT evaluate the parent rule's guard.
+     * For automatic {@code @Extends} inheritance chains, guard evaluation happens in
+     * {@code TransformRuleDescriptor.execute()} before the chain executes. For direct
+     * invocations via this method, the caller is responsible for checking guards if needed.</p>
      *
      * <p>Example:</p>
      * <pre>{@code
@@ -1610,11 +1616,10 @@ public class TransformationContext {
             throw new IllegalArgumentException("Parent rule not found: " + parentRuleName);
         }
 
-        // ETL Semantics: Check parent's guard before execution
-        // "the element must also satisfy the guard of the rule (and all the rules it extends)"
-        if (!parentRule.evaluateGuard(source, this)) {
-            return null;  // Parent guard rejected
-        }
+        // NOTE: Guards are NOT checked here. For @Extends inheritance chains,
+        // guard evaluation happens in TransformRuleDescriptor.execute() before
+        // executeWithInheritance() is called. This method is for direct rule
+        // invocation where the caller controls guard evaluation.
 
         // Save current inheritance state to restore later
         // ThreadLocal is per-thread, so this is safe to do outside the lock
