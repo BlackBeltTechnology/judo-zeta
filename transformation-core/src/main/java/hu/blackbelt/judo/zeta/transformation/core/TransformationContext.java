@@ -1063,9 +1063,25 @@ public class TransformationContext {
 
                             // Acquire per-element lock for thread-safe execution
                             // Uses computeIfAbsent for atomic lock creation
+                            // IMPORTANT: Use tryLock with timeout to prevent deadlocks from
+                            // circular dependencies (e.g., RuleA calls equivalent(B) while
+                            // RuleB calls equivalent(A) from different threads)
                             long lockStartNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
                             ReentrantLock lock = ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
-                            lock.lock();
+                            boolean lockAcquired;
+                            try {
+                                // 30 second timeout to detect deadlocks
+                                lockAcquired = lock.tryLock(30, java.util.concurrent.TimeUnit.SECONDS);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                                throw new RuntimeException("Interrupted while waiting for lock on " + key, e);
+                            }
+                            if (!lockAcquired) {
+                                throw new RuntimeException(
+                                    "Potential deadlock detected: timeout waiting for lock on equivalent(" +
+                                    source.eClass().getName() + ", " + rule.getName() + "). " +
+                                    "This may indicate circular rule dependencies.");
+                            }
                             if (TransformationMetrics.isEnabled()) {
                                 TransformationMetrics.addLockWaitNanos(System.nanoTime() - lockStartNanos);
                             }
@@ -1438,9 +1454,24 @@ public class TransformationContext {
             DiscriminatedCacheKey discKey = new DiscriminatedCacheKey(source, ruleName, discriminator);
 
             // Acquire per-key lock for thread-safe clone creation
+            // IMPORTANT: Use tryLock with timeout to prevent deadlocks from
+            // circular dependencies (e.g., RuleA clones B while RuleB clones A)
             long lockStartNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
             ReentrantLock lock = discriminatedLocks.computeIfAbsent(discKey, k -> new ReentrantLock());
-            lock.lock();
+            boolean lockAcquired;
+            try {
+                // 30 second timeout to detect deadlocks
+                lockAcquired = lock.tryLock(30, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Interrupted while waiting for discriminated lock on " + discKey, e);
+            }
+            if (!lockAcquired) {
+                throw new RuntimeException(
+                    "Potential deadlock detected: timeout waiting for lock on equivalentDiscriminated(" +
+                    source.eClass().getName() + ", " + ruleName + ", discriminator=" + discriminator + "). " +
+                    "This may indicate circular rule dependencies.");
+            }
             if (TransformationMetrics.isEnabled()) {
                 TransformationMetrics.addLockWaitNanos(System.nanoTime() - lockStartNanos);
             }
