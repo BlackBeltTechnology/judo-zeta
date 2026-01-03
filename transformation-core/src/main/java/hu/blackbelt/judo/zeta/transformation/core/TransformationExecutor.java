@@ -79,6 +79,17 @@ public class TransformationExecutor {
     private final AtomicReference<Throwable> firstError = new AtomicReference<>();
 
     /**
+     * Cache for model traversal results during element collection.
+     * Maps alias -> type -> elements.
+     * Cleared at end of each transformation to prevent memory leaks.
+     *
+     * <p>This optimization reduces O(r × n) element collection to O(unique_types × n)
+     * where r = number of rules and n = model size. If 10 rules share the same
+     * (alias, type), the model is traversed once instead of 10 times.</p>
+     */
+    private Map<String, Map<Class<?>, Collection<EObject>>> elementsByAliasAndType;
+
+    /**
      * Create executor with default settings.
      *
      * @deprecated Use {@link Builder} instead for better configuration control.
@@ -310,6 +321,40 @@ public class TransformationExecutor {
     }
 
     /**
+     * Initialize the element collection cache.
+     * Called at the start of transform() before element collection.
+     */
+    private void initElementCache() {
+        elementsByAliasAndType = new HashMap<>();
+    }
+
+    /**
+     * Clear the element collection cache.
+     * Called at the end of transform() to prevent memory leaks.
+     */
+    private void clearElementCache() {
+        elementsByAliasAndType = null;
+    }
+
+    /**
+     * Get elements from the cache, populating on first access for each (alias, type) pair.
+     *
+     * <p>Uses computeIfAbsent for lazy population - only traverses the model once
+     * per unique (alias, type) pair, regardless of how many rules use that combination.</p>
+     *
+     * @param alias the resource alias
+     * @param type the element type
+     * @param <T> the element type
+     * @return collection of elements (never null)
+     */
+    @SuppressWarnings("unchecked")
+    private <T extends EObject> Collection<T> getCachedElements(String alias, Class<T> type) {
+        return (Collection<T>) elementsByAliasAndType
+                .computeIfAbsent(alias, k -> new HashMap<>())
+                .computeIfAbsent(type, t -> new ArrayList<>(context.all(alias, type)));
+    }
+
+    /**
      * Get or create the executor service for parallel transformation.
      */
     private ExecutorService getOrCreateExecutor() {
@@ -342,6 +387,8 @@ public class TransformationExecutor {
     public TransformationResult transform() {
         // Reset state for reuse
         reset();
+        // Initialize element collection cache
+        initElementCache();
 
         long startTime = System.currentTimeMillis();
 
@@ -351,10 +398,10 @@ public class TransformationExecutor {
         try {
             // Collect single-source elements for single-source rules
             Set<EObject> singleSourceElements = new LinkedHashSet<>();
-            
+
             // Track multi-source rules to process separately
             List<TransformRuleDescriptor> multiSourceRules = new ArrayList<>();
-            
+
             for (TransformRuleDescriptor rule : registry.getAllRules()) {
                 if (rule.isMultiSource()) {
                     // Handle multi-source rules separately with Cartesian product
@@ -362,14 +409,14 @@ public class TransformationExecutor {
                 } else {
                     List<TransformDefinition> transforms = rule.getTransforms();
                     if (!transforms.isEmpty()) {
-                        // Single @Transform annotation - collect from specified alias
+                        // Single @Transform annotation - collect from specified alias (CACHED)
                         TransformDefinition transform = transforms.get(0);
-                        Collection<? extends EObject> elements = context.all(
+                        Collection<? extends EObject> elements = getCachedElements(
                                 transform.getAlias(), transform.getType());
                         singleSourceElements.addAll(elements);
                     } else {
-                        // Backward compatibility: use sourceType with default "source" alias
-                        Collection<? extends EObject> elements = context.all(
+                        // Backward compatibility: use sourceType with default "source" alias (CACHED)
+                        Collection<? extends EObject> elements = getCachedElements(
                                 "source", rule.getSourceType());
                         singleSourceElements.addAll(elements);
                     }
@@ -421,6 +468,9 @@ public class TransformationExecutor {
 
             // Clear caches
             context.clearExtensionCache();
+
+            // Clear element collection cache to prevent memory leaks
+            clearElementCache();
         }
     }
 

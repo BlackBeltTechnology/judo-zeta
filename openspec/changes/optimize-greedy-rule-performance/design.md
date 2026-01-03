@@ -8,86 +8,171 @@
 | Greedy rules | 20,561 ms | 1,759 ms | **-91%** |
 | vs ETL | 1.79x slower | **2.5x faster** | |
 
-> The main bottleneck (XMI resource lookups) was solved. The optimizations below target remaining overhead if profiling reveals it becomes significant.
-
 ## Current Architecture
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                    TransformationExecutor                       │
-│                                                                 │
-│  transform(sourceElements)                                      │
-│    ├─ for each element                        O(n)              │
-│    │    └─ registry.getRulesForSource()       O(r × types)      │
-│    │         └─ for each source type          O(types)          │
-│    │              └─ isAssignableFrom()       O(1)              │
-│    │              └─ ArrayList.contains()     O(rules)          │
-│    │                                                            │
-│    │    └─ for each applicable rule           O(r)              │
-│    │         └─ isMultiSource(), isLazy()...  O(1)              │
-│    │         └─ appliesTo(source)             O(1) or O(name)   │
-│    │         └─ isFromExpectedAlias()         O(aliases)        │
-│    │         └─ evaluateGuard()               O(guard)          │
-│    │         └─ getOrCreate()                 O(1) + lock       │
-│    │                                                            │
-│    Total: O(n × r × types) = O(n × r²) for typical case        │
-└────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────┐
+│                         TransformationExecutor                              │
+│                                                                             │
+│  transform()                                                                │
+│    │                                                                        │
+│    ├─ Phase 0: Element Collection                                          │
+│    │    for each rule:                              O(r) = 50 rules        │
+│    │      elements = context.all(alias, type)       O(n) traversal EACH!   │
+│    │      singleSourceElements.addAll(elements)                             │
+│    │    PROBLEM: Same type traversed multiple times                        │
+│    │                                                                        │
+│    ├─ Phase 1: Eager Rule Execution                                        │
+│    │    for each element:                           O(n) = 10,000          │
+│    │      rules = registry.getRulesForSource()      O(1) [CACHED]          │
+│    │      for each rule:                            O(r) = 30              │
+│    │        if (isMultiSource) continue;            ─┐                     │
+│    │        if (isLazy) continue;                    │ 4 checks            │
+│    │        if (isAbstract) continue;                │                     │
+│    │        if (isActivityBased) continue;          ─┘                     │
+│    │        if (!appliesTo) continue;                                      │
+│    │        if (!isFromExpectedAlias) continue;                            │
+│    │        cache.getOrCreate()                     LOCK per (src,rule)    │
+│    │                                                                        │
+│    └─ Phase 2: Activity-Based Rules                                        │
+│                                                                             │
+│  Total: O(r × n) collection + O(n × r) execution                           │
+└────────────────────────────────────────────────────────────────────────────┘
 ```
-
-**Bottleneck Breakdown:**
-| Operation | Frequency | Cost | Total Impact |
-|-----------|-----------|------|--------------|
-| getRulesForSource() | n elements | O(types × rules) | **HIGH** |
-| isAssignableFrom() | n × types | O(1) but JVM call | MEDIUM |
-| ArrayList.contains() | n × types × rules | O(rules) | MEDIUM |
-| appliesTo() | n × rules | O(1) or O(name) | LOW-MEDIUM |
-| isFromExpectedAlias() | n × rules | O(aliases) | LOW |
 
 ## Optimized Architecture
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                    TransformationRegistry                       │
-│                                                                 │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │ Pre-computed caches (populated during registration)     │   │
-│  │                                                          │   │
-│  │  rulesBySourceTypeCache: Map<Class, List<Rule>>         │   │
-│  │  eagerGreedyRules: List<Rule>                           │   │
-│  │  eagerNonGreedyRules: List<Rule>                        │   │
-│  │  nonGreedyRulesByTypeName: Map<String, List<Rule>>      │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                                                                 │
-│  getRulesForSource(type)                                        │
-│    └─ cache.computeIfAbsent(type, compute)    O(1) amortized   │
-│                                                                 │
-│  getEagerGreedyRules()                        O(1)             │
-│    └─ return pre-computed list                                  │
-└────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────┐
+│                         TransformationExecutor                              │
+│                                                                             │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │ NEW: Element Collection Cache                                         │  │
+│  │                                                                        │  │
+│  │  elementsByAliasAndType: Map<alias, Map<type, Collection<EObject>>>   │  │
+│  │                                                                        │  │
+│  │  getCachedElements(alias, type):                                       │  │
+│  │    return cache.computeIfAbsent(alias, _)                              │  │
+│  │                  .computeIfAbsent(type, _ -> context.all(alias,type)) │  │
+│  │                                                                        │  │
+│  │  BENEFIT: Each unique (alias, type) traversed only ONCE               │  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+│  transform()                                                                │
+│    │                                                                        │
+│    ├─ Phase 0: Element Collection [OPTIMIZED]                              │
+│    │    for each rule:                              O(r)                   │
+│    │      elements = getCachedElements(alias, type) O(1) after first!     │
+│    │      singleSourceElements.addAll(elements)                            │
+│    │    TOTAL: O(unique_types × n) instead of O(r × n)                    │
+│    │                                                                        │
+│    ├─ Phase 1: Eager Rule Execution                                        │
+│    │    for each element:                           O(n)                   │
+│    │      rules = registry.getRulesForSource()      O(1) [CACHED]          │
+│    │      for each rule:                            O(r)                   │
+│    │        cache.getOrCreate()                     STRIPED LOCK           │
+│    │                                                                        │
+│    └─ Phase 2: Activity-Based Rules                                        │
+└────────────────────────────────────────────────────────────────────────────┘
 
-┌────────────────────────────────────────────────────────────────┐
-│                    TransformationExecutor                       │
-│                                                                 │
-│  Option A: Rule-Centric (recommended for large models)         │
-│    for each eagerGreedyRule:                  O(r)              │
-│      matchingSources = filter by type         O(n) but cached   │
-│      for each source:                         O(matches)        │
-│        getOrCreate()                          O(1)              │
-│                                                                 │
-│  Option B: Element-Centric with Cache (simpler)                │
-│    for each element:                          O(n)              │
-│      rules = getRulesForSource() [CACHED]     O(1)              │
-│      for each rule:                           O(r_applicable)   │
-│        appliesTo() [CACHED]                   O(1)              │
-│        getOrCreate()                          O(1)              │
-│                                                                 │
-│  Total: O(n × r_applicable) = O(n × r) but with O(1) lookups   │
-└────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────┐
+│                         TransformationRegistry                              │
+│                                                                             │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │ Rule Lookup Cache [IMPLEMENTED]                                       │  │
+│  │                                                                        │  │
+│  │  rulesBySourceTypeCache: ConcurrentHashMap<Class, List<Rule>>         │  │
+│  │                                                                        │  │
+│  │  getRulesForSource(type):                                              │  │
+│  │    return cache.computeIfAbsent(type, this::computeRulesForSource)    │  │
+│  │                                                                        │  │
+│  │  computeRulesForSource(type):                                          │  │
+│  │    LinkedHashSet for O(1) dedup + order preservation                   │  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │ OPTIONAL: Pre-Partitioned Rule Lists                                  │  │
+│  │                                                                        │  │
+│  │  eagerGreedyRules: List<Rule>  (lazy-init, double-checked locking)   │  │
+│  │  eagerNonGreedyRules: List<Rule>                                      │  │
+│  │  lazyRules: List<Rule>                                                │  │
+│  │                                                                        │  │
+│  │  BENEFIT: Eliminates 4 boolean checks per rule per element            │  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────────────┐
+│                         ElementResolutionCache                              │
+│                                                                             │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │ CURRENT: Per-Key Locking                                              │  │
+│  │                                                                        │  │
+│  │  keyLocks: ConcurrentHashMap<CacheKey, ReentrantLock>                 │  │
+│  │  PROBLEM: Creates 300K lock objects for large models                  │  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
+│                                    ↓                                        │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │ NEW: Lock Striping                                                    │  │
+│  │                                                                        │  │
+│  │  private static final int STRIPE_COUNT = 1024;                        │  │
+│  │  private final ReentrantLock[] lockStripes = new ReentrantLock[1024]; │  │
+│  │                                                                        │  │
+│  │  getLockFor(source, ruleName):                                         │  │
+│  │    hash = identityHashCode(source) ^ ruleName.hashCode()              │  │
+│  │    return lockStripes[abs(hash % STRIPE_COUNT)]                       │  │
+│  │                                                                        │  │
+│  │  BENEFIT: 1024 locks instead of 300K                                  │  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Implementation Details
 
-### 1. Rule Lookup Caching
+### 1. Element Collection Cache (Priority: HIGH)
+
+```java
+// TransformationExecutor.java
+
+// Cache for model traversal results (cleared after each transformation)
+private Map<String, Map<Class<?>, Collection<EObject>>> elementsByAliasAndType;
+
+private void initElementCache() {
+    elementsByAliasAndType = new HashMap<>();
+}
+
+private void clearElementCache() {
+    elementsByAliasAndType = null;
+}
+
+@SuppressWarnings("unchecked")
+private <T extends EObject> Collection<T> getCachedElements(String alias, Class<T> type) {
+    return (Collection<T>) elementsByAliasAndType
+        .computeIfAbsent(alias, k -> new HashMap<>())
+        .computeIfAbsent(type, t -> new ArrayList<>(context.all(alias, type)));
+}
+
+public TransformationResult transform() {
+    reset();
+    initElementCache();  // NEW
+
+    try {
+        // Element collection using cache
+        for (TransformRuleDescriptor rule : registry.getAllRules()) {
+            if (!rule.isMultiSource()) {
+                TransformDefinition transform = rule.getTransforms().get(0);
+                Collection<? extends EObject> elements = getCachedElements(
+                    transform.getAlias(), transform.getType());  // CACHED
+                singleSourceElements.addAll(elements);
+            }
+        }
+        // ... rest of transformation
+    } finally {
+        clearElementCache();  // NEW
+    }
+}
+```
+
+### 2. Rule Lookup Cache (IMPLEMENTED)
 
 ```java
 // TransformationRegistry.java
@@ -100,211 +185,163 @@ public Collection<TransformRuleDescriptor> getRulesForSource(Class<? extends EOb
 }
 
 private List<TransformRuleDescriptor> computeRulesForSource(Class<?> sourceType) {
-    // Use LinkedHashSet for O(1) deduplication while preserving order
-    Set<TransformRuleDescriptor> result = new LinkedHashSet<>();
+    Set<TransformRuleDescriptor> result = new LinkedHashSet<>();  // O(1) dedup
 
-    // Exact type match
-    List<TransformRuleDescriptor> exactMatch = rulesBySourceType.get(sourceType);
-    if (exactMatch != null) {
-        result.addAll(exactMatch);
-    }
+    result.addAll(rulesBySourceType.getOrDefault(sourceType, Collections.emptyList()));
 
-    // Supertype matches (for greedy/lazy rules)
-    for (Map.Entry<Class<? extends EObject>, List<TransformRuleDescriptor>> entry : rulesBySourceType.entrySet()) {
-        Class<? extends EObject> ruleSourceType = entry.getKey();
-        if (ruleSourceType.isAssignableFrom(sourceType) && !ruleSourceType.equals(sourceType)) {
+    for (Map.Entry<Class<? extends EObject>, List<TransformRuleDescriptor>> entry :
+            rulesBySourceType.entrySet()) {
+        if (entry.getKey().isAssignableFrom(sourceType) && !entry.getKey().equals(sourceType)) {
             result.addAll(entry.getValue());
         }
     }
 
-    return new ArrayList<>(result);  // Convert to ArrayList for iteration efficiency
+    return Collections.unmodifiableList(new ArrayList<>(result));
+}
+
+// Cache invalidation on dynamic registration
+public void register(Class<?> transformationClass) {
+    // ... registration logic ...
+    rulesBySourceTypeCache.clear();  // Invalidate cache
 }
 ```
 
-### 2. Pre-Partitioned Rule Lists
+### 3. Lock Striping (Priority: MEDIUM)
+
+```java
+// ElementResolutionCache.java
+
+private static final int LOCK_STRIPE_COUNT = 1024;
+private final ReentrantLock[] lockStripes;
+
+public ElementResolutionCache() {
+    lockStripes = new ReentrantLock[LOCK_STRIPE_COUNT];
+    for (int i = 0; i < LOCK_STRIPE_COUNT; i++) {
+        lockStripes[i] = new ReentrantLock();
+    }
+}
+
+private ReentrantLock getLockFor(EObject source, String ruleName) {
+    int hash = System.identityHashCode(source) ^ ruleName.hashCode();
+    return lockStripes[Math.abs(hash % LOCK_STRIPE_COUNT)];
+}
+
+public <T extends EObject> T getOrCreate(
+        EObject source, String ruleName, Supplier<T> ruleExecutor, boolean isPrimary) {
+
+    // Fast path unchanged
+    CacheKey key = new CacheKey(source, ruleName);
+    if (rejectedKeys.contains(key)) return null;
+    T cached = getByRule(source, ruleName);
+    if (cached != null) return cached;
+
+    // Use striped lock instead of per-key lock
+    ReentrantLock lock = getLockFor(source, ruleName);  // STRIPED
+    lock.lock();
+    try {
+        // Double-check + execute (unchanged)
+        if (rejectedKeys.contains(key)) return null;
+        cached = getByRule(source, ruleName);
+        if (cached != null) return cached;
+
+        T target = ruleExecutor.get();
+        if (target != null) {
+            addMapping(source, ruleName, target, isPrimary);
+        } else {
+            rejectedKeys.add(key);
+        }
+        return target;
+    } finally {
+        lock.unlock();
+    }
+}
+```
+
+### 4. Pre-Partitioned Rules (Priority: LOW)
 
 ```java
 // TransformationRegistry.java
 
-// Pre-computed lists (populated lazily after first rule registration)
 private volatile List<TransformRuleDescriptor> eagerGreedyRules;
 private volatile List<TransformRuleDescriptor> eagerNonGreedyRules;
-private volatile List<TransformRuleDescriptor> lazyRules;
-private volatile List<TransformRuleDescriptor> multiSourceRules;
-private volatile List<TransformRuleDescriptor> activityBasedRules;
 
 public List<TransformRuleDescriptor> getEagerGreedyRules() {
     if (eagerGreedyRules == null) {
         synchronized (this) {
             if (eagerGreedyRules == null) {
                 eagerGreedyRules = getAllRules().stream()
-                    .filter(r -> r.isGreedy() && !r.isLazy() && !r.isAbstract() && !r.isMultiSource())
-                    .filter(r -> !isEffectivelyActivityBased(r))
-                    .collect(Collectors.toList());
+                    .filter(r -> r.isGreedy())
+                    .filter(r -> !r.isLazy())
+                    .filter(r -> !r.isAbstract())
+                    .filter(r -> !r.isMultiSource())
+                    .collect(Collectors.toUnmodifiableList());
             }
         }
     }
     return eagerGreedyRules;
 }
 
-// Similar for other categories...
-```
-
-### 3. Type Name Index for Non-Greedy Rules
-
-```java
-// TransformationRegistry.java
-
-private final Map<String, List<TransformRuleDescriptor>> nonGreedyRulesByTypeName = new HashMap<>();
-
-// Populated during registerRule():
-if (!isGreedy && !isLazy) {
-    String typeName = sourceType.getSimpleName();
-    nonGreedyRulesByTypeName.computeIfAbsent(typeName, k -> new ArrayList<>()).add(descriptor);
-}
-
-// Fast lookup in appliesTo():
-public List<TransformRuleDescriptor> getNonGreedyRulesForTypeName(String typeName) {
-    return nonGreedyRulesByTypeName.getOrDefault(typeName, Collections.emptyList());
-}
-```
-
-### 4. Optimized TransformationExecutor
-
-```java
-// TransformationExecutor.java
-
-private void executeEagerRulesOptimized(Collection<? extends EObject> sourceElements) {
-    // Process greedy rules
-    for (TransformRuleDescriptor rule : registry.getEagerGreedyRules()) {
-        if (firstError.get() != null) return;
-
-        // Filter elements matching this rule's source type
-        for (EObject source : sourceElements) {
-            if (!rule.appliesTo(source)) continue;
-            if (!isFromExpectedAlias(source, rule)) continue;
-
-            try {
-                executeRuleWithGetOrCreate(rule, source);
-            } catch (Exception e) {
-                handleError(e, rule, source);
-                return;
-            }
-        }
-    }
-
-    // Process non-greedy rules (exact type match only)
-    Map<String, List<EObject>> elementsByTypeName = groupElementsByTypeName(sourceElements);
-
-    for (TransformRuleDescriptor rule : registry.getEagerNonGreedyRules()) {
-        if (firstError.get() != null) return;
-
-        String typeName = rule.getSourceType().getSimpleName();
-        List<EObject> matchingElements = elementsByTypeName.get(typeName);
-        if (matchingElements == null || matchingElements.isEmpty()) continue;
-
-        for (EObject source : matchingElements) {
-            if (!isFromExpectedAlias(source, rule)) continue;
-
-            try {
-                executeRuleWithGetOrCreate(rule, source);
-            } catch (Exception e) {
-                handleError(e, rule, source);
-                return;
-            }
-        }
-    }
-}
-
-private Map<String, List<EObject>> groupElementsByTypeName(Collection<? extends EObject> elements) {
-    Map<String, List<EObject>> result = new HashMap<>();
-    for (EObject element : elements) {
-        String typeName = element.eClass().getName();
-        result.computeIfAbsent(typeName, k -> new ArrayList<>()).add(element);
-    }
-    return result;
+// Invalidate on registration
+private void invalidateCaches() {
+    rulesBySourceTypeCache.clear();
+    eagerGreedyRules = null;
+    eagerNonGreedyRules = null;
 }
 ```
 
 ## Performance Analysis
 
-### Before Optimization
+### Before All Optimizations
 
-| Model Size | Elements | Rules | getRulesForSource Calls | Time |
-|------------|----------|-------|------------------------|------|
-| Small | 1,000 | 50 | 1,000 | ~100ms |
-| Medium | 10,000 | 100 | 10,000 | ~1,000ms |
-| Large | 100,000 | 200 | 100,000 | ~10,000ms |
+| Phase | Time | Complexity |
+|-------|------|------------|
+| Element collection | ~2,000 ms | O(r × n) = 50 × 22K |
+| Rule lookup | ~500 ms | O(n × types) |
+| Rule execution | ~18,000 ms | O(n × r) with XMI lookups |
+| **Total** | **~20,500 ms** | |
 
-### After Optimization
+### After XMI Optimization (External)
 
-| Model Size | Elements | Rules | Cache Hits | getRulesForSource Time | Savings |
-|------------|----------|-------|------------|------------------------|---------|
-| Small | 1,000 | 50 | 990 | ~10ms | 90% |
-| Medium | 10,000 | 100 | 9,900 | ~100ms | 90% |
-| Large | 100,000 | 200 | 99,800 | ~200ms | 98% |
+| Phase | Time | Improvement |
+|-------|------|-------------|
+| Element collection | ~500 ms | - |
+| Rule lookup | ~200 ms | - |
+| Rule execution | ~1,000 ms | **-94%** |
+| **Total** | **~1,700 ms** | **-91%** |
 
-**Expected Improvement:** 20-40% reduction in total transformation time (greedy execution is ~30% of total).
+### After All Proposed Optimizations
 
-## Thread Safety Considerations
+| Phase | Time | Additional Improvement |
+|-------|------|------------------------|
+| Element collection | ~100 ms | **-80%** (caching) |
+| Rule lookup | ~20 ms | **-90%** (caching) |
+| Rule execution | ~900 ms | **-10%** (lock striping) |
+| **Total** | **~1,020 ms** | **-40%** |
 
-All caches use thread-safe data structures:
-- `ConcurrentHashMap.computeIfAbsent()` - atomic cache population
-- Pre-computed lists are effectively immutable after initialization
-- Double-checked locking pattern for lazy initialization
+## Thread Safety
+
+| Component | Mechanism |
+|-----------|-----------|
+| rulesBySourceTypeCache | `ConcurrentHashMap.computeIfAbsent()` |
+| elementsByAliasAndType | Thread-local per transformation |
+| lockStripes | Fixed array, stripe selection by hash |
+| eagerGreedyRules | Double-checked locking + volatile |
 
 ## Memory Impact
 
 | Cache | Size | Impact |
 |-------|------|--------|
-| rulesBySourceTypeCache | O(distinct types) | ~10-100 entries, negligible |
-| Pre-partitioned lists | O(rules) | References to existing descriptors |
-| Type name index | O(non-greedy rules) | ~10-50 entries |
+| rulesBySourceTypeCache | O(distinct types) | ~10-100 entries |
+| elementsByAliasAndType | O(distinct (alias,type) pairs) | Cleared after each transform |
+| lockStripes | 1024 × ReentrantLock | ~40KB fixed |
+| Pre-partitioned lists | O(rules) | References only |
 
-**Total:** < 1KB additional memory for typical transformations.
-
-## ETL Compatibility Mode
-
-The executor supports two iteration strategies controlled by `etlCompatibilityMode`:
-
-| Mode | Strategy | Execution Order |
-|------|----------|-----------------|
-| `etlCompatibilityMode=true` (default) | Element-Centric | For each element, execute all applicable rules |
-| `etlCompatibilityMode=false` | Rule-Centric | For each rule, execute on all matching elements |
-
-```java
-TransformationExecutor.builder()
-    .etlCompatibilityMode(true)   // ETL-compatible (element-centric)
-    .etlCompatibilityMode(false)  // Performance mode (rule-centric)
-    .build();
-```
-
-**When to use Rule-Centric:**
-- New transformations not migrating from ETL
-- Performance-critical scenarios where element order doesn't affect semantics
-- Large models (100K+ elements) where cache locality matters
-
-## Cache Invalidation
-
-If `register()` is called after caches are populated, **all caches must be invalidated**:
-
-```java
-public void register(Class<?> transformationClass) {
-    // ... existing registration logic ...
-
-    // Invalidate caches on dynamic registration
-    rulesBySourceTypeCache.clear();
-    eagerGreedyRules = null;
-    eagerNonGreedyRules = null;
-    lazyRules = null;
-    nonGreedyRulesByTypeName = null;
-}
-```
+**Total additional memory:** < 100KB for typical transformations.
 
 ## Backward Compatibility
 
 All optimizations are internal implementation details:
 - Same public API
-- Same execution semantics (when `etlCompatibilityMode=true`)
-- Same deterministic ordering (LinkedHashSet preserves insertion order)
+- Same execution semantics
+- Same deterministic ordering (LinkedHashSet preserves order)
 - Same XMI IDs generated

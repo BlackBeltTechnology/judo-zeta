@@ -402,6 +402,86 @@ try {
 // Or restructure to avoid mutual dependencies
 ```
 
+## Structured XMI ID Issues
+
+### Symptom: IDs are `_seq0`, `_seq1` Instead of Structured
+
+**Expected**: `Customer/(source/_abc123)/Entity2Package`
+**Actual**: `_seq0`, `_seq1`, ...
+
+### Cause 1: Structured IDs Disabled
+
+```java
+// Check if enabled (default is true)
+boolean enabled = ctx.isUseStructuredIds();
+
+// Enable if needed
+ctx.setUseStructuredIds(true);
+```
+
+### Cause 2: createTarget() Called Outside Rule Context
+
+```java
+// WRONG: Creating outside transformation rule
+public static Table createHelper(TransformationContext ctx) {
+    return ctx.createTarget(Table.class);  // No currentSource → _seqN
+}
+
+// CORRECT: Create inside rule function
+@TransformRule(name = "MyRule")
+public TransformFunction<Entity, Table> myRule() {
+    return (source, ctx) -> {
+        return ctx.createTarget(Table.class);  // Has currentSource → structured ID
+    };
+}
+```
+
+### Cause 3: Source Element Has No XMI ID
+
+```java
+// Source needs explicit XMI ID for structured format
+((XMIResource) sourceResource).setID(element, "_myId123");
+```
+
+### Cause 4: Source Element Not in Resource
+
+```java
+// Detached elements fall back to hash-based ID
+EClass detached = EcoreFactory.eINSTANCE.createEClass();
+// detached.eResource() is null → uses _<hashcode>
+```
+
+### Edge Case Summary
+
+| Condition | ID Format |
+|-----------|-----------|
+| `useStructuredIds=false` | `_seqN` |
+| `currentSource` is null | `_seqN` |
+| `currentExecutingRule` is null | Partial or `_seqN` |
+| Source not in Resource | `_<hashcode>` in path |
+| Source has no XMI ID | `_<hashcode>` in path |
+| Both source & rule null | `_seqN` |
+
+### Fix: Ensure Proper Context
+
+```java
+// 1. Set XMI IDs on source elements
+((XMIResource) sourceResource).setID(entity, "_entity123");
+
+// 2. Register resource with alias
+ctx.registerResource("esm", sourceResourceSet);
+ctx.setPreferredSourceAlias("esm");
+
+// 3. Only create targets inside rules
+@TransformRule(name = "Entity2Table")
+public TransformFunction<Entity, Table> entity2Table() {
+    return (source, ctx) -> {
+        // Now gets: EntityName/(esm/_entity123)/Entity2Table
+        return ctx.createTarget(Table.class);
+    };
+}
+```
+
 ## Performance Issues
 
 ### Symptom: Slow Transformation

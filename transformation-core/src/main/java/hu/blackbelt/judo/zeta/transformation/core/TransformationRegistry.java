@@ -33,8 +33,11 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -54,6 +57,11 @@ public class TransformationRegistry {
     private final List<Method> preTransformationHooks = new ArrayList<>();
     private final List<Method> postTransformationHooks = new ArrayList<>();
     private final Map<Method, Object> hookInstances = new LinkedHashMap<>();
+
+    // Cache for getRulesForSource() results - O(1) lookup for repeated calls with same type
+    // Thread-safe for parallel transformation execution
+    private final ConcurrentHashMap<Class<?>, List<TransformRuleDescriptor>> rulesBySourceTypeCache =
+            new ConcurrentHashMap<>();
 
     /**
      * Register a transformation context class.
@@ -98,10 +106,22 @@ public class TransformationRegistry {
             }
 
             log.debug("Registered transformation rules from: {}", transformationClass.getName());
+
+            // Invalidate caches when rules are registered dynamically
+            // This ensures new rules are visible in subsequent lookups
+            invalidateCaches();
         } catch (Exception e) {
             log.error("Failed to register transformation class: {}", transformationClass.getName(), e);
             throw new RuntimeException("Failed to register transformation: " + transformationClass.getName(), e);
         }
+    }
+
+    /**
+     * Invalidate all cached rule lookups.
+     * Called when rules are registered dynamically after initial setup.
+     */
+    private void invalidateCaches() {
+        rulesBySourceTypeCache.clear();
     }
 
     private void registerRule(
@@ -249,11 +269,23 @@ public class TransformationRegistry {
     /**
      * Get all rules for a given source type (including greedy matches from supertypes).
      *
+     * <p>Results are cached for O(1) lookup on repeated calls with the same type.
+     * The cache uses ConcurrentHashMap for thread-safe parallel execution.</p>
+     *
      * @param sourceType the source type
-     * @return collection of applicable rules
+     * @return collection of applicable rules (unmodifiable)
      */
     public Collection<TransformRuleDescriptor> getRulesForSource(Class<? extends EObject> sourceType) {
-        List<TransformRuleDescriptor> result = new ArrayList<>();
+        return rulesBySourceTypeCache.computeIfAbsent(sourceType, this::computeRulesForSource);
+    }
+
+    /**
+     * Compute rules for a given source type (internal method for cache population).
+     * Uses LinkedHashSet for O(1) deduplication while preserving registration order.
+     */
+    private List<TransformRuleDescriptor> computeRulesForSource(Class<?> sourceType) {
+        // Use LinkedHashSet for O(1) deduplication while preserving insertion order
+        Set<TransformRuleDescriptor> result = new LinkedHashSet<>();
 
         // Get rules for this exact type
         result.addAll(rulesBySourceType.getOrDefault(sourceType, Collections.emptyList()));
@@ -264,18 +296,13 @@ public class TransformationRegistry {
         for (Map.Entry<Class<? extends EObject>, List<TransformRuleDescriptor>> entry : rulesBySourceType.entrySet()) {
             Class<? extends EObject> ruleSourceType = entry.getKey();
             if (ruleSourceType.isAssignableFrom(sourceType) && !ruleSourceType.equals(sourceType)) {
-                for (TransformRuleDescriptor rule : entry.getValue()) {
-                    // Include all rules whose sourceType matches (via isAssignableFrom)
-                    // This handles cases where rules are defined on interfaces (EClass)
-                    // but elements are implementation classes (EClassImpl)
-                    if (!result.contains(rule)) {
-                        result.add(rule);
-                    }
-                }
+                // LinkedHashSet.addAll handles deduplication in O(1) per element
+                result.addAll(entry.getValue());
             }
         }
 
-        return result;
+        // Return as unmodifiable ArrayList for iteration efficiency and immutability
+        return Collections.unmodifiableList(new ArrayList<>(result));
     }
 
     /**

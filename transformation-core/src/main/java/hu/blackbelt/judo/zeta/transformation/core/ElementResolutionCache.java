@@ -48,11 +48,45 @@ public class ElementResolutionCache {
     // Discriminated cache: source → rule name → discriminator → instance
     private final Map<EObject, Map<String, Map<String, EObject>>> discriminatedCache = new ConcurrentHashMap<>();
 
-    // Per-key locks for atomic getOrCreate operations
-    private final ConcurrentHashMap<CacheKey, ReentrantLock> keyLocks = new ConcurrentHashMap<>();
+    /**
+     * Lock striping for atomic getOrCreate operations.
+     *
+     * <p>Uses a fixed array of 1024 locks instead of per-key locks. This reduces
+     * memory allocation from O(n × r) = 300K lock objects for large models to
+     * exactly 1024 locks (~40KB fixed memory).</p>
+     *
+     * <p>Lock selection uses hash of (source identity, ruleName) to distribute
+     * load evenly across stripes. With 1024 stripes and uniform hash distribution,
+     * collision probability is low for typical workloads.</p>
+     */
+    private static final int LOCK_STRIPE_COUNT = 1024;
+    private final ReentrantLock[] lockStripes;
 
     // Track rejected (source, ruleName) pairs to avoid re-evaluating guards
     private final Set<CacheKey> rejectedKeys = ConcurrentHashMap.newKeySet();
+
+    public ElementResolutionCache() {
+        // Initialize lock stripes
+        lockStripes = new ReentrantLock[LOCK_STRIPE_COUNT];
+        for (int i = 0; i < LOCK_STRIPE_COUNT; i++) {
+            lockStripes[i] = new ReentrantLock();
+        }
+    }
+
+    /**
+     * Get the lock stripe for a given (source, ruleName) pair.
+     *
+     * <p>Uses XOR of source identity hash and ruleName hash for better distribution.
+     * Math.abs handles negative hash codes, modulo selects the stripe index.</p>
+     *
+     * @param source the source element
+     * @param ruleName the rule name
+     * @return the lock stripe for this key
+     */
+    private ReentrantLock getLockFor(EObject source, String ruleName) {
+        int hash = System.identityHashCode(source) ^ ruleName.hashCode();
+        return lockStripes[Math.abs(hash % LOCK_STRIPE_COUNT)];
+    }
 
     /**
      * Key for per-element locking using (source identity, ruleName) pair.
@@ -147,7 +181,7 @@ public class ElementResolutionCache {
     }
 
     /**
-     * Atomic get-or-create operation with per-key locking.
+     * Atomic get-or-create operation with lock striping.
      *
      * <p>This method provides atomic check-and-execute semantics for parallel
      * transformation. The lock covers the full execution: cache lookup, guard
@@ -157,8 +191,9 @@ public class ElementResolutionCache {
      * <p>The supplier is only invoked on cache miss. If the supplier returns null
      * (e.g., guard rejected), no mapping is added.</p>
      *
-     * <p>Thread-safe: Uses fine-grained per-(source, ruleName) locks to allow
-     * different sources and rules to execute in parallel without blocking.</p>
+     * <p>Thread-safe: Uses lock striping with 1024 stripes to allow different
+     * sources and rules to execute in parallel without blocking, while using
+     * fixed memory (no per-key lock allocation).</p>
      *
      * @param source the source element
      * @param ruleName the transformation rule name
@@ -191,8 +226,8 @@ public class ElementResolutionCache {
             return cached;
         }
 
-        // Acquire per-key lock for atomic check-and-execute
-        ReentrantLock lock = keyLocks.computeIfAbsent(key, k -> new ReentrantLock());
+        // Acquire striped lock for atomic check-and-execute
+        ReentrantLock lock = getLockFor(source, ruleName);
         lock.lock();
         try {
             // Double-check after acquiring lock (another thread may have completed)
@@ -420,13 +455,15 @@ public class ElementResolutionCache {
 
     /**
      * Clear all caches.
+     *
+     * <p>Note: Lock stripes are not cleared as they are a fixed array that
+     * is reused across transformations.</p>
      */
     public void clear() {
         ruleCache.clear();
         typeCache.clear();
         primaryCache.clear();
         discriminatedCache.clear();
-        keyLocks.clear();
         rejectedKeys.clear();
     }
 
