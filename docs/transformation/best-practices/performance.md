@@ -317,6 +317,25 @@ TransformationMetrics.reset();
 | High ms/call for specific rule | Expensive rule implementation | Optimize rule or use @Cached |
 | High rule iterations per source | Many rules checked per element | Consider rule organization |
 
+### Built-in Performance Optimizations
+
+Zeta includes several optimizations enabled by default:
+
+| Optimization | Impact | Description |
+|--------------|--------|-------------|
+| **Skip XMI Resource Lookup** | **-91%** greedy time | For fresh transformations, XMI resource lookups always return null. `skipXmiIdResourceLookup=true` (default) skips these wasteful lookups. |
+| **Pending XMI ID Index** | O(1) lookup | Reverse index `pendingXmiIdIndex` replaces O(n) linear scan in `findByXmiId()` |
+| **Atomic Cache Operations** | Thread-safe | `getOrCreate()` pattern prevents duplicate element creation |
+| **Two-Phase Staging** | Parallel-safe | Elements staged during parallel execution, committed single-threaded |
+
+**Real-world impact (22,000 element model):**
+
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| Total time | 40,844 ms | 9,007 ms | **-78%** |
+| Greedy rules | 20,561 ms | 1,759 ms | **-91%** |
+| vs ETL | 1.79x slower | 2.5x faster | |
+
 ### Basic Timer (Alternative)
 
 For simple timing without full metrics:

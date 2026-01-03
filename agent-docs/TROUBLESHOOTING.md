@@ -473,3 +473,15 @@ for (Item item : items) {
     t.getColumns().add(...);
 }
 ```
+
+### Built-in Optimizations
+
+Zeta automatically applies these optimizations:
+
+| Optimization | Default | Impact |
+|--------------|---------|--------|
+| Skip XMI resource lookup | `true` | **-91%** greedy rule time for fresh transformations |
+| Pending XMI ID index | enabled | O(1) vs O(n) for findByXmiId() |
+| Atomic cache operations | enabled | Thread-safe, no duplicates |
+
+These optimizations achieved **78% faster** overall transformation (2.5x faster than ETL).

@@ -104,6 +104,13 @@ public class TransformationContext {
     private final AtomicBoolean stagingEnabled = new AtomicBoolean(false);
 
     /**
+     * Flag to skip XMIResource.getEObject() lookup in findByXmiId.
+     * Set to true for fresh transformations where no pre-existing elements exist.
+     * This avoids expensive XMI resource lookups that always return null.
+     */
+    private volatile boolean skipXmiIdResourceLookup = true;
+
+    /**
      * Sequence counter for maintaining deterministic element ordering in staging.
      */
     private final AtomicLong creationSequence = new AtomicLong(0);
@@ -2123,14 +2130,15 @@ public class TransformationContext {
             return (T) element;
         }
 
-        // OPTIMIZATION: Skip XMI resource lookup when staging is enabled.
-        // During staging, elements haven't been committed to the XMI resource yet,
+        // OPTIMIZATION: Skip XMI resource lookup for fresh transformations.
+        // For fresh transformations, there are no pre-existing elements in the XMI resource,
         // so XMIResource.getEObject() would always return null - a waste of time.
-        if (stagingEnabled.get()) {
+        // Also skip when staging is enabled (elements not committed yet).
+        if (skipXmiIdResourceLookup || stagingEnabled.get()) {
             return null;
         }
 
-        // Fall back to XMI resource lookup for elements that were committed earlier
+        // Fall back to XMI resource lookup for incremental transformations
         if (!targetResourceSet.getResources().isEmpty()) {
             Resource targetResource = targetResourceSet.getResources().get(0);
             if (targetResource instanceof XMIResource) {
