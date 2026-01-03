@@ -100,6 +100,12 @@ Task: Make legacy transformation parallel-safe
 Task: Understand safe vs unsafe parallel patterns
   → Read: QUICK-REF.md (Thread-Safe Rule Guidelines)
 
+Task: Profile transformation performance
+  → Read: QUICK-REF.md (Performance Profiling)
+
+Task: Identify slow rules or bottlenecks
+  → Read: QUICK-REF.md (Performance Profiling)
+
 === VALIDATION ===
 
 Task: Migrate EVL constraint to Zeta

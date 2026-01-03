@@ -401,3 +401,75 @@ try {
 // Use @Lazy to break cycles
 // Or restructure to avoid mutual dependencies
 ```
+
+## Performance Issues
+
+### Symptom: Slow Transformation
+
+Use `TransformationMetrics` to identify bottlenecks:
+
+```java
+// Enable before transformation
+TransformationMetrics.enable();
+
+executor.transform();
+
+// Print report
+System.out.println(TransformationMetrics.getReport());
+
+// Reset for next run
+TransformationMetrics.disable();
+TransformationMetrics.reset();
+```
+
+### Interpreting the Report
+
+| Metric | Problem Indicator | Cause | Solution |
+|--------|-------------------|-------|----------|
+| Cache hit rate <80% | Low efficiency | Inconsistent equivalent() params | Standardize lookups |
+| High XMI ID scans | O(n) bottleneck | Deferred ID resolution | Ensure indexed lookups |
+| High ms/call for rule | Slow rule | Expensive computation | Use @Cached or optimize |
+| High rule iterations | Rule matching overhead | Many rules checked | Consolidate rules |
+| High lock wait time | Lock contention | Thread blocking | Review atomic operations |
+
+### Common Bottlenecks
+
+**1. O(n) XMI ID lookups**
+```java
+// Problem: Linear scan for each lookup
+ctx.findByXmiId("some-id");  // O(n) if not indexed
+
+// Solution: Use indexed lookups (automatic in latest version)
+```
+
+**2. Expensive guard evaluations**
+```java
+// Problem: Guard does expensive computation
+@Guard(method = "expensiveGuard")
+
+private boolean expensiveGuard(Entity e, TransformationContext ctx) {
+    // O(n) operation on every call
+    return ctx.getAllSource(Entity.class).stream()...
+}
+
+// Solution: Cache in @PreExecution
+@PreExecution
+public void cacheData(TransformationContext ctx) {
+    ctx.setAttribute("entitySet", computeOnce());
+}
+```
+
+**3. Repeated equivalent() with same params**
+```java
+// Problem: Call equivalent() in loop
+for (Item item : items) {
+    Table t = ctx.equivalent(entity, Table.class);  // Same every time
+    t.getColumns().add(...);
+}
+
+// Solution: Cache outside loop
+Table t = ctx.equivalent(entity, Table.class);
+for (Item item : items) {
+    t.getColumns().add(...);
+}
+```

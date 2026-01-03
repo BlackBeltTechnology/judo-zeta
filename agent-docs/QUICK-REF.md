@@ -205,3 +205,21 @@ try {
         e.getCause().getMessage());
 }
 ```
+
+## Performance Profiling
+
+```java
+// Enable metrics before transformation
+TransformationMetrics.enable();
+
+executor.transform();
+
+// Print comprehensive performance report
+System.out.println(TransformationMetrics.getReport());
+
+// Reset for next run
+TransformationMetrics.disable();
+TransformationMetrics.reset();
+```
+
+Report shows: equivalent() calls, cache hit rate, per-rule timing, top 10 slowest rules, potential issues.

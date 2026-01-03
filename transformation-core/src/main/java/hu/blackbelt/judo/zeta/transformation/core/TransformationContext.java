@@ -124,6 +124,12 @@ public class TransformationContext {
     private final ConcurrentHashMap<EObject, String> pendingXmiIds = new ConcurrentHashMap<>();
 
     /**
+     * Reverse lookup index for pendingXmiIds: xmiId -> EObject.
+     * Enables O(1) lookup by XMI ID instead of O(n) linear scan.
+     */
+    private final ConcurrentHashMap<String, EObject> pendingXmiIdIndex = new ConcurrentHashMap<>();
+
+    /**
      * Map for tracking lazy rule executions to prevent concurrent duplicates.
      * Key is (source, ruleName) for cross-rule isolation.
      */
@@ -894,112 +900,156 @@ public class TransformationContext {
      */
     @SuppressWarnings("unchecked")
     public <T extends EObject> T equivalent(EObject source, Class<T> targetType) {
-        // Check cache first
-        T cached = resolutionCache.getEquivalent(source, targetType);
-        if (cached != null) {
-            return cached;
-        }
+        long startNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+        TransformationMetrics.recordEquivalentCall();
 
-        // Try to find and execute a matching lazy rule
-        if (transformationRegistry != null) {
-            Collection<TransformRuleDescriptor> rules = transformationRegistry.getRulesForSource(source.getClass());
-            for (TransformRuleDescriptor rule : rules) {
-                if (rule.appliesTo(source) && targetType.isAssignableFrom(rule.getTargetType())) {
-                    // Record activation for activity-based rules
-                    // This tracks which elements were referenced via equivalent()
-                    if (rule.isActivityBased()) {
-                        activate(rule.getName(), source);
-                    }
+        try {
+            // Check cache first
+            long cacheStartNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+            T cached = resolutionCache.getEquivalent(source, targetType);
+            if (TransformationMetrics.isEnabled()) {
+                TransformationMetrics.addCacheOperationNanos(System.nanoTime() - cacheStartNanos);
+            }
+            if (cached != null) {
+                TransformationMetrics.recordEquivalentCacheHit();
+                return cached;
+            }
+            TransformationMetrics.recordEquivalentCacheMiss();
 
-                    if (rule.evaluateGuard(source, this)) {
-                        // When structured IDs are enabled, try XMI ID-based lookup first (ETL semantics)
-                        if (useStructuredIds) {
-                            String structuredId = generateStructuredId(source, rule.getName());
-                            T existingByXmiId = findByXmiId(structuredId, targetType);
-                            if (existingByXmiId != null) {
-                                // Found by XMI ID - cache it and return
-                                resolutionCache.addMapping(source, rule.getName(), existingByXmiId, rule.isPrimary());
-                                return existingByXmiId;
-                            }
+            // Try to find and execute a matching lazy rule
+            if (transformationRegistry != null) {
+                long getRulesStartNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+                Collection<TransformRuleDescriptor> rules = transformationRegistry.getRulesForSource(source.getClass());
+                if (TransformationMetrics.isEnabled()) {
+                    TransformationMetrics.addGetRulesForSourceNanos(System.nanoTime() - getRulesStartNanos);
+                }
+                TransformationMetrics.recordGetRulesForSourceCall();
+
+                for (TransformRuleDescriptor rule : rules) {
+                    TransformationMetrics.recordRuleIteration();
+                    if (rule.appliesTo(source) && targetType.isAssignableFrom(rule.getTargetType())) {
+                        // Record activation for activity-based rules
+                        // This tracks which elements were referenced via equivalent()
+                        if (rule.isActivityBased()) {
+                            activate(rule.getName(), source);
                         }
 
-                        // Use (source, ruleName) key for cross-rule cache isolation
-                        RuleCacheKey key = new RuleCacheKey(source, rule.getName());
-
-                        // Fast path: check if already executed (from cache or concurrent execution)
-                        EObject existing = executingLazyRules.get(key);
-                        if (existing != null) {
-                            return (T) existing;
+                        long guardStartNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+                        boolean guardResult = rule.evaluateGuard(source, this);
+                        if (TransformationMetrics.isEnabled()) {
+                            TransformationMetrics.addGuardEvaluationNanos(System.nanoTime() - guardStartNanos);
                         }
+                        TransformationMetrics.recordGuardEvaluation();
 
-                        // Check if this key is currently being executed in this thread (recursion)
-                        Set<RuleCacheKey> inProgress = inProgressRules.get();
-                        if (inProgress.contains(key)) {
-                            // Recursive call detected - return null to break the cycle
-                            // The caller should handle null gracefully
-                            return null;
-                        }
-
-                        // Acquire per-element lock for thread-safe execution
-                        // Uses computeIfAbsent for atomic lock creation
-                        ReentrantLock lock = ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
-                        lock.lock();
-                        try {
-                            // Double-check after acquiring lock (another thread may have completed)
-                            EObject existingAfterLock = executingLazyRules.get(key);
-                            if (existingAfterLock != null) {
-                                return (T) existingAfterLock;
+                        if (guardResult) {
+                            // When structured IDs are enabled, try XMI ID-based lookup first (ETL semantics)
+                            if (useStructuredIds) {
+                                String structuredId = generateStructuredId(source, rule.getName());
+                                long xmiIdStartNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+                                T existingByXmiId = findByXmiId(structuredId, targetType);
+                                if (TransformationMetrics.isEnabled()) {
+                                    TransformationMetrics.addFindByXmiIdNanos(System.nanoTime() - xmiIdStartNanos);
+                                }
+                                TransformationMetrics.recordFindByXmiIdCall();
+                                if (existingByXmiId != null) {
+                                    // Found by XMI ID - cache it and return
+                                    resolutionCache.addMapping(source, rule.getName(), existingByXmiId, rule.isPrimary());
+                                    return existingByXmiId;
+                                }
                             }
 
-                            // Also double-check resolution cache
-                            T cachedAgain = resolutionCache.getEquivalent(source, targetType);
-                            if (cachedAgain != null) {
-                                return cachedAgain;
+                            // Use (source, ruleName) key for cross-rule cache isolation
+                            RuleCacheKey key = new RuleCacheKey(source, rule.getName());
+
+                            // Fast path: check if already executed (from cache or concurrent execution)
+                            EObject existing = executingLazyRules.get(key);
+                            if (existing != null) {
+                                return (T) existing;
                             }
 
-                            // Mark as in-progress for recursion detection
-                            inProgress.add(key);
+                            // Check if this key is currently being executed in this thread (recursion)
+                            Set<RuleCacheKey> inProgress = inProgressRules.get();
+                            if (inProgress.contains(key)) {
+                                // Recursive call detected - return null to break the cycle
+                                // The caller should handle null gracefully
+                                return null;
+                            }
+
+                            // Acquire per-element lock for thread-safe execution
+                            // Uses computeIfAbsent for atomic lock creation
+                            long lockStartNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+                            ReentrantLock lock = ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
+                            lock.lock();
+                            if (TransformationMetrics.isEnabled()) {
+                                TransformationMetrics.addLockWaitNanos(System.nanoTime() - lockStartNanos);
+                            }
+                            TransformationMetrics.recordLockAcquisition();
                             try {
-                                // CRITICAL: Save and reset inheritance state for equivalent() calls.
-                                // When a transform function calls equivalent() to look up related elements,
-                                // the nested transformation should start FRESH, not inherit the caller's
-                                // inheritance context. Without this reset, the nested rule would see
-                                // inInheritanceExecution=true and potentially reuse the caller's preCreatedTarget.
-                                boolean wasInInheritance = isInInheritanceExecution();
-                                EObject savedPreCreated = getPreCreatedTarget();
-                                setInInheritanceExecution(false);
-                                clearPreCreatedTarget();
+                                // Double-check after acquiring lock (another thread may have completed)
+                                EObject existingAfterLock = executingLazyRules.get(key);
+                                if (existingAfterLock != null) {
+                                    return (T) existingAfterLock;
+                                }
 
+                                // Also double-check resolution cache
+                                T cachedAgain = resolutionCache.getEquivalent(source, targetType);
+                                if (cachedAgain != null) {
+                                    return cachedAgain;
+                                }
+
+                                // Mark as in-progress for recursion detection
+                                inProgress.add(key);
                                 try {
-                                    // Execute the rule with clean inheritance state
-                                    EObject result = rule.execute(source, this);
-                                    if (result != null) {
-                                        // Cache the result atomically
-                                        resolutionCache.addMapping(source, rule.getName(), result, rule.isPrimary());
-                                        executingLazyRules.put(key, result);
+                                    // CRITICAL: Save and reset inheritance state for equivalent() calls.
+                                    // When a transform function calls equivalent() to look up related elements,
+                                    // the nested transformation should start FRESH, not inherit the caller's
+                                    // inheritance context. Without this reset, the nested rule would see
+                                    // inInheritanceExecution=true and potentially reuse the caller's preCreatedTarget.
+                                    boolean wasInInheritance = isInInheritanceExecution();
+                                    EObject savedPreCreated = getPreCreatedTarget();
+                                    setInInheritanceExecution(false);
+                                    clearPreCreatedTarget();
+
+                                    try {
+                                        // Execute the rule with clean inheritance state
+                                        long ruleStartNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+                                        EObject result = rule.execute(source, this);
+                                        if (TransformationMetrics.isEnabled()) {
+                                            TransformationMetrics.addRuleExecutionNanos(rule.getName(), System.nanoTime() - ruleStartNanos);
+                                        }
+                                        TransformationMetrics.recordRuleExecution(rule.getName());
+                                        if (result != null) {
+                                            // Cache the result atomically
+                                            resolutionCache.addMapping(source, rule.getName(), result, rule.isPrimary());
+                                            executingLazyRules.put(key, result);
+                                        }
+                                        return (T) result;
+                                    } finally {
+                                        // Restore inheritance state for caller
+                                        setInInheritanceExecution(wasInInheritance);
+                                        if (savedPreCreated != null) {
+                                            setPreCreatedTarget(savedPreCreated);
+                                        } else {
+                                            clearPreCreatedTarget();
+                                        }
                                     }
-                                    return (T) result;
                                 } finally {
-                                    // Restore inheritance state for caller
-                                    setInInheritanceExecution(wasInInheritance);
-                                    if (savedPreCreated != null) {
-                                        setPreCreatedTarget(savedPreCreated);
-                                    } else {
-                                        clearPreCreatedTarget();
-                                    }
+                                    inProgress.remove(key);
                                 }
                             } finally {
-                                inProgress.remove(key);
+                                lock.unlock();
                             }
-                        } finally {
-                            lock.unlock();
                         }
                     }
                 }
             }
-        }
 
-        return null;
+            return null;
+        } finally {
+            if (TransformationMetrics.isEnabled()) {
+                TransformationMetrics.addEquivalentNanos(System.nanoTime() - startNanos);
+            }
+        }
     }
     /**
      * Get all equivalent targets for a source element.
@@ -1866,10 +1916,11 @@ public class TransformationContext {
     }
 
     /**
-     * Clear pending XMI IDs (called on reset).
+     * Clear pending XMI IDs and reverse index (called on reset).
      */
     void clearPendingXmiIds() {
         pendingXmiIds.clear();
+        pendingXmiIdIndex.clear();
     }
 
     /**
@@ -2011,6 +2062,7 @@ public class TransformationContext {
         String generatedId = "_" + UUID.randomUUID().toString().replace("-", "");
         if (stagingEnabled.get()) {
             pendingXmiIds.put(element, generatedId);
+            pendingXmiIdIndex.put(generatedId, element);
         }
         return generatedId;
     }
@@ -2059,25 +2111,34 @@ public class TransformationContext {
      */
     @SuppressWarnings("unchecked")
     private <T extends EObject> T findByXmiId(String xmiId, Class<T> targetType) {
-        if (xmiId == null || targetResourceSet.getResources().isEmpty()) {
+        if (xmiId == null) {
             return null;
         }
 
-        Resource targetResource = targetResourceSet.getResources().get(0);
-
-        // Check XMI resource for ID-based lookup
-        if (targetResource instanceof XMIResource) {
-            XMIResource xmiResource = (XMIResource) targetResource;
-            EObject element = xmiResource.getEObject(xmiId);
-            if (element != null && targetType.isInstance(element)) {
-                return (T) element;
-            }
+        // OPTIMIZATION: Check pending XMI ID index FIRST (O(1) ConcurrentHashMap lookup)
+        // During transformation with staging, newly created elements are always here.
+        // This avoids the more expensive XMIResource.getEObject() call in most cases.
+        EObject element = pendingXmiIdIndex.get(xmiId);
+        if (element != null && targetType.isInstance(element)) {
+            return (T) element;
         }
 
-        // Also check pending XMI IDs for staged elements not yet committed
-        for (Map.Entry<EObject, String> entry : pendingXmiIds.entrySet()) {
-            if (xmiId.equals(entry.getValue()) && targetType.isInstance(entry.getKey())) {
-                return (T) entry.getKey();
+        // OPTIMIZATION: Skip XMI resource lookup when staging is enabled.
+        // During staging, elements haven't been committed to the XMI resource yet,
+        // so XMIResource.getEObject() would always return null - a waste of time.
+        if (stagingEnabled.get()) {
+            return null;
+        }
+
+        // Fall back to XMI resource lookup for elements that were committed earlier
+        if (!targetResourceSet.getResources().isEmpty()) {
+            Resource targetResource = targetResourceSet.getResources().get(0);
+            if (targetResource instanceof XMIResource) {
+                XMIResource xmiResource = (XMIResource) targetResource;
+                EObject xmiElement = xmiResource.getEObject(xmiId);
+                if (xmiElement != null && targetType.isInstance(xmiElement)) {
+                    return (T) xmiElement;
+                }
             }
         }
 
@@ -2280,7 +2341,9 @@ public class TransformationContext {
         }
 
         // Always store in pendingXmiIds for later retrieval/application
+        // Also update reverse index for O(1) lookup by XMI ID
         pendingXmiIds.put(element, id);
+        pendingXmiIdIndex.put(id, element);
 
         // If element is already in a resource, apply the ID now
         Resource resource = element.eResource();

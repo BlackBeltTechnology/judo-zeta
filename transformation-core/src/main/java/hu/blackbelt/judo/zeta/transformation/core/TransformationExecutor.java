@@ -722,16 +722,22 @@ public class TransformationExecutor {
             // Atomic get-or-create: lock covers cache check + guard evaluation + rule execution
             // This prevents race conditions where multiple threads could create duplicate targets
             try {
+                final String ruleName = rule.getName();
                 context.getElementResolutionCache().getOrCreate(
                         source,
-                        rule.getName(),
+                        ruleName,
                         () -> {
                             // Guard evaluation inside the lock to prevent race conditions
                             if (!rule.evaluateGuard(source, context)) {
                                 return null;  // Guard rejected - don't execute
                             }
-                            // Rule execution inside the lock
-                            return rule.execute(source, context);
+                            // Rule execution inside the lock with timing
+                            long startNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+                            EObject result = rule.execute(source, context);
+                            if (TransformationMetrics.isEnabled()) {
+                                TransformationMetrics.recordGreedyRuleExecution(ruleName, System.nanoTime() - startNanos);
+                            }
+                            return result;
                         },
                         rule.isPrimary()
                 );

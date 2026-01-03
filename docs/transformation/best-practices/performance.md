@@ -238,13 +238,96 @@ public TransformFunction<EntityType, Table> entity2Table() {
 
 ## Profiling Transformations
 
+### TransformationMetrics
+
+Zeta includes a built-in profiling system for identifying performance bottlenecks.
+
+#### Enable Metrics
+
+```java
+// Enable before transformation
+TransformationMetrics.enable();
+
+// Run transformation
+executor.transform();
+
+// Get comprehensive report
+System.out.println(TransformationMetrics.getReport());
+
+// Disable and reset for next run
+TransformationMetrics.disable();
+TransformationMetrics.reset();
+```
+
+#### What Metrics Are Collected
+
+| Metric Category | What It Tracks |
+|-----------------|----------------|
+| **Operation Counts** | equivalent() calls, cache hits/misses, rule iterations, guard evaluations |
+| **Timing Breakdown** | Time spent in equivalent(), getRulesForSource(), guard evaluation, rule execution |
+| **Per-Rule Metrics** | Execution count and total time for each lazy and greedy rule |
+| **XMI ID Lookups** | findByXmiId() calls and scans (helps identify O(n) bottlenecks) |
+| **Lock Contention** | Lock acquisition count and wait time |
+
+#### Sample Report Output
+
+```
+========== ZETA TRANSFORMATION PERFORMANCE REPORT ==========
+
+=== OPERATION COUNTS ===
+  equivalent() calls:       45,234
+    - Cache hits:           41,892 (92.6%)
+    - Cache misses:         3,342 (7.4%)
+  getRulesForSource() calls: 3,342
+  Rule iterations:          18,456
+  Guard evaluations:        12,234
+  Rule executions:          3,342
+  findByXmiId() calls:      156
+  findByXmiId() scans:      0
+
+=== TIMING BREAKDOWN ===
+  equivalent() total:       32,853 ms
+    - getRulesForSource:    1,234 ms (3.8%)
+    - Guard evaluation:     2,456 ms (7.5%)
+    - Rule execution:       28,456 ms (86.6%)
+    - findByXmiId:          12 ms (0.0%)
+    - Cache operations:     234 ms (0.7%)
+    - Lock wait:            45 ms (0.1%)
+
+=== TOP 10 SLOWEST LAZY RULES (via equivalent()) ===
+  EntityType2EClass                                    4,567 ms (234 calls, 19.517 ms/call)
+  Reference2EReference                                 3,456 ms (567 calls, 6.095 ms/call)
+  ...
+
+=== TOP 10 SLOWEST GREEDY RULES ===
+  Model2EPackage                                       2,345 ms (12 calls, 195.417 ms/call)
+  ...
+
+=== POTENTIAL ISSUES ===
+  (none detected)
+============================================================
+```
+
+#### Identifying Bottlenecks
+
+| Issue Indicator | Meaning | Solution |
+|-----------------|---------|----------|
+| Low cache hit rate (<80%) | Repeated lookups with different params | Use consistent equivalent() calls |
+| High XMI ID scans (>1000) | O(n) linear scans in findByXmiId | Ensure using indexed lookups |
+| High ms/call for specific rule | Expensive rule implementation | Optimize rule or use @Cached |
+| High rule iterations per source | Many rules checked per element | Consider rule organization |
+
+### Basic Timer (Alternative)
+
+For simple timing without full metrics:
+
 ```java
 @PreExecution
 public void startTimer(TransformationContext ctx) {
     ctx.setAttribute("startTime", System.currentTimeMillis());
 }
 
-@PostExecution  
+@PostExecution
 public void endTimer(TransformationContext ctx) {
     long start = (long) ctx.getAttribute("startTime");
     long duration = System.currentTimeMillis() - start;
