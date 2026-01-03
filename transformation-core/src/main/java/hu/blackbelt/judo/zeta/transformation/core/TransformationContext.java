@@ -40,6 +40,7 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
@@ -1659,13 +1660,62 @@ public class TransformationContext {
         }
 
         try {
-            // Use atomic getOrCreate to prevent race conditions
-            // Multiple concurrent calls for the same (source, parentRuleName) will only execute once.
-            // The first thread's supplier runs and caches the result; other threads get the cached value.
-            // ThreadLocal state is already set up above for whichever thread ends up executing.
-            return (T) resolutionCache.getOrCreate(source, parentRuleName, () -> {
-                return parentRule.execute(source, this);
-            }, parentRule.isPrimary());
+            // Use (source, ruleName) key for cross-rule cache isolation
+            // CRITICAL: Use the SAME lock as equivalent() to prevent dual-locking race condition
+            RuleCacheKey key = new RuleCacheKey(source, parentRuleName);
+
+            // Fast path: check if already executed
+            EObject existing = executingLazyRules.get(key);
+            if (existing != null) {
+                return (T) existing;
+            }
+
+            // Check resolution cache
+            EObject cached = resolutionCache.getByRule(source, parentRuleName);
+            if (cached != null) {
+                return (T) cached;
+            }
+
+            // Acquire per-element lock for thread-safe execution
+            // CRITICAL: Using ruleLocks (same as equivalent()) ensures that concurrent calls
+            // via equivalent() and executeParentRule() for the same (source, ruleName) pair
+            // are properly synchronized - eliminating the dual-locking race condition
+            ReentrantLock lock = ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
+            boolean lockAcquired = false;
+            try {
+                lockAcquired = lock.tryLock(30, TimeUnit.SECONDS);
+                if (!lockAcquired) {
+                    throw new RuntimeException("Deadlock detected in executeParentRule for rule: " + parentRuleName);
+                }
+
+                // Double-check after acquiring lock (another thread may have completed)
+                EObject existingAfterLock = executingLazyRules.get(key);
+                if (existingAfterLock != null) {
+                    return (T) existingAfterLock;
+                }
+
+                // Also double-check resolution cache
+                cached = resolutionCache.getByRule(source, parentRuleName);
+                if (cached != null) {
+                    return (T) cached;
+                }
+
+                // Execute the rule under the unified lock
+                EObject result = parentRule.execute(source, this);
+                if (result != null) {
+                    // Cache the result atomically
+                    resolutionCache.addMapping(source, parentRuleName, result, parentRule.isPrimary());
+                    executingLazyRules.put(key, result);
+                }
+                return (T) result;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Interrupted while waiting for lock in executeParentRule", e);
+            } finally {
+                if (lockAcquired) {
+                    lock.unlock();
+                }
+            }
         } finally {
             // Restore previous inheritance state
             // ThreadLocal is per-thread, so restoration is safe even if this thread's supplier wasn't called
