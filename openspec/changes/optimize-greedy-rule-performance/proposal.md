@@ -3,14 +3,23 @@
 **Change ID:** optimize-greedy-rule-performance
 **Status:** Superseded
 **Created:** 2026-01-03
+**Updated:** 2026-01-03
 
-> **Note:** The main bottleneck (XMI resource lookups consuming 91% of greedy rule time) was solved by adding `skipXmiIdResourceLookup` flag. ZETA is now 2.5x faster than ETL.
+> **Note:** The main bottleneck (XMI resource lookups consuming 91% of greedy rule time) was solved by adding `skipXmiIdResourceLookup` flag. ZETA is now 2.5x faster than ETL (9,007 ms vs 40,844 ms).
 >
 > The optimizations below (rule lookup caching, pre-partitioning) remain valid for potential future improvements if profiling reveals they become bottlenecks.
 
-## Why
+## Current Performance (After XMI Optimization)
 
-TransformationMetrics profiling shows that greedy rule execution consumes the majority of transformation time. For the RackInspect model (40,844 ms → 32,853 ms after XMI ID optimization), greedy rules still dominate the timing breakdown.
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| Total ZETA time | 40,844 ms | 9,007 ms | **-78%** |
+| Greedy rules | 20,561 ms | 1,759 ms | **-91%** |
+| vs ETL | 1.79x slower | **2.5x faster** | |
+
+## Why (Historical Context)
+
+TransformationMetrics profiling initially showed that greedy rule execution consumed the majority of transformation time. The main bottleneck was **XMI resource lookups** (solved), not rule lookup overhead (proposed below).
 
 **Root Cause Analysis:**
 
@@ -92,7 +101,7 @@ private List<TransformRuleDescriptor> activityBasedRules;    // activityBased
 
 Change from element-centric to rule-centric iteration:
 
-**Current (O(n×r) lookups):**
+**Current - Element-Centric (ETL-Compatible):**
 ```java
 for (EObject source : sourceElements) {
     Collection<TransformRuleDescriptor> rules = registry.getRulesForSource(source.getClass());
@@ -102,7 +111,7 @@ for (EObject source : sourceElements) {
 }
 ```
 
-**Optimized (O(r) lookups):**
+**Optimized - Rule-Centric:**
 ```java
 for (TransformRuleDescriptor rule : registry.getEagerGreedyRules()) {
     Collection<EObject> matchingSources = collectMatchingSources(rule, sourceElements);
@@ -112,7 +121,22 @@ for (TransformRuleDescriptor rule : registry.getEagerGreedyRules()) {
 }
 ```
 
-**Impact:**
+**Execution Order Clarification:**
+
+| Mode | Iteration Strategy | When to Use |
+|------|-------------------|-------------|
+| ETL Compatibility ON | Element-Centric | Migrating from ETL, need identical semantics |
+| ETL Compatibility OFF | Rule-Centric | New transformations, maximum performance |
+
+Configure via:
+```java
+TransformationExecutor.builder()
+    .etlCompatibilityMode(true)  // Element-centric (default for migration)
+    .etlCompatibilityMode(false) // Rule-centric (performance mode)
+    .build();
+```
+
+**Impact (Rule-Centric mode):**
 - Rule lookup happens once per rule, not once per element
 - Better cache locality - process all elements for one rule before moving to next
 - Parallel execution still works - partition elements per rule
@@ -180,7 +204,19 @@ result.add(rule);  // Preserves order, deduplicates in O(1)
 ## Risks
 
 - **Memory overhead:** Caching adds memory usage. Mitigate with lazy initialization and weak references if needed.
-- **Cache invalidation:** Registry is immutable after setup, so no invalidation needed.
+- **Cache invalidation:** If `register()` is called after cache is populated, **invalidate all caches**:
+  ```java
+  public void register(Class<?> transformationClass) {
+      // ... existing registration logic ...
+
+      // Invalidate caches on dynamic registration
+      rulesBySourceTypeCache.clear();
+      eagerGreedyRules = null;
+      eagerNonGreedyRules = null;
+      lazyRules = null;
+      nonGreedyRulesByTypeName = null;
+  }
+  ```
 - **Rule ordering:** Pre-partitioning must preserve registration order for deterministic execution.
 
 ## Alternatives Considered

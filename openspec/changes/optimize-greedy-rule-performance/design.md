@@ -1,5 +1,15 @@
 # Design: Optimize Greedy Rule Performance
 
+## Current Performance (After XMI Optimization)
+
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| Total ZETA time | 40,844 ms | 9,007 ms | **-78%** |
+| Greedy rules | 20,561 ms | 1,759 ms | **-91%** |
+| vs ETL | 1.79x slower | **2.5x faster** | |
+
+> The main bottleneck (XMI resource lookups) was solved. The optimizations below target remaining overhead if profiling reveals it becomes significant.
+
 ## Current Architecture
 
 ```
@@ -253,10 +263,48 @@ All caches use thread-safe data structures:
 
 **Total:** < 1KB additional memory for typical transformations.
 
+## ETL Compatibility Mode
+
+The executor supports two iteration strategies controlled by `etlCompatibilityMode`:
+
+| Mode | Strategy | Execution Order |
+|------|----------|-----------------|
+| `etlCompatibilityMode=true` (default) | Element-Centric | For each element, execute all applicable rules |
+| `etlCompatibilityMode=false` | Rule-Centric | For each rule, execute on all matching elements |
+
+```java
+TransformationExecutor.builder()
+    .etlCompatibilityMode(true)   // ETL-compatible (element-centric)
+    .etlCompatibilityMode(false)  // Performance mode (rule-centric)
+    .build();
+```
+
+**When to use Rule-Centric:**
+- New transformations not migrating from ETL
+- Performance-critical scenarios where element order doesn't affect semantics
+- Large models (100K+ elements) where cache locality matters
+
+## Cache Invalidation
+
+If `register()` is called after caches are populated, **all caches must be invalidated**:
+
+```java
+public void register(Class<?> transformationClass) {
+    // ... existing registration logic ...
+
+    // Invalidate caches on dynamic registration
+    rulesBySourceTypeCache.clear();
+    eagerGreedyRules = null;
+    eagerNonGreedyRules = null;
+    lazyRules = null;
+    nonGreedyRulesByTypeName = null;
+}
+```
+
 ## Backward Compatibility
 
 All optimizations are internal implementation details:
 - Same public API
-- Same execution semantics
+- Same execution semantics (when `etlCompatibilityMode=true`)
 - Same deterministic ordering (LinkedHashSet preserves insertion order)
 - Same XMI IDs generated
