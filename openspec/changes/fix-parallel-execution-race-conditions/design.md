@@ -139,18 +139,8 @@ During single-threaded commit:
 3. EMF's bidirectional reference update is not atomic
 4. Commit phase sees `eContainer() == null` due to timing
 
-**Fix Options:**
+**Selected Solution: Defer containment to commit phase**
 
-**Option A: Synchronize all containment operations**
-```java
-// Every containment assignment wrapped:
-synchronized(targetResource) {
-    parent.setIcon(icon);
-}
-```
-- Simple but kills parallelism benefits
-
-**Option B: Defer containment to commit phase (RECOMMENDED)**
 ```java
 // During parallel phase - just record the operation:
 ctx.deferContainment(parent, "icon", icon);
@@ -160,23 +150,38 @@ for (DeferredContainment dc : deferredContainments) {
     dc.apply();  // Safe: single-threaded
 }
 ```
-- Preserves parallelism
-- More complex implementation
 
-**Option C: Re-check containment at commit time**
+**Benefits:**
+- Preserves parallelism during transformation phase
+- All EMF containment operations happen in single thread
+- No synchronization overhead during parallel execution
+
+**Implementation Details:**
+
 ```java
-// During commit:
-for (StagedElement staged : stagedElements) {
-    // Re-check: containment may have been set after staging
-    if (staged.isRootElement() && staged.getElement().eContainer() == null) {
-        resource.getContents().add(staged.getElement());
+class DeferredContainment {
+    EObject parent;
+    String featureName;
+    EObject child;
+
+    void apply() {
+        EStructuralFeature feature = parent.eClass().getEStructuralFeature(featureName);
+        if (feature.isMany()) {
+            ((EList<EObject>) parent.eGet(feature)).add(child);
+        } else {
+            parent.eSet(feature, child);
+        }
     }
 }
 ```
-- Minimal change
-- May still have race window
 
-## Proposed Architecture: Thread-Isolated Processing
+---
+
+## Future Work: Thread-Isolated Architecture
+
+> **Note:** The Thread-Isolated Architecture has been moved to a separate proposal: `implement-thread-isolated-parallel-architecture`
+>
+> The detailed design below is preserved for reference but will be implemented in that separate proposal.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐

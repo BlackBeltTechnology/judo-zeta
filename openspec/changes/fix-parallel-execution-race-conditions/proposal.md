@@ -189,68 +189,40 @@ Replace shared-state parallel execution with a thread-isolated architecture:
 
 ## Implementation Strategy
 
-**Decision:** Implement both Phase 1 and Phase 2 sequentially. Phase 1 provides immediate safety while Phase 2 delivers the optimal long-term solution.
+**Scope:** This proposal focuses on immediate correctness fixes only. The Thread-Isolated Architecture has been moved to a separate proposal (`implement-thread-isolated-parallel-architecture`).
 
-**Activation:** Thread-isolated mode auto-selects for models with >1000 elements.
+### Phase 1: Immediate Fixes
 
-### Phase 1: Immediate Fixes (Short-Term)
+1. ~~**Add Global Lock for Cross-Thread Cache Access**~~ *(NOT NEEDED)*
+   - Current implementation already has proper locking via `getOrCreate()`
 
-Deploy first to provide immediate safety for production.
-
-1. **Add Global Lock for Cross-Thread Cache Access**
-   - Fallback synchronization when local cache misses
-   - Performance impact acceptable for correctness
-
-2. **Synchronize ALL EMF Containment Operations** *(EXPANDED SCOPE)*
+2. **Defer EMF Containment to Commit Phase** *(CRITICAL)*
    - **Step 1:** Reproduce the race condition with a failing test first
-   - **Step 2:** Implement fix (one of the options below)
-   - **Not just** `Resource.getContents().add()` calls
-   - **ALL containment assignments** like `parent.setIcon(icon)`, `parent.getChildren().add(child)`
-   - EMF bidirectional reference updates are NOT atomic
-   - Use `synchronized(targetResource)` blocks around all containment operations
-   - **Alternative:** Defer containment assignments to single-threaded commit phase
+   - **Step 2:** If reproduced, implement deferred containment
+   - Stage containment operations instead of executing immediately
+   - Execute all containment assignments in single-threaded commit phase
+   - **Note:** If reproduction fails, proposal will be updated accordingly
 
-3. **Reproduce Production Issues**
-   - Create stress tests that replicate exact production failure patterns
-   - Test with high contention on same source elements
-   - Test with complex cross-rule reference chains
-   - Test with @Extends inheritance under parallel execution
-   - **NEW:** Test `autoAddRootElements=true` with containment assignments
-
-### Phase 2: Thread-Isolated Architecture (Long-Term)
-
-Deploy after Phase 1 to eliminate synchronization overhead.
-
-1. **Implement Partition Strategy**
-   - Partition by source element container
-   - Balance partition sizes
-   - Auto-select for models >1000 elements
-
-2. **Thread-Local Caches**
-   - Each worker thread has isolated cache
-   - No shared mutable state during transformation
-
-3. **Merge Phase Implementation**
-   - Merge local caches deterministically
-   - Resolve cross-partition references
-   - Commit to Resource
-
-4. **Performance Validation**
-   - Verify speedup maintained (target: 3x+)
-   - Verify correctness on large models
+3. **Stress Tests** *(COMPLETE)*
+   - `equivalent()` with high contention: ✅ Passes
+   - `equivalentDiscriminated()`: ✅ Fixed with double-checked locking
+   - Cross-rule reference chains: ✅ Passes
+   - @Extends inheritance: ✅ Passes
 
 ## Success Criteria
 
-1. All existing 444+ tests pass
-2. New parallel stress tests pass with high contention
+1. All existing 600+ tests pass
+2. Parallel stress tests pass with high contention
 3. Production transformation produces identical results in sequential and parallel modes
-4. Performance speedup ≥ 3x for large models
-5. No race conditions detected under stress testing
+4. No race conditions detected under stress testing
 
 ## Risks and Mitigations
 
 | Risk | Mitigation |
 |------|------------|
-| Performance regression from added synchronization | Phase 1 is temporary; Phase 2 eliminates need |
-| Partition strategy may not eliminate all cross-refs | Deferred reference resolution handles edge cases |
-| Complex merge logic may introduce bugs | Extensive testing, incremental implementation |
+| Cannot reproduce EMF containment issue | Update proposal with findings, may close as "cannot reproduce" |
+| Deferred containment adds complexity | Clear API design, comprehensive tests |
+
+## Future Work
+
+The Thread-Isolated Architecture for eliminating synchronization overhead is tracked in a separate proposal: `implement-thread-isolated-parallel-architecture`

@@ -2,11 +2,11 @@
 
 ## Phase 1: Immediate Fixes (Short-Term)
 
-- [ ] **1.1 Add global lock for cross-thread cache access**
-  - Add fallback synchronization when local cache misses
-  - Use `ReentrantReadWriteLock` for read-heavy access patterns
-  - *Dependency:* None
-  - *Location:* `transformation-core/src/main/java/.../ElementResolutionCache.java`
+- [x] ~~**1.1 Add global lock for cross-thread cache access**~~
+  - **NOT NEEDED** - Current implementation already has proper locking:
+    - `equivalent()` uses `getOrCreate()` with per-key locking
+    - `equivalentDiscriminated()` fixed in Task 1.3.2
+  - *Status:* SKIPPED
 
 - [ ] **1.2a Reproduce EMF containment race condition with tests** *(PREREQUISITE)*
 
@@ -26,7 +26,7 @@
   - *Dependency:* None
   - *Blocking:* Task 1.2b (fix cannot proceed until reproduction confirmed)
 
-- [ ] **1.2b Synchronize ALL EMF Containment Operations** *(CRITICAL - EXPANDED SCOPE)*
+- [ ] **1.2b Defer EMF Containment to Commit Phase** *(CRITICAL)*
 
   **Problem:** EMF containment operations are NOT thread-safe. When `autoAddRootElements=true`:
   1. Every element created via `createTarget()` is staged with `isRootElement=true`
@@ -35,25 +35,22 @@
   4. Icons lose their container reference (`eContainer() == null`)
   5. During commit, orphaned Icons are added to the resource as root elements
 
-  **Scope (choose one approach):**
-
-  **Option A: Synchronize containment operations**
-  - Wrap ALL containment assignments with `synchronized(targetResource)`:
-    - `parent.setIcon(icon)` → synchronized
-    - `parent.getChildren().add(child)` → synchronized
-    - `Resource.getContents().add()` → synchronized
-  - *Pros:* Minimal code changes
-  - *Cons:* Performance impact from contention
-
-  **Option B: Defer containment to commit phase** *(RECOMMENDED)*
+  **Solution: Defer containment to commit phase**
   - Stage containment operations instead of executing immediately
   - Execute all containment assignments in single-threaded commit phase
   - *Pros:* No synchronization needed during parallel phase
   - *Cons:* More complex implementation, requires tracking deferred operations
 
+  **Implementation:**
+  - Create `DeferredContainment` class to record pending containment operations
+  - Add `deferContainment(parent, featureName, child)` API to TransformationContext
+  - Execute deferred containments in single-threaded commit phase
+  - Re-check `eContainer()` at commit time to avoid duplicates
+
   - *Dependency:* **1.2a** (must reproduce issue first)
   - *Location:* `transformation-core/src/main/java/.../TransformationContext.java`
   - *Related:* Esm2UiZetaTransformation.java:272 (`autoAddRootElements=true`)
+  - *Note:* If 1.2a cannot reproduce the issue, this task and proposal will be updated accordingly
 
 - [x] **1.3 Add stress tests for high contention scenarios**
   - Created `ParallelRaceConditionStressTest.java`
@@ -79,157 +76,27 @@
   - **Result:** All 30 test runs pass with exactly 6 clones (0 duplicates)
   - *Location:* `transformation-core/src/main/java/.../TransformationContext.java` (lines 1403-1475)
 
-- [ ] **1.4 Verify Phase 1 fixes don't break existing tests**
-  - Run all 444+ tests in sequential mode
+## Phase 2: Validation
+
+- [ ] **2.1 Verify fixes don't break existing tests**
+  - Run all 600+ tests in sequential mode
   - Run all tests in parallel mode
   - Verify no performance regression > 20%
-  - *Dependency:* 1.1, 1.2
+  - *Dependency:* 1.2a, 1.2b
 
-## Phase 2: Thread-Isolated Architecture (Long-Term)
-
-### Partition Strategy
-
-- [ ] **2.1 Implement partition strategy**
-  - Create `PartitionStrategy` interface
-  - Implement `ContainerBasedPartition` (partition by source element container)
-  - Implement `TypeBasedPartition` (partition by source element type)
-  - Add partition balancing logic
-  - *Dependency:* Phase 1 complete
-  - *Location:* `transformation-core/src/main/java/.../parallel/`
-
-- [ ] **2.2 Create partition analyzer**
-  - Analyze source model to determine optimal partition boundaries
-  - Identify cross-partition references upfront
-  - Balance partition sizes for even workload distribution
-  - *Dependency:* 2.1
-  - *Location:* `transformation-core/src/main/java/.../parallel/PartitionAnalyzer.java`
-
-### Thread-Local State
-
-- [ ] **2.3 Implement thread-local caches**
-  - Create `ThreadLocalResolutionCache` with per-thread storage
-  - Each worker thread has isolated cache instance
-  - No synchronization needed for local cache operations
-  - *Dependency:* 2.1
-  - *Location:* `transformation-core/src/main/java/.../parallel/ThreadLocalResolutionCache.java`
-
-- [ ] **2.4 Implement thread-local element staging**
-  - Create `ThreadLocalElementQueue` for staging created elements
-  - Elements not added to Resource until merge phase
-  - Track sequence numbers for deterministic ordering
-  - *Dependency:* 2.3
-  - *Location:* `transformation-core/src/main/java/.../parallel/ThreadLocalElementQueue.java`
-
-- [ ] **2.5 Add cross-partition reference placeholders**
-  - Create `DeferredReference` class for cross-partition references
-  - Record (source, ruleName, targetType) for later resolution
-  - Store placeholder in local cache until merge
-  - *Dependency:* 2.3, 2.4
-  - *Location:* `transformation-core/src/main/java/.../parallel/DeferredReference.java`
-
-### Merge Phase
-
-- [ ] **2.6 Implement cache merge logic**
-  - Merge all thread-local caches into global cache
-  - Resolve any conflicts (should not occur with proper partitioning)
-  - Verify no duplicate entries
-  - *Dependency:* 2.3, 2.4, 2.5
-  - *Location:* `transformation-core/src/main/java/.../parallel/CacheMerger.java`
-
-- [ ] **2.7 Implement reference resolution**
-  - Resolve all `DeferredReference` placeholders
-  - Look up actual targets from merged cache
-  - Update EMF references to point to resolved targets
-  - *Dependency:* 2.6
-  - *Location:* `transformation-core/src/main/java/.../parallel/ReferenceResolver.java`
-
-- [ ] **2.8 Implement element commit logic**
-  - Commit staged elements to Resource in deterministic order
-  - Sort by sequence number within partition
-  - Apply containment relationships correctly
-  - *Dependency:* 2.6, 2.7
-  - *Location:* `transformation-core/src/main/java/.../parallel/ElementCommitter.java`
-
-### Integration
-
-- [ ] **2.9 Integrate thread-isolated architecture into TransformationExecutor**
-  - Add option to use new architecture: `parallelStrategy(ParallelStrategy.THREAD_ISOLATED)`
-  - Default to current implementation for backward compatibility
-  - Switch based on model size threshold
-  - *Dependency:* 2.6, 2.7, 2.8
-  - *Location:* `transformation-core/src/main/java/.../TransformationExecutor.java`
-
-- [ ] **2.10 Update TransformationContext for thread-isolated mode**
-  - Route cache operations through thread-local storage
-  - Handle cross-partition equivalent() calls
-  - Support both legacy and new parallel modes
-  - *Dependency:* 2.9
-  - *Location:* `transformation-core/src/main/java/.../TransformationContext.java`
-
-## Phase 3: Validation
-
-- [ ] **3.1 Create comprehensive parallel stress tests**
-  - Test with 10,000+ elements
-  - Test with deep inheritance hierarchies
-  - Test with heavy cross-rule references
-  - *Dependency:* 2.9, 2.10
-
-- [ ] **3.2 Validate sequential/parallel equivalence**
-  - Run same transformation in both modes
-  - Compare element counts
-  - Compare all element attributes and references
-  - *Dependency:* 3.1
-
-- [ ] **3.3 Performance benchmarking**
-  - Measure speedup vs sequential (target: 3x+)
-  - Measure overhead vs current parallel implementation
-  - Profile hot paths for optimization
-  - *Dependency:* 3.2
-
-- [ ] **3.4 Run full test suite**
-  - All 444+ tests pass
+- [ ] **2.2 Run full test suite**
+  - All tests pass
   - No regressions in sequential mode
   - Parallel mode produces identical results
-  - *Dependency:* 3.3
+  - *Dependency:* 2.1
 
-## Implementation Notes
+---
 
-### Partition Strategy Details
+## Future Work (Separate Proposal)
 
-```
-Partition by Container:
-  Container A → Partition 1 (Elements: A1, A2, A3)
-  Container B → Partition 2 (Elements: B1, B2, B3)
-  Container C → Partition 3 (Elements: C1, C2, C3)
-
-Cross-Partition Reference:
-  A1 references B2 → DeferredReference(A1, "RuleX", B2)
-  Resolved during merge phase
-```
-
-### Thread-Local Cache Structure
-
-```java
-class ThreadLocalResolutionCache {
-    // Thread-local storage for each worker
-    private static final ThreadLocal<Map<CacheKey, Object>> localCache =
-        ThreadLocal.withInitial(HashMap::new);
-
-    // Cross-partition references awaiting resolution
-    private static final ThreadLocal<List<DeferredReference>> deferredRefs =
-        ThreadLocal.withInitial(ArrayList::new);
-}
-```
-
-### Merge Phase Algorithm
-
-1. Collect all thread-local caches
-2. Merge into global cache (check for conflicts)
-3. Collect all deferred references
-4. Resolve each reference from global cache
-5. Collect all staged elements
-6. Sort by sequence number
-7. Commit to Resource in order
+> **Note:** The Thread-Isolated Architecture has been moved to a separate proposal: `implement-thread-isolated-parallel-architecture`
+>
+> This proposal focuses on immediate correctness fixes. The long-term architectural improvements will be addressed separately after these fixes are validated.
 
 ## Verification Criteria
 
@@ -237,5 +104,4 @@ class ThreadLocalResolutionCache {
 2. All containment relationships are correct
 3. No NPE during EMF iteration
 4. No duplicate elements in collections
-5. Performance speedup >= 3x for large models
-6. All 444+ tests pass
+5. All 600+ tests pass
