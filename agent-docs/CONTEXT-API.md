@@ -182,6 +182,68 @@ ctx.setTransformationRegistry(registry);
 ctx.setTargetPackage(RDBMSPackage.eINSTANCE);
 ```
 
+## Structured XMI IDs
+
+ETL-style structured IDs provide meaningful, traceable identifiers.
+
+### Configuration
+
+```java
+// Enable/disable (default: true)
+ctx.setUseStructuredIds(true);
+
+// Check if enabled
+boolean enabled = ctx.isUseStructuredIds();
+
+// Include element name prefix (default: false)
+ctx.setIncludeElementNameInStructuredIds(true);
+
+// Set preferred source alias for ID generation
+ctx.registerResource("esm", sourceResourceSet);
+ctx.setPreferredSourceAlias("esm");
+```
+
+### ID Format
+
+Default format (element name excluded):
+```
+(<alias>/<source-id>)/<rule-name>
+```
+
+**Example**: `(esm/_abc123)/Entity2Package`
+
+With element name included (`setIncludeElementNameInStructuredIds(true)`):
+```
+<element-name>/(<alias>/<source-id>)/<rule-name>
+```
+
+**Example**: `Customer/(esm/_abc123)/Entity2Package`
+
+For discriminated:
+```
+(<alias>/<source-id>)/<rule-name>/(discriminator/<value>)
+```
+
+### Edge Cases (Falls Back to `_seqN`)
+
+| Condition | Result |
+|-----------|--------|
+| `createTarget()` outside rule | `_seqN` |
+| Source not in Resource | `_<hashcode>` in path |
+| Source has no XMI ID | `_<hashcode>` in path |
+| `useStructuredIds=false` | `_seqN` |
+
+### Ensuring Structured IDs Work
+
+```java
+// 1. Set XMI IDs on source elements
+((XMIResource) sourceResource).setID(entity, "_id123");
+
+// 2. Only call createTarget() inside rules (not static helpers)
+
+// 3. Use setPreferredSourceAlias() for multi-resource scenarios
+```
+
 ## Complete Setup Example
 
 ```java

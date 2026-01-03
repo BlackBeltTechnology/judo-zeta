@@ -197,6 +197,13 @@ public class TransformationContext {
     private volatile boolean useStructuredIds = true;
 
     /**
+     * Whether to include the source element's name as a prefix in structured IDs.
+     * When false (default), IDs are: (alias/sourceId)/RuleName
+     * When true, IDs are: ElementName/(alias/sourceId)/RuleName
+     */
+    private volatile boolean includeElementNameInStructuredIds = false;
+
+    /**
      * When true, treat all @Greedy @Lazy rules as activity-based.
      * This matches Epsilon ETL behavior where greedy lazy rules only process
      * elements that are referenced via equivalent() calls.
@@ -295,6 +302,44 @@ public class TransformationContext {
             return Objects.hash(source, ruleName);
         }
     }
+
+    /**
+     * Cache key for discriminated equivalent lookups.
+     * Combines source element, rule name, and discriminator value.
+     */
+    private static class DiscriminatedCacheKey {
+        final EObject source;
+        final String ruleName;
+        final String discriminator;
+
+        DiscriminatedCacheKey(EObject source, String ruleName, String discriminator) {
+            this.source = source;
+            this.ruleName = ruleName;
+            this.discriminator = discriminator;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            DiscriminatedCacheKey that = (DiscriminatedCacheKey) o;
+            return Objects.equals(source, that.source)
+                    && Objects.equals(ruleName, that.ruleName)
+                    && Objects.equals(discriminator, that.discriminator);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(source, ruleName, discriminator);
+        }
+    }
+
+    /**
+     * Per-key locks for thread-safe discriminated equivalent execution.
+     * Uses ReentrantLock to prevent duplicate clone creation when multiple threads
+     * call equivalentDiscriminated() with the same (source, ruleName, discriminator) tuple.
+     */
+    private final ConcurrentHashMap<DiscriminatedCacheKey, ReentrantLock> discriminatedLocks = new ConcurrentHashMap<>();
 
     // Thread-local set to track in-progress named rule executions (prevents recursion)
     private final ThreadLocal<Set<NamedRuleKey>> inProgressNamedRules = ThreadLocal.withInitial(HashSet::new);
@@ -486,6 +531,30 @@ public class TransformationContext {
      */
     public boolean isUseStructuredIds() {
         return useStructuredIds;
+    }
+
+    /**
+     * Enable or disable element name prefix in structured IDs.
+     *
+     * <p>When disabled (default), structured IDs have the format:
+     * {@code (alias/sourceId)/RuleName}</p>
+     *
+     * <p>When enabled, structured IDs have the format:
+     * {@code ElementName/(alias/sourceId)/RuleName}</p>
+     *
+     * @param include true to include element name prefix, false to exclude (default)
+     */
+    public void setIncludeElementNameInStructuredIds(boolean include) {
+        this.includeElementNameInStructuredIds = include;
+    }
+
+    /**
+     * Check if element name prefix is included in structured IDs.
+     *
+     * @return true if element name prefix is included, false otherwise (default)
+     */
+    public boolean isIncludeElementNameInStructuredIds() {
+        return includeElementNameInStructuredIds;
     }
 
     /**
@@ -797,55 +866,64 @@ public class TransformationContext {
      */
     @SuppressWarnings("unchecked")
     private <T extends EObject> T createTargetInPackage(Class<T> targetType, EPackage pkg) {
-        // During @Extends inheritance execution, return pre-created target if compatible
-        // This enables ETL-style inheritance: all rules in the chain share the same target
-        if (Boolean.TRUE.equals(inInheritanceExecution.get())) {
-            EObject preCreated = preCreatedTarget.get();
-            if (preCreated != null && targetType.isInstance(preCreated)) {
-                return targetType.cast(preCreated);
+        long startNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+        TransformationMetrics.recordCreateTarget();
+
+        try {
+            // During @Extends inheritance execution, return pre-created target if compatible
+            // This enables ETL-style inheritance: all rules in the chain share the same target
+            if (Boolean.TRUE.equals(inInheritanceExecution.get())) {
+                EObject preCreated = preCreatedTarget.get();
+                if (preCreated != null && targetType.isInstance(preCreated)) {
+                    return targetType.cast(preCreated);
+                }
+            }
+
+            String typeName = targetType.getSimpleName();
+            EClass eClass = (EClass) pkg.getEClassifier(typeName);
+
+            if (eClass == null) {
+                throw new IllegalArgumentException(
+                        "EClass '" + typeName + "' not found in package: " + pkg.getNsURI());
+            }
+
+            EObject instance = pkg.getEFactoryInstance().create(eClass);
+
+            // Generate and set XMI ID
+            // When useStructuredIds is enabled: ETL-style structured ID
+            // When disabled: simple UUID
+            EObject source = currentSource.get();
+            TransformRuleDescriptor rule = currentExecutingRule.get();
+            String ruleName = rule != null ? rule.getName() : null;
+            String targetId = generateStructuredId(source, ruleName);
+            setElementId(instance, targetId);
+
+            // Check if current rule is @Detached - detached rules NEVER add to resource
+            // The caller is responsible for adding to the appropriate container
+            boolean isDetached = isCurrentRuleDetached();
+
+            // When autoAddRootElements is enabled AND rule is NOT detached, add to resource
+            // @Detached overrides autoAddRootElements
+            if (autoAddRootElements && !isDetached) {
+                addToResource(instance);
+            }
+
+            // Otherwise ETL semantics: do NOT add to resource root automatically
+            // Elements become part of the model when assigned to containment references
+            // Use addToResource() explicitly for true root elements
+
+            // Wrap with deferred proxy if deferred writes mode is enabled
+            // The proxy intercepts setter and list operations, deferring them until commit
+            if (deferredWritesEnabled) {
+                return DeferredEObject.createProxy((T) instance, operationQueue);
+            }
+
+            return (T) instance;
+        } finally {
+            if (TransformationMetrics.isEnabled()) {
+                TransformationMetrics.addCreateTargetNanos(System.nanoTime() - startNanos);
             }
         }
-
-        String typeName = targetType.getSimpleName();
-        EClass eClass = (EClass) pkg.getEClassifier(typeName);
-
-        if (eClass == null) {
-            throw new IllegalArgumentException(
-                    "EClass '" + typeName + "' not found in package: " + pkg.getNsURI());
-        }
-
-        EObject instance = pkg.getEFactoryInstance().create(eClass);
-
-        // Generate and set XMI ID
-        // When useStructuredIds is enabled: ETL-style structured ID
-        // When disabled: simple UUID
-        EObject source = currentSource.get();
-        TransformRuleDescriptor rule = currentExecutingRule.get();
-        String ruleName = rule != null ? rule.getName() : null;
-        String targetId = generateStructuredId(source, ruleName);
-        setElementId(instance, targetId);
-
-        // Check if current rule is @Detached - detached rules NEVER add to resource
-        // The caller is responsible for adding to the appropriate container
-        boolean isDetached = isCurrentRuleDetached();
-
-        // When autoAddRootElements is enabled AND rule is NOT detached, add to resource
-        // @Detached overrides autoAddRootElements
-        if (autoAddRootElements && !isDetached) {
-            addToResource(instance);
-        }
-
-        // Otherwise ETL semantics: do NOT add to resource root automatically
-        // Elements become part of the model when assigned to containment references
-        // Use addToResource() explicitly for true root elements
-
-        // Wrap with deferred proxy if deferred writes mode is enabled
-        // The proxy intercepts setter and list operations, deferring them until commit
-        if (deferredWritesEnabled) {
-            return DeferredEObject.createProxy((T) instance, operationQueue);
-        }
-
-        return (T) instance;
     }
 
     /**
@@ -1067,7 +1145,16 @@ public class TransformationContext {
      * @return list of equivalent targets
      */
     public <T extends EObject> List<T> equivalents(EObject source, Class<T> targetType) {
-        return resolutionCache.getEquivalents(source, targetType);
+        long startNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+        TransformationMetrics.recordEquivalentsCall();
+
+        try {
+            return resolutionCache.getEquivalents(source, targetType);
+        } finally {
+            if (TransformationMetrics.isEnabled()) {
+                TransformationMetrics.addEquivalentsNanos(System.nanoTime() - startNanos);
+            }
+        }
     }
 
     /**
@@ -1087,117 +1174,128 @@ public class TransformationContext {
      */
     @SuppressWarnings("unchecked")
     public <T extends EObject> T equivalent(EObject source, String ruleName) {
-        if (ruleName == null || transformationRegistry == null) {
-            return null;
-        }
+        long startNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+        TransformationMetrics.recordEquivalentCall();
 
-        // Check cache first by rule name
-        EObject cached = resolutionCache.getByRule(source, ruleName);
-        if (cached != null) {
-            return (T) cached;
-        }
-
-        // Find the specific rule
-        TransformRuleDescriptor rule = transformationRegistry.getRuleByName(ruleName);
-        if (rule == null || !rule.appliesTo(source)) {
-            return null;
-        }
-
-        // Record activation for effectively activity-based rules
-        // This tracks which elements were referenced via equivalent()
-        // For activity-based rules, we ONLY record activation and return null
-        // The actual execution happens in Phase 2 (executeActivityBasedRules)
-        if (isEffectivelyActivityBased(rule)) {
-            activate(rule.getName(), source);
-            // Don't execute now - Phase 2 will execute for activated elements
-            return null;
-        }
-
-        // When structured IDs are enabled, try XMI ID-based lookup first (ETL semantics)
-        if (useStructuredIds) {
-            String structuredId = generateStructuredId(source, ruleName);
-            T existingByXmiId = findByXmiId(structuredId, (Class<T>) rule.getTargetType());
-            if (existingByXmiId != null) {
-                // Found by XMI ID - cache it and return
-                resolutionCache.addMapping(source, ruleName, existingByXmiId, rule.isPrimary());
-                return existingByXmiId;
-            }
-        }
-
-        // ETL semantics: guards ARE evaluated at invocation time for @lazy rules
-        if (!rule.evaluateGuard(source, this)) {
-            return null;
-        }
-
-        // Use (source, ruleName) key for cross-rule cache isolation
-        RuleCacheKey key = new RuleCacheKey(source, ruleName);
-
-        // Fast path: check if already executed
-        EObject existing = executingLazyRules.get(key);
-        if (existing != null) {
-            return (T) existing;
-        }
-
-        // Check for recursion - if we're already executing this rule for this source
-        NamedRuleKey ruleKey = new NamedRuleKey(source, ruleName);
-        Set<NamedRuleKey> inProgress = inProgressNamedRules.get();
-        if (inProgress.contains(ruleKey)) {
-            // Recursive call detected - return null to break the cycle
-            return null;
-        }
-
-        // Acquire per-element lock for thread-safe execution
-        ReentrantLock lock = ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
-        lock.lock();
         try {
-            // Double-check after acquiring lock (another thread may have completed)
-            EObject existingAfterLock = executingLazyRules.get(key);
-            if (existingAfterLock != null) {
-                return (T) existingAfterLock;
+            if (ruleName == null || transformationRegistry == null) {
+                return null;
             }
 
-            // Also double-check resolution cache
-            cached = resolutionCache.getByRule(source, ruleName);
+            // Check cache first by rule name
+            EObject cached = resolutionCache.getByRule(source, ruleName);
             if (cached != null) {
+                TransformationMetrics.recordEquivalentCacheHit();
                 return (T) cached;
             }
+            TransformationMetrics.recordEquivalentCacheMiss();
 
-            // Mark as in-progress for recursion detection
-            inProgress.add(ruleKey);
+            // Find the specific rule
+            TransformRuleDescriptor rule = transformationRegistry.getRuleByName(ruleName);
+            if (rule == null || !rule.appliesTo(source)) {
+                return null;
+            }
+
+            // Record activation for effectively activity-based rules
+            // This tracks which elements were referenced via equivalent()
+            // For activity-based rules, we ONLY record activation and return null
+            // The actual execution happens in Phase 2 (executeActivityBasedRules)
+            if (isEffectivelyActivityBased(rule)) {
+                activate(rule.getName(), source);
+                // Don't execute now - Phase 2 will execute for activated elements
+                return null;
+            }
+
+            // When structured IDs are enabled, try XMI ID-based lookup first (ETL semantics)
+            if (useStructuredIds) {
+                String structuredId = generateStructuredId(source, ruleName);
+                T existingByXmiId = findByXmiId(structuredId, (Class<T>) rule.getTargetType());
+                if (existingByXmiId != null) {
+                    // Found by XMI ID - cache it and return
+                    resolutionCache.addMapping(source, ruleName, existingByXmiId, rule.isPrimary());
+                    return existingByXmiId;
+                }
+            }
+
+            // ETL semantics: guards ARE evaluated at invocation time for @lazy rules
+            if (!rule.evaluateGuard(source, this)) {
+                return null;
+            }
+
+            // Use (source, ruleName) key for cross-rule cache isolation
+            RuleCacheKey key = new RuleCacheKey(source, ruleName);
+
+            // Fast path: check if already executed
+            EObject existing = executingLazyRules.get(key);
+            if (existing != null) {
+                return (T) existing;
+            }
+
+            // Check for recursion - if we're already executing this rule for this source
+            NamedRuleKey ruleKey = new NamedRuleKey(source, ruleName);
+            Set<NamedRuleKey> inProgress = inProgressNamedRules.get();
+            if (inProgress.contains(ruleKey)) {
+                // Recursive call detected - return null to break the cycle
+                return null;
+            }
+
+            // Acquire per-element lock for thread-safe execution
+            ReentrantLock lock = ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
+            lock.lock();
             try {
-                // CRITICAL: Save and reset inheritance state for equivalent() calls.
-                // When a transform function calls equivalent() to look up related elements,
-                // the nested transformation should start FRESH, not inherit the caller's
-                // inheritance context. Without this reset, the nested rule would see
-                // inInheritanceExecution=true and potentially reuse the caller's preCreatedTarget.
-                boolean wasInInheritance = isInInheritanceExecution();
-                EObject savedPreCreated = getPreCreatedTarget();
-                setInInheritanceExecution(false);
-                clearPreCreatedTarget();
+                // Double-check after acquiring lock (another thread may have completed)
+                EObject existingAfterLock = executingLazyRules.get(key);
+                if (existingAfterLock != null) {
+                    return (T) existingAfterLock;
+                }
 
+                // Also double-check resolution cache
+                cached = resolutionCache.getByRule(source, ruleName);
+                if (cached != null) {
+                    return (T) cached;
+                }
+
+                // Mark as in-progress for recursion detection
+                inProgress.add(ruleKey);
                 try {
-                    // Execute the rule with clean inheritance state
-                    EObject result = rule.execute(source, this);
-                    if (result != null) {
-                        // Cache the result atomically
-                        resolutionCache.addMapping(source, ruleName, result, rule.isPrimary());
-                        executingLazyRules.put(key, result);
+                    // CRITICAL: Save and reset inheritance state for equivalent() calls.
+                    // When a transform function calls equivalent() to look up related elements,
+                    // the nested transformation should start FRESH, not inherit the caller's
+                    // inheritance context. Without this reset, the nested rule would see
+                    // inInheritanceExecution=true and potentially reuse the caller's preCreatedTarget.
+                    boolean wasInInheritance = isInInheritanceExecution();
+                    EObject savedPreCreated = getPreCreatedTarget();
+                    setInInheritanceExecution(false);
+                    clearPreCreatedTarget();
+
+                    try {
+                        // Execute the rule with clean inheritance state
+                        EObject result = rule.execute(source, this);
+                        if (result != null) {
+                            // Cache the result atomically
+                            resolutionCache.addMapping(source, ruleName, result, rule.isPrimary());
+                            executingLazyRules.put(key, result);
+                        }
+                        return (T) result;
+                    } finally {
+                        // Restore inheritance state for caller
+                        setInInheritanceExecution(wasInInheritance);
+                        if (savedPreCreated != null) {
+                            setPreCreatedTarget(savedPreCreated);
+                        } else {
+                            clearPreCreatedTarget();
+                        }
                     }
-                    return (T) result;
                 } finally {
-                    // Restore inheritance state for caller
-                    setInInheritanceExecution(wasInInheritance);
-                    if (savedPreCreated != null) {
-                        setPreCreatedTarget(savedPreCreated);
-                    } else {
-                        clearPreCreatedTarget();
-                    }
+                    inProgress.remove(ruleKey);
                 }
             } finally {
-                inProgress.remove(ruleKey);
+                lock.unlock();
             }
         } finally {
-            lock.unlock();
+            if (TransformationMetrics.isEnabled()) {
+                TransformationMetrics.addEquivalentNanos(System.nanoTime() - startNanos);
+            }
         }
     }
 
@@ -1225,160 +1323,192 @@ public class TransformationContext {
             String ruleName,
             String discriminator
     ) {
-        // When structured IDs are enabled, use XMI ID-based lookup first (ETL semantics)
-        if (useStructuredIds && discriminator != null) {
-            String baseId = generateStructuredId(source, ruleName);
-            String discriminatedId = generateDiscriminatedId(baseId, discriminator);
+        long startNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+        TransformationMetrics.recordEquivalentDiscriminatedCall();
 
-            // Look up by XMI ID in target resource
-            T existing = findByXmiId(discriminatedId, targetType);
-            if (existing != null) {
-                // Cache it for future lookups and return
-                resolutionCache.addDiscriminatedMapping(source, existing, ruleName, discriminator);
-                return existing;
-            }
-        }
+        try {
+            // When structured IDs are enabled, use XMI ID-based lookup first (ETL semantics)
+            if (useStructuredIds && discriminator != null) {
+                String baseId = generateStructuredId(source, ruleName);
+                String discriminatedId = generateDiscriminatedId(baseId, discriminator);
 
-        // Check discriminated cache (object-reference based)
-        T cached = resolutionCache.getEquivalentDiscriminated(source, targetType, ruleName, discriminator);
-        if (cached != null) {
-            return cached;
-        }
-
-        // If ruleName is specified, find and execute that specific rule
-        T original = null;
-        if (ruleName != null && transformationRegistry != null) {
-            TransformRuleDescriptor rule = transformationRegistry.getRuleByName(ruleName);
-            if (rule != null && rule.appliesTo(source)) {
-                // Record activation for activity-based rules
-                // This tracks which elements were referenced via equivalent()
-                if (rule.isActivityBased()) {
-                    activate(rule.getName(), source);
+                // Look up by XMI ID in target resource
+                T existing = findByXmiId(discriminatedId, targetType);
+                if (existing != null) {
+                    // Cache it for future lookups and return
+                    resolutionCache.addDiscriminatedMapping(source, existing, ruleName, discriminator);
+                    return existing;
                 }
             }
-            // ETL semantics: guards ARE evaluated at invocation time for @lazy rules
-            if (rule != null && rule.appliesTo(source) && rule.evaluateGuard(source, this)) {
-                // Check if already in cache by rule name
-                EObject existing = resolutionCache.getByRule(source, ruleName);
-                if (existing != null && targetType.isInstance(existing)) {
-                    original = (T) existing;
-                } else {
-                    // Check for recursion - if we're already executing this rule for this source
-                    NamedRuleKey ruleKey = new NamedRuleKey(source, ruleName);
-                    Set<NamedRuleKey> inProgress = inProgressNamedRules.get();
-                    if (inProgress.contains(ruleKey)) {
-                        // Recursive call detected - return null to break the cycle
-                        return null;
+
+            // Check discriminated cache (object-reference based)
+            T cached = resolutionCache.getEquivalentDiscriminated(source, targetType, ruleName, discriminator);
+            if (cached != null) {
+                return cached;
+            }
+
+            // If ruleName is specified, find and execute that specific rule
+            T original = null;
+            if (ruleName != null && transformationRegistry != null) {
+                TransformRuleDescriptor rule = transformationRegistry.getRuleByName(ruleName);
+                if (rule != null && rule.appliesTo(source)) {
+                    // Record activation for activity-based rules
+                    // This tracks which elements were referenced via equivalent()
+                    if (rule.isActivityBased()) {
+                        activate(rule.getName(), source);
                     }
+                }
+                // ETL semantics: guards ARE evaluated at invocation time for @lazy rules
+                if (rule != null && rule.appliesTo(source) && rule.evaluateGuard(source, this)) {
+                    // Check if already in cache by rule name
+                    EObject existing = resolutionCache.getByRule(source, ruleName);
+                    if (existing != null && targetType.isInstance(existing)) {
+                        original = (T) existing;
+                    } else {
+                        // Check for recursion - if we're already executing this rule for this source
+                        NamedRuleKey ruleKey = new NamedRuleKey(source, ruleName);
+                        Set<NamedRuleKey> inProgress = inProgressNamedRules.get();
+                        if (inProgress.contains(ruleKey)) {
+                            // Recursive call detected - return null to break the cycle
+                            return null;
+                        }
 
-                    // Mark as in-progress and execute the rule
-                    inProgress.add(ruleKey);
-                    try {
-                        // Double-check cache after marking in-progress
-                        existing = resolutionCache.getByRule(source, ruleName);
-                        if (existing != null && targetType.isInstance(existing)) {
-                            original = (T) existing;
-                        } else {
-                            // CRITICAL: Save and reset inheritance state for equivalent() calls.
-                            // When a transform function calls equivalent() to look up related elements,
-                            // the nested transformation should start FRESH, not inherit the caller's
-                            // inheritance context. Without this reset, the nested rule would see
-                            // inInheritanceExecution=true and potentially reuse the caller's preCreatedTarget.
-                            boolean wasInInheritance = isInInheritanceExecution();
-                            EObject savedPreCreated = getPreCreatedTarget();
-                            setInInheritanceExecution(false);
-                            clearPreCreatedTarget();
+                        // Mark as in-progress and execute the rule
+                        inProgress.add(ruleKey);
+                        try {
+                            // Double-check cache after marking in-progress
+                            existing = resolutionCache.getByRule(source, ruleName);
+                            if (existing != null && targetType.isInstance(existing)) {
+                                original = (T) existing;
+                            } else {
+                                // CRITICAL: Save and reset inheritance state for equivalent() calls.
+                                // When a transform function calls equivalent() to look up related elements,
+                                // the nested transformation should start FRESH, not inherit the caller's
+                                // inheritance context. Without this reset, the nested rule would see
+                                // inInheritanceExecution=true and potentially reuse the caller's preCreatedTarget.
+                                boolean wasInInheritance = isInInheritanceExecution();
+                                EObject savedPreCreated = getPreCreatedTarget();
+                                setInInheritanceExecution(false);
+                                clearPreCreatedTarget();
 
-                            try {
-                                // Execute the specific rule with clean inheritance state
-                                EObject result = rule.execute(source, this);
-                                if (result != null) {
-                                    resolutionCache.addMapping(source, ruleName, result, rule.isPrimary());
-                                    if (targetType.isInstance(result)) {
-                                        original = (T) result;
+                                try {
+                                    // Execute the specific rule with clean inheritance state
+                                    EObject result = rule.execute(source, this);
+                                    if (result != null) {
+                                        resolutionCache.addMapping(source, ruleName, result, rule.isPrimary());
+                                        if (targetType.isInstance(result)) {
+                                            original = (T) result;
+                                        }
+                                    }
+                                } finally {
+                                    // Restore inheritance state for caller
+                                    setInInheritanceExecution(wasInInheritance);
+                                    if (savedPreCreated != null) {
+                                        setPreCreatedTarget(savedPreCreated);
+                                    } else {
+                                        clearPreCreatedTarget();
                                     }
                                 }
-                            } finally {
-                                // Restore inheritance state for caller
-                                setInInheritanceExecution(wasInInheritance);
-                                if (savedPreCreated != null) {
-                                    setPreCreatedTarget(savedPreCreated);
-                                } else {
-                                    clearPreCreatedTarget();
-                                }
+                            }
+                        } finally {
+                            inProgress.remove(ruleKey);
+                        }
+                    }
+                }
+            }
+
+            // Fall back to generic equivalent() only if no ruleName or rule not found
+            if (original == null) {
+                original = equivalent(source, targetType);
+            }
+
+            if (original == null) {
+                return null;
+            }
+
+            // If no discriminator, return the original without cloning (ETL semantics)
+            if (discriminator == null) {
+                return original;
+            }
+
+            // Thread-safe clone creation using double-checked locking.
+            // This prevents duplicate clones when multiple threads call equivalentDiscriminated()
+            // with the same (source, ruleName, discriminator) tuple concurrently.
+            DiscriminatedCacheKey discKey = new DiscriminatedCacheKey(source, ruleName, discriminator);
+
+            // Acquire per-key lock for thread-safe clone creation
+            long lockStartNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+            ReentrantLock lock = discriminatedLocks.computeIfAbsent(discKey, k -> new ReentrantLock());
+            lock.lock();
+            if (TransformationMetrics.isEnabled()) {
+                TransformationMetrics.addLockWaitNanos(System.nanoTime() - lockStartNanos);
+            }
+            TransformationMetrics.recordLockAcquisition();
+            try {
+                // Double-check after acquiring lock (another thread may have completed)
+                T cachedAfterLock = resolutionCache.getEquivalentDiscriminated(source, targetType, ruleName, discriminator);
+                if (cachedAfterLock != null) {
+                    return cachedAfterLock;
+                }
+
+                // Clone for discriminated version
+                T clone = (T) EcoreUtil.copy(original);
+
+                // Generate discriminated ID following ETL semantics
+                // Format: <source-path>/<rule-name>/(discriminator/<discriminator-value>)
+                String discriminatedId;
+                if (useStructuredIds) {
+                    String baseId = generateStructuredId(source, ruleName);
+                    discriminatedId = generateDiscriminatedId(baseId, discriminator);
+                } else {
+                    // Legacy: append discriminator to whatever ID the original has
+                    String baseId = getElementId(original);
+                    discriminatedId = baseId + "/(discriminator/" + discriminator + ")";
+                }
+                setElementId(clone, discriminatedId);
+
+                // Check if the rule is @Detached - detached rules don't add to Resource
+                // The caller is responsible for adding to the appropriate container
+                TransformRuleDescriptor rule = transformationRegistry != null
+                        ? transformationRegistry.getRuleByName(ruleName)
+                        : null;
+                boolean isDetached = rule != null && rule.isDetached();
+
+                if (!isDetached) {
+                    // Only add to resource if NOT detached
+                    if (stagingEnabled.get()) {
+                        // Parallel mode: stage for later commit with ordering
+                        long sequence = creationSequence.getAndIncrement();
+                        elementOrder.put(clone, sequence);
+                        stagedElements.offer(new StagedElement(clone, true, sequence));
+                    } else {
+                        // Sequential mode: add directly to Resource
+                        if (!targetResourceSet.getResources().isEmpty()) {
+                            Resource targetResource = targetResourceSet.getResources().get(0);
+                            targetResource.getContents().add(clone);
+
+                            // Apply the discriminated XMI ID
+                            if (targetResource instanceof XMIResource) {
+                                setSynchronizedXmiId((XMIResource) targetResource, clone, discriminatedId);
                             }
                         }
-                    } finally {
-                        inProgress.remove(ruleKey);
                     }
                 }
+                // For @Detached rules: caller adds clone to appropriate container
+                // e.g., page.getActions().add(clone)
+
+                // Cache discriminated result
+                resolutionCache.addDiscriminatedMapping(source, clone, ruleName, discriminator);
+
+                return clone;
+            } finally {
+                lock.unlock();
+            }
+        } finally {
+            if (TransformationMetrics.isEnabled()) {
+                TransformationMetrics.addEquivalentDiscriminatedNanos(System.nanoTime() - startNanos);
             }
         }
-
-        // Fall back to generic equivalent() only if no ruleName or rule not found
-        if (original == null) {
-            original = equivalent(source, targetType);
-        }
-
-        if (original == null) {
-            return null;
-        }
-
-        // If no discriminator, return the original without cloning (ETL semantics)
-        if (discriminator == null) {
-            return original;
-        }
-
-        // Clone for discriminated version
-        T clone = (T) EcoreUtil.copy(original);
-
-        // Generate discriminated ID following ETL semantics
-        // Format: <source-path>/<rule-name>/(discriminator/<discriminator-value>)
-        String discriminatedId;
-        if (useStructuredIds) {
-            String baseId = generateStructuredId(source, ruleName);
-            discriminatedId = generateDiscriminatedId(baseId, discriminator);
-        } else {
-            // Legacy: append discriminator to whatever ID the original has
-            String baseId = getElementId(original);
-            discriminatedId = baseId + "/(discriminator/" + discriminator + ")";
-        }
-        setElementId(clone, discriminatedId);
-
-        // Check if the rule is @Detached - detached rules don't add to Resource
-        // The caller is responsible for adding to the appropriate container
-        TransformRuleDescriptor rule = transformationRegistry != null
-                ? transformationRegistry.getRuleByName(ruleName)
-                : null;
-        boolean isDetached = rule != null && rule.isDetached();
-
-        if (!isDetached) {
-            // Only add to resource if NOT detached
-            if (stagingEnabled.get()) {
-                // Parallel mode: stage for later commit with ordering
-                long sequence = creationSequence.getAndIncrement();
-                elementOrder.put(clone, sequence);
-                stagedElements.offer(new StagedElement(clone, true, sequence));
-            } else {
-                // Sequential mode: add directly to Resource
-                if (!targetResourceSet.getResources().isEmpty()) {
-                    Resource targetResource = targetResourceSet.getResources().get(0);
-                    targetResource.getContents().add(clone);
-
-                    // Apply the discriminated XMI ID
-                    if (targetResource instanceof XMIResource) {
-                        setSynchronizedXmiId((XMIResource) targetResource, clone, discriminatedId);
-                    }
-                }
-            }
-        }
-        // For @Detached rules: caller adds clone to appropriate container
-        // e.g., page.getActions().add(clone)
-
-        // Cache discriminated result
-        resolutionCache.addDiscriminatedMapping(source, clone, ruleName, discriminator);
-
-        return clone;
     }
 
     /**
@@ -2010,6 +2140,7 @@ public class TransformationContext {
     void clearExecutingLazyRules() {
         executingLazyRules.clear();
         ruleLocks.clear();
+        discriminatedLocks.clear();
     }
 
     /**
@@ -2077,8 +2208,11 @@ public class TransformationContext {
     /**
      * Get the source element's path for structured ID generation.
      *
-     * <p>Format: {@code <container-name>/(<alias>/<source-id>)} or just {@code (<alias>/<source-id>)}
-     * if no named container is available. The alias is determined from the registered resource aliases.</p>
+     * <p>Format depends on {@link #includeElementNameInStructuredIds}:</p>
+     * <ul>
+     *   <li>When false (default): {@code (<alias>/<source-id>)}</li>
+     *   <li>When true: {@code <element-name>/(<alias>/<source-id>)}</li>
+     * </ul>
      *
      * @param source the source element
      * @return the source path string
@@ -2094,14 +2228,15 @@ public class TransformationContext {
         // Get the resource alias for the source element
         String alias = getResourceAlias(source);
 
-        // Try to get a container name (useful for traceability)
-        String containerName = getContainerName(source);
-
-        if (containerName != null && !containerName.isEmpty()) {
-            return containerName + "/(" + alias + "/" + sourceId + ")";
-        } else {
-            return "(" + alias + "/" + sourceId + ")";
+        // Only include element name if explicitly enabled
+        if (includeElementNameInStructuredIds) {
+            String elementName = getContainerName(source);
+            if (elementName != null && !elementName.isEmpty()) {
+                return elementName + "/(" + alias + "/" + sourceId + ")";
+            }
         }
+
+        return "(" + alias + "/" + sourceId + ")";
     }
 
     /**

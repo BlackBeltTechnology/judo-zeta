@@ -263,6 +263,119 @@ EObject obj = ctx.createTarget(dynamicType, dynamicPackage);
 
 ## XMI ID Management
 
+### Structured XMI IDs
+
+Zeta supports ETL-style structured XMI IDs that provide meaningful, traceable identifiers for target elements.
+
+#### Enabling Structured IDs
+
+```java
+// Enable (default)
+context.setUseStructuredIds(true);
+
+// Disable (uses sequence-based _seqN format)
+context.setUseStructuredIds(false);
+```
+
+#### ID Format
+
+When enabled, IDs follow the pattern (element name excluded by default):
+
+```
+(<alias>/<source-id>)/<rule-name>
+```
+
+For discriminated equivalents:
+```
+(<alias>/<source-id>)/<rule-name>/(discriminator/<discriminator-value>)
+```
+
+**Example:**
+- Source: element with XMI ID `_abc123`
+- Rule: `Entity2Package`
+- Result: `(source/_abc123)/Entity2Package`
+
+#### Including Element Name in IDs
+
+By default, element names are excluded from structured IDs. To include them:
+
+```java
+// Include element name prefix (default: false)
+context.setIncludeElementNameInStructuredIds(true);
+
+// Result with element name: Customer/(source/_abc123)/Entity2Package
+// Result without (default): (source/_abc123)/Entity2Package
+```
+
+#### Customizing the Source Alias
+
+By default, the alias is `"source"`. To customize:
+
+```java
+// Register your resource with a custom alias
+context.registerResource("esm", sourceResourceSet);
+
+// Set as preferred alias for ID generation
+context.setPreferredSourceAlias("esm");
+
+// Result: (esm/_abc123)/Entity2Package
+```
+
+This produces IDs like: `Customer/(esm/_abc123)/Entity2Package`
+
+#### Edge Cases (Fallback to Sequence-Based IDs)
+
+Structured IDs fall back to `_seqN` format in these cases:
+
+| Edge Case | Cause | Result |
+|-----------|-------|--------|
+| No `currentSource` | `createTarget()` called outside rule | `_seqN` |
+| No `currentExecutingRule` | Called outside rule context | Partial or `_seqN` |
+| Source not in Resource | Detached element | `_<hashcode>` in path |
+| No XMI ID on source | Path-based URI fragment | `_<hashcode>` in path |
+| Both source & rule null | No context available | `_seqN` |
+
+**To ensure structured IDs work correctly:**
+
+1. **Set XMI IDs on source elements:**
+   ```java
+   ((XMIResource) sourceResource).setID(element, "_myId123");
+   ```
+
+2. **Only call `createTarget()` within transformation rules** (not in static helpers before executor runs)
+
+3. **Use `setPreferredSourceAlias()`** if source elements come from multiple ResourceSets
+
+### setUseStructuredIds()
+
+Enables or disables ETL-style structured XMI IDs.
+
+```java
+void setUseStructuredIds(boolean useStructured)
+```
+
+```java
+context.setUseStructuredIds(true);  // ETL-style: Customer/(source/_abc)/RuleName
+context.setUseStructuredIds(false); // Sequence-based: _seq0, _seq1, ...
+```
+
+**Default**: `true` (structured IDs enabled)
+
+### setPreferredSourceAlias()
+
+Sets the preferred resource alias for structured ID generation.
+
+```java
+void setPreferredSourceAlias(String alias)
+```
+
+```java
+context.registerResource("esm", esmResourceSet);
+context.setPreferredSourceAlias("esm");
+```
+
+**Note**: The alias must be registered via `registerResource()` before setting as preferred.
+
 ### applyAllPendingXmiIds()
 
 Applies all pending XMI IDs to elements in the target resource.

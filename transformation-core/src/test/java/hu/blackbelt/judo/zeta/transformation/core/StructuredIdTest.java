@@ -93,6 +93,166 @@ class StructuredIdTest {
         return eClass;
     }
 
+    // ==================== Element Name Toggle Tests ====================
+
+    @Nested
+    @DisplayName("Element Name Toggle Tests")
+    class ElementNameToggleTests {
+
+        @Test
+        @DisplayName("Default excludes element name from structured IDs")
+        void defaultExcludesElementName() {
+            EClass source = createEClass("Customer", "_abc123");
+
+            registry.register(SimpleTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            EPackage target = (EPackage) targetResource.getContents().get(0);
+            String targetId = context.getPendingXmiId(target);
+            if (targetId == null && targetResource instanceof XMIResource) {
+                targetId = ((XMIResource) targetResource).getID(target);
+            }
+
+            assertNotNull(targetId, "Target should have an XMI ID");
+            // Default: element name should NOT be included
+            assertFalse(targetId.startsWith("Customer/"),
+                    "Default should not include element name prefix: " + targetId);
+            // Should start with (alias/sourceId)
+            assertTrue(targetId.startsWith("(source/_abc123)"),
+                    "ID should start with (alias/sourceId): " + targetId);
+            assertTrue(targetId.endsWith("/Entity2Package"),
+                    "ID should end with rule name: " + targetId);
+        }
+
+        @Test
+        @DisplayName("Element name included when explicitly enabled")
+        void elementNameIncludedWhenEnabled() {
+            context.setIncludeElementNameInStructuredIds(true);
+            EClass source = createEClass("Order", "_def456");
+
+            registry.register(SimpleTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            EPackage target = (EPackage) targetResource.getContents().get(0);
+            String targetId = context.getPendingXmiId(target);
+            if (targetId == null && targetResource instanceof XMIResource) {
+                targetId = ((XMIResource) targetResource).getID(target);
+            }
+
+            assertNotNull(targetId);
+            // Element name should be included as prefix
+            assertTrue(targetId.startsWith("Order/"),
+                    "ID should start with element name: " + targetId);
+            assertTrue(targetId.contains("(source/_def456)"),
+                    "ID should contain (alias/sourceId): " + targetId);
+            assertTrue(targetId.endsWith("/Entity2Package"),
+                    "ID should end with rule name: " + targetId);
+            // Full expected format: Order/(source/_def456)/Entity2Package
+            assertEquals("Order/(source/_def456)/Entity2Package", targetId);
+        }
+
+        @Test
+        @DisplayName("Combined with preferred source alias")
+        void combinedWithPreferredSourceAlias() {
+            // Configure: exclude element name, use custom alias
+            context.setIncludeElementNameInStructuredIds(false);
+            context.registerResource("esm", sourceResourceSet);
+            context.setPreferredSourceAlias("esm");
+
+            EClass source = createEClass("XMLType", "_MaJNYeiFEfCKeN0VGO_Tbg");
+
+            registry.register(SimpleTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            EPackage target = (EPackage) targetResource.getContents().get(0);
+            String targetId = context.getPendingXmiId(target);
+            if (targetId == null && targetResource instanceof XMIResource) {
+                targetId = ((XMIResource) targetResource).getID(target);
+            }
+
+            assertNotNull(targetId);
+            // Expected format: (esm/_MaJNYeiFEfCKeN0VGO_Tbg)/Entity2Package
+            assertEquals("(esm/_MaJNYeiFEfCKeN0VGO_Tbg)/Entity2Package", targetId,
+                    "ID should use custom alias without element name prefix");
+        }
+
+        @Test
+        @DisplayName("Getter reflects current setting")
+        void getterReflectsCurrentSetting() {
+            // Default is false
+            assertFalse(context.isIncludeElementNameInStructuredIds(),
+                    "Default should be false");
+
+            // Set to true
+            context.setIncludeElementNameInStructuredIds(true);
+            assertTrue(context.isIncludeElementNameInStructuredIds(),
+                    "Should be true after setting");
+
+            // Set back to false
+            context.setIncludeElementNameInStructuredIds(false);
+            assertFalse(context.isIncludeElementNameInStructuredIds(),
+                    "Should be false after setting back");
+        }
+
+        @Test
+        @DisplayName("Source without name uses only alias and ID format")
+        void sourceWithoutNameUsesOnlyAliasAndId() {
+            // Create an EAnnotation (no name attribute) as source
+            EAnnotation source = EcoreFactory.eINSTANCE.createEAnnotation();
+            source.setSource("test-annotation");
+            sourceResource.getContents().add(source);
+            if (sourceResource instanceof XMIResource) {
+                ((XMIResource) sourceResource).setID(source, "_ann001");
+            }
+
+            // Even with includeElementName=true, no name to include
+            context.setIncludeElementNameInStructuredIds(true);
+
+            registry.register(AnnotationTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            EPackage target = (EPackage) targetResource.getContents().get(0);
+            String targetId = context.getPendingXmiId(target);
+
+            assertNotNull(targetId);
+            // No name available, so just (alias/sourceId)/RuleName
+            assertTrue(targetId.startsWith("(source/_ann001)"),
+                    "ID should start with (alias/sourceId): " + targetId);
+        }
+    }
+
     // ==================== Structured ID Tests ====================
 
     @Nested
@@ -102,6 +262,8 @@ class StructuredIdTest {
         @Test
         @DisplayName("Structured ID includes source element name and ID")
         void structuredIdIncludesSourceInfo() {
+            // Enable element name in IDs for this test
+            context.setIncludeElementNameInStructuredIds(true);
             EClass source = createEClass("Customer", "_abc123");
 
             registry.register(SimpleTransformation.class);
@@ -135,6 +297,8 @@ class StructuredIdTest {
         @Test
         @DisplayName("Structured ID format follows ETL pattern with source alias")
         void structuredIdFollowsEtlPattern() {
+            // Enable element name in IDs for this test
+            context.setIncludeElementNameInStructuredIds(true);
             EClass source = createEClass("Order", "_def456");
 
             registry.register(SimpleTransformation.class);
@@ -360,6 +524,8 @@ class StructuredIdTest {
         @Test
         @DisplayName("Nested equivalent() generates ID from correct source element")
         void nestedEquivalentUsesCorrectSourceForId() {
+            // Enable element name in IDs for this test
+            context.setIncludeElementNameInStructuredIds(true);
             // Create Customer (base) and Company (extends Customer)
             EClass customer = createEClass("Customer", "_JYmqeeq1EemUZMITjXqp8w");
             EClass company = createEClass("Company", "_JYmDhOq1EemUZMITjXqp8w");
@@ -463,6 +629,8 @@ class StructuredIdTest {
         @Test
         @DisplayName("Deeply nested equivalent() calls maintain correct source context")
         void deeplyNestedEquivalentMaintainsContext() {
+            // Enable element name in IDs for this test
+            context.setIncludeElementNameInStructuredIds(true);
             // Create 3-level inheritance: Person -> Customer -> Company
             EClass person = createEClass("Person", "_person001");
             EClass customer = createEClass("Customer", "_customer002");
@@ -730,6 +898,8 @@ class StructuredIdTest {
         @Test
         @DisplayName("executeParentRule() creating NEW element uses newSource context (not caller's)")
         void executeParentRuleCreatesNewElementWithCorrectContext() {
+            // Enable element name in IDs for this test
+            context.setIncludeElementNameInStructuredIds(true);
             // Create the outer rule's source (relation member "items") - THIS is the primary element
             EReference itemsRelation = EcoreFactory.eINSTANCE.createEReference();
             itemsRelation.setName("items");
@@ -899,6 +1069,8 @@ class StructuredIdTest {
         @Test
         @DisplayName("executeParentRule via static helper method uses correct source context")
         void executeParentRuleViaStaticHelperUsesCorrectContext() {
+            // Enable element name in IDs for this test
+            context.setIncludeElementNameInStructuredIds(true);
             // Create the outer rule's source (relation member "items")
             EReference itemsRelation = EcoreFactory.eINSTANCE.createEReference();
             itemsRelation.setName("items");
@@ -1025,6 +1197,8 @@ class StructuredIdTest {
             ctxWithRealExt.setTargetPackage(EcorePackage.eINSTANCE);
             ctxWithRealExt.setAutoAddRootElements(true);
             ctxWithRealExt.setUseStructuredIds(true);
+            // Enable element name in IDs for this test
+            ctxWithRealExt.setIncludeElementNameInStructuredIds(true);
 
             TransformationRegistry regForCachedTest = new TransformationRegistry();
             regForCachedTest.register(RuleCallingCachedExtension.class);
