@@ -31,6 +31,7 @@ For developers familiar with Epsilon Validation Language:
 - [Overview](evl-comparison/overview.md) - High-level differences and similarities
 - [Syntax Mapping](evl-comparison/syntax-mapping.md) - EVL constructs to Zeta equivalents
 - [Migration Guide](evl-comparison/migration-guide.md) - Step-by-step migration from EVL
+- [Dual-Engine Testing](evl-comparison/dual-engine-testing.md) - Testing framework for EVL/Zeta equivalence
 - [Feature Parity](evl-comparison/feature-parity.md) - What's supported and what's not
 
 ### Real-World Examples
