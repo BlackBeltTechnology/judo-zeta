@@ -1444,6 +1444,207 @@ public class EntityTypeValidations {
 
 ---
 
+## Unsupported EVL Features in Zeta
+
+This section explicitly lists EVL features that are **NOT supported** in Zeta, along with recommended workarounds and alternatives.
+
+### 1. Lazy Constraints
+
+**EVL Feature**: The `lazy` keyword allows constraints to be defined but only executed when explicitly invoked via `satisfies()`.
+
+**Status**: ❌ Not Supported
+
+**EVL Syntax**:
+```evl
+context EntityType {
+    lazy constraint ExpensiveValidation {
+        check: /* expensive computation */
+        message: 'Expensive validation failed'
+    }
+    
+    constraint RequiresExpensive {
+        guard: self.isCritical
+        check: self.satisfies('ExpensiveValidation')
+    }
+}
+```
+
+**Why Not Supported**: Zeta validates all registered constraints during execution. There's no mechanism to define a constraint that skips automatic execution.
+
+**Workarounds**:
+
+1. **Use Guard Conditions**: Apply `@Guard` to skip validation for non-critical elements
+   ```java
+   @Guard(method = "isCriticalEntity")
+   @Constraint(name = "ExpensiveValidation")
+   public ValidationRule expensiveValidation() { ... }
+   ```
+
+2. **Separate Validation Executors**: Create multiple ValidationExecutor instances with different constraint registries
+   ```java
+   ValidationExecutor normalExecutor = ValidationExecutor.builder()
+       .registry(normalRegistry)
+       .build();
+   
+   ValidationExecutor expensiveExecutor = ValidationExecutor.builder()
+       .registry(expensiveRegistry)
+       .build();
+   
+   // Run expensive only on critical elements
+   normalExecutor.validate(allElements);
+   expensiveExecutor.validate(criticalElements);
+   ```
+
+3. **Inline Guard Logic**: Skip expensive logic inside the validation rule itself
+   ```java
+   @Constraint(name = "ConditionalExpensive")
+   public ValidationRule conditionalExpensive() {
+       return (element, ctx) -> {
+           if (!shouldRunExpensiveCheck(element)) {
+               return ValidationResult.pass();
+           }
+           // Expensive logic here
+       };
+   }
+   ```
+
+---
+
+### 2. Interactive Fixes (Quick Fixes)
+
+**EVL Feature**: The `fix` block allows defining automatic or interactive repair actions for validation failures.
+
+**Status**: ❌ Not Supported
+
+**EVL Syntax**:
+```evl
+context EntityType {
+    constraint MustHaveName {
+        check: self.name.isDefined()
+        message: 'Entity must have a name'
+        
+        fix {
+            title: 'Set default name'
+            do {
+                self.name = 'Unnamed' + EntityType.all.size();
+            }
+        }
+        
+        fix {
+            title: 'Prompt for name'
+            do {
+                self.name = UserInput.prompt('Enter entity name:');
+            }
+        }
+    }
+}
+```
+
+**Why Not Supported**: Zeta focuses on validation execution, not UI integration or model modification. Fix actions require UI framework integration and model editing capabilities that are out of scope.
+
+**Workarounds**:
+
+1. **Implement a Fix Service**: Create a separate service that processes validation results and applies fixes
+   ```java
+   public class ValidationFixService {
+       public void applyFix(ValidationResult result, FixStrategy strategy) {
+           if (result.getConstraintName().equals("MustHaveName")) {
+               EntityType entity = (EntityType) result.getElement();
+               switch (strategy) {
+                   case DEFAULT_NAME:
+                       entity.setName("Unnamed" + generateId());
+                       break;
+                   case PROMPT_USER:
+                       entity.setName(promptUser("Enter name:"));
+                       break;
+               }
+           }
+       }
+   }
+   ```
+
+2. **Extend ValidationResult**: Create a custom result type that carries fix actions
+   ```java
+   public class FixableValidationResult extends ValidationResult {
+       private final List<FixAction> fixes;
+       
+       public void applyFix(int fixIndex) {
+           fixes.get(fixIndex).apply();
+       }
+   }
+   ```
+
+3. **Post-Validation Processing**: Run fixes as a separate phase after validation
+   ```java
+   List<ValidationResult> results = executor.validate(elements);
+   
+   for (ValidationResult result : results) {
+       if (!result.isValid()) {
+           FixAction fix = fixRegistry.getDefaultFix(result);
+           if (fix != null && autoFixEnabled) {
+               fix.apply();
+           }
+       }
+   }
+   ```
+
+---
+
+### 3. User Input in Validation
+
+**EVL Feature**: EVL can prompt for user input during validation using `UserInput.prompt()` or similar mechanisms.
+
+**Status**: ❌ Not Supported
+
+**Why Not Supported**: Zeta validation is designed for batch execution without user interaction. Interactive prompts would block parallel execution and create non-deterministic behavior.
+
+**Workarounds**:
+
+1. **Pre-collect user input**: Gather any required input before starting validation
+2. **Use validation context**: Store user preferences in the ValidationContext
+   ```java
+   ctx.putCached(CacheKey.of("defaultName"), userProvidedDefault);
+   ```
+3. **Two-phase approach**: First phase identifies issues, second phase (with UI) resolves them
+
+---
+
+### 4. Model Modification During Validation
+
+**EVL Feature**: EVL allows modifying the model during validation (though generally discouraged).
+
+**Status**: ❌ Not Supported (by design)
+
+**Why Not Supported**: Zeta validation is read-only by design. Model modification during validation creates race conditions in parallel execution and makes validation results non-deterministic.
+
+**Workarounds**:
+
+1. **Post-validation modification**: Collect issues, then apply fixes after validation completes
+2. **Transformation instead**: Use the Transformation Framework for model modifications
+3. **Validation + Transform pipeline**: Chain validation and transformation phases
+
+---
+
+### 5. Dynamic Constraint Registration at Runtime
+
+**EVL Feature**: EVL modules can be loaded and modified at runtime.
+
+**Status**: ⚠️ Limited Support
+
+**What Works**: You can register additional validation classes at runtime, but you cannot modify existing constraint definitions.
+
+**What Doesn't Work**: Dynamic constraint creation, modifying constraint behavior without recompilation.
+
+**Workaround**: Use a plugin architecture with separate validation JARs that can be loaded dynamically:
+```java
+ServiceLoader<ValidationModule> modules = ServiceLoader.load(ValidationModule.class);
+for (ValidationModule module : modules) {
+    registry.register(module.getValidationClasses());
+}
+```
+
+---
+
 ## Feature Summary Table
 
 | # | Feature | EVL | Zeta | Migration Complexity |
