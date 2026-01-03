@@ -1,8 +1,12 @@
 # Proposal: Optimize Greedy Rule Performance
 
 **Change ID:** optimize-greedy-rule-performance
-**Status:** Draft
+**Status:** Superseded
 **Created:** 2026-01-03
+
+> **Note:** The main bottleneck (XMI resource lookups consuming 91% of greedy rule time) was solved by adding `skipXmiIdResourceLookup` flag. ZETA is now 2.5x faster than ETL.
+>
+> The optimizations below (rule lookup caching, pre-partitioning) remain valid for potential future improvements if profiling reveals they become bottlenecks.
 
 ## Why
 
