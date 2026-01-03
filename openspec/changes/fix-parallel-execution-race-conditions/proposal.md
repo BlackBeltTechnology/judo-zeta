@@ -10,8 +10,39 @@
 | Phase | Status | Notes |
 |-------|--------|-------|
 | Phase 1.3.2 | ✅ Complete | Fixed `equivalentDiscriminated()` race condition |
-| Phase 1 (remaining) | 🔄 Under Review | Tasks 1.1, 1.2 may not be needed |
+| Phase 1.2 | ❌ CRITICAL | EMF containment operations NOT thread-safe |
 | Phase 2 | ⏸️ Deferred | Long-term optimization |
+
+### Critical Issue: EMF Containment Race Condition
+
+**Reported from Tatami project production usage.**
+
+**Status:** ⚠️ Needs reproduction with tests before implementing fix.
+
+When `autoAddRootElements=true` is set:
+
+```
+Thread 1                           Thread 2
+────────                           ────────
+icon = createTarget(Icon.class)
+  → staged with isRootElement=true
+                                   parent.setIcon(icon)
+                                     → EMF bidirectional update starts
+icon added to staging queue          → eContainer being set
+                                     → RACE: container ref corrupted
+
+During commit:
+  icon.eContainer() == null  ← ORPHANED!
+  → icon added to resource root (DUPLICATE!)
+```
+
+**Evidence from Zeta documentation (parallel-execution.md):**
+
+| Operation | Thread-Safe | Recommendation |
+|-----------|-------------|----------------|
+| Direct Resource modification | ❌ No | Avoid in parallel rules |
+
+**Impact:** Orphaned elements with `eContainer() == null` get incorrectly added as root elements during commit phase.
 
 ## Problem Statement
 
@@ -161,15 +192,21 @@ Deploy first to provide immediate safety for production.
    - Fallback synchronization when local cache misses
    - Performance impact acceptable for correctness
 
-2. **Synchronize EMF Resource Operations**
-   - Wrap all `Resource.getContents().add()` calls
-   - Use `synchronized(resource)` blocks
+2. **Synchronize ALL EMF Containment Operations** *(EXPANDED SCOPE)*
+   - **Step 1:** Reproduce the race condition with a failing test first
+   - **Step 2:** Implement fix (one of the options below)
+   - **Not just** `Resource.getContents().add()` calls
+   - **ALL containment assignments** like `parent.setIcon(icon)`, `parent.getChildren().add(child)`
+   - EMF bidirectional reference updates are NOT atomic
+   - Use `synchronized(targetResource)` blocks around all containment operations
+   - **Alternative:** Defer containment assignments to single-threaded commit phase
 
 3. **Reproduce Production Issues**
    - Create stress tests that replicate exact production failure patterns
    - Test with high contention on same source elements
    - Test with complex cross-rule reference chains
    - Test with @Extends inheritance under parallel execution
+   - **NEW:** Test `autoAddRootElements=true` with containment assignments
 
 ### Phase 2: Thread-Isolated Architecture (Long-Term)
 

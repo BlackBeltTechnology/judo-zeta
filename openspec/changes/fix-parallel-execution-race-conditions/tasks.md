@@ -8,11 +8,52 @@
   - *Dependency:* None
   - *Location:* `transformation-core/src/main/java/.../ElementResolutionCache.java`
 
-- [ ] **1.2 Synchronize EMF Resource operations**
-  - Wrap all `Resource.getContents().add()` calls with synchronized blocks
-  - Use `synchronized(resource)` to prevent concurrent modification
+- [ ] **1.2a Reproduce EMF containment race condition with tests** *(PREREQUISITE)*
+
+  **Goal:** Create a failing test that reproduces the Tatami project issue before implementing any fix.
+
+  **Test scenario:**
+  - Enable `autoAddRootElements=true`
+  - Create parent and child elements in parallel rules
+  - Child created first, staged as root element
+  - Parent sets containment reference to child in different thread
+  - Verify: orphaned elements appear as root elements in resource
+
+  **Test file:** `transformation-core/src/test/java/.../ContainmentRaceConditionTest.java`
+
+  **Expected result:** Test should FAIL initially, proving the race condition exists.
+
   - *Dependency:* None
+  - *Blocking:* Task 1.2b (fix cannot proceed until reproduction confirmed)
+
+- [ ] **1.2b Synchronize ALL EMF Containment Operations** *(CRITICAL - EXPANDED SCOPE)*
+
+  **Problem:** EMF containment operations are NOT thread-safe. When `autoAddRootElements=true`:
+  1. Every element created via `createTarget()` is staged with `isRootElement=true`
+  2. During parallel execution, containment assignments like `parent.setIcon(icon)` race with other threads
+  3. EMF's bidirectional reference updates are corrupted
+  4. Icons lose their container reference (`eContainer() == null`)
+  5. During commit, orphaned Icons are added to the resource as root elements
+
+  **Scope (choose one approach):**
+
+  **Option A: Synchronize containment operations**
+  - Wrap ALL containment assignments with `synchronized(targetResource)`:
+    - `parent.setIcon(icon)` → synchronized
+    - `parent.getChildren().add(child)` → synchronized
+    - `Resource.getContents().add()` → synchronized
+  - *Pros:* Minimal code changes
+  - *Cons:* Performance impact from contention
+
+  **Option B: Defer containment to commit phase** *(RECOMMENDED)*
+  - Stage containment operations instead of executing immediately
+  - Execute all containment assignments in single-threaded commit phase
+  - *Pros:* No synchronization needed during parallel phase
+  - *Cons:* More complex implementation, requires tracking deferred operations
+
+  - *Dependency:* **1.2a** (must reproduce issue first)
   - *Location:* `transformation-core/src/main/java/.../TransformationContext.java`
+  - *Related:* Esm2UiZetaTransformation.java:272 (`autoAddRootElements=true`)
 
 - [x] **1.3 Add stress tests for high contention scenarios**
   - Created `ParallelRaceConditionStressTest.java`

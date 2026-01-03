@@ -91,6 +91,91 @@ parent.getContents().add(child)    child.eContainer()
 
 **Root Cause:** EMF containment relationships involve bidirectional references that are not atomically updated.
 
+### Issue 4: Orphaned Elements with autoAddRootElements=true (CRITICAL)
+
+**Reported from Tatami project production usage.**
+
+When `autoAddRootElements=true` is set in transformation (e.g., `Esm2UiZetaTransformation.java:272`):
+
+```
+Thread 1                           Thread 2
+────────                           ────────
+icon = createTarget(Icon.class)
+  → staged with isRootElement=true
+  → icon.eContainer() == null
+
+                                   parent.setIcon(icon)
+                                     → EMF starts bidirectional update:
+                                       1. Set icon.eContainer = parent
+                                       2. Add to parent's feature
+
+icon queued for commit               → RACE: icon.eContainer being set
+                                       but staging check already passed
+
+Thread 1 continues:
+  icon still in staging queue
+  (was marked root before containment set)
+
+During single-threaded commit:
+  for each staged element:
+    if (element.eContainer() == null) {  ← May be null due to race!
+      resource.getContents().add(element)
+    }
+
+  → Orphaned icons added as root elements!
+  → Duplicate elements in model!
+```
+
+**Evidence from Zeta documentation (parallel-execution.md):**
+
+| Operation | Thread-Safe | Recommendation |
+|-----------|-------------|----------------|
+| Direct Resource modification | ❌ No | Avoid in parallel rules |
+| Containment assignments | ❌ No | Not documented! |
+
+**Root Cause:**
+1. `createTarget()` with `autoAddRootElements=true` marks element as root **before** containment is set
+2. Containment assignment (`parent.setIcon(icon)`) happens in different thread
+3. EMF's bidirectional reference update is not atomic
+4. Commit phase sees `eContainer() == null` due to timing
+
+**Fix Options:**
+
+**Option A: Synchronize all containment operations**
+```java
+// Every containment assignment wrapped:
+synchronized(targetResource) {
+    parent.setIcon(icon);
+}
+```
+- Simple but kills parallelism benefits
+
+**Option B: Defer containment to commit phase (RECOMMENDED)**
+```java
+// During parallel phase - just record the operation:
+ctx.deferContainment(parent, "icon", icon);
+
+// During single-threaded commit:
+for (DeferredContainment dc : deferredContainments) {
+    dc.apply();  // Safe: single-threaded
+}
+```
+- Preserves parallelism
+- More complex implementation
+
+**Option C: Re-check containment at commit time**
+```java
+// During commit:
+for (StagedElement staged : stagedElements) {
+    // Re-check: containment may have been set after staging
+    if (staged.isRootElement() && staged.getElement().eContainer() == null) {
+        resource.getContents().add(staged.getElement());
+    }
+}
+```
+- Minimal change
+- May still have race window
+
 ## Proposed Architecture: Thread-Isolated Processing
 
 ```

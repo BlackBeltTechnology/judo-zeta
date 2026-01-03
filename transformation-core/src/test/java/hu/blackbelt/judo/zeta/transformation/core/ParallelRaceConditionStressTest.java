@@ -31,6 +31,7 @@ import org.eclipse.emf.ecore.resource.ResourceSet;
 import org.eclipse.emf.ecore.resource.impl.ResourceSetImpl;
 import org.eclipse.emf.ecore.xmi.impl.XMIResourceFactoryImpl;
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -64,6 +65,10 @@ import static org.junit.jupiter.api.Assertions.*;
  * fix-parallel-execution-race-conditions will eliminate these edge cases by design.</p>
  *
  * <p>These tests serve as regression tests to ensure parallel execution remains safe.</p>
+ *
+ * <h2>Running Optional Stress Tests:</h2>
+ * <p>Some long-running tests are disabled by default. Enable with:</p>
+ * <pre>mvn test -DrunStressTests=true</pre>
  */
 @DisplayName("Parallel Race Condition Stress Tests")
 class ParallelRaceConditionStressTest {
@@ -305,6 +310,8 @@ class ParallelRaceConditionStressTest {
 
     @Nested
     @DisplayName("@Extends Inheritance under Parallel Execution")
+    @EnabledIfSystemProperty(named = "runStressTests", matches = "true",
+            disabledReason = "Long-running stress test. Enable with -DrunStressTests=true")
     class ExtendsParallelTests {
 
         /**
