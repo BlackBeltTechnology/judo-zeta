@@ -328,6 +328,7 @@ Zeta includes several optimizations enabled by default:
 | **Model Traversal Caching** | **-80%** collection time | Results of `context.all(alias, type)` are cached by (alias, type) pair. Same type traversed only once even if 10 rules use it. |
 | **Rule Lookup Caching** | **-90%** lookup time | `getRulesForSource(type)` results cached in `ConcurrentHashMap` with O(1) deduplication. |
 | **Lock Striping** | **-3%** overhead | Uses 1024 striped locks instead of per-key locks, reducing 300K lock allocations to 1024. |
+| **Deadlock Prevention** | Thread-safe | Uses `tryLock()` with 30s timeout instead of blocking locks to prevent circular wait deadlocks. |
 | **Atomic Cache Operations** | Thread-safe | `getOrCreate()` pattern prevents duplicate element creation |
 | **Two-Phase Staging** | Parallel-safe | Elements staged during parallel execution, committed single-threaded |
 
@@ -338,6 +339,49 @@ Zeta includes several optimizations enabled by default:
 | Total time | 40,844 ms | 9,007 ms | **-78%** |
 | Greedy rules | 20,561 ms | 1,759 ms | **-91%** |
 | vs ETL | 1.79x slower | 2.5x faster | |
+
+### Deadlock Prevention
+
+Zeta uses `tryLock()` with a 30-second timeout instead of blocking `lock()` calls to prevent circular wait deadlocks in parallel execution.
+
+#### The Problem
+
+In parallel mode, deadlocks can occur when rules have circular dependencies:
+
+```
+Thread A: Holds lock(Entity1, "EntityToTable")
+          Waits for lock(Entity2, "ReferenceToFK")
+
+Thread B: Holds lock(Entity2, "ReferenceToFK")
+          Waits for lock(Entity1, "EntityToTable")
+
+Result: Both threads wait forever (deadlock)
+```
+
+This can happen when:
+- Rule A transforms Entity1 and calls `equivalent(Entity2, ...)` to look up a related element
+- Rule B transforms Entity2 and calls `equivalent(Entity1, ...)` at the same time
+- Both rules need each other's locks to proceed
+
+#### The Solution
+
+Instead of blocking forever, Zeta uses `tryLock(30, TimeUnit.SECONDS)`:
+- If the lock is acquired within 30 seconds, execution continues normally
+- If timeout occurs, a descriptive exception is thrown identifying the deadlock source
+
+#### Troubleshooting Deadlock Errors
+
+If you see an error like:
+```
+Potential deadlock detected: timeout waiting for lock on equivalent(EntityType, EntityToTable).
+This may indicate circular rule dependencies.
+```
+
+**Solutions:**
+1. **Review rule dependencies**: Check if rules call `equivalent()` on each other's source types
+2. **Use sequential mode**: Set `parallelExecution=false` to avoid parallel locking
+3. **Restructure rules**: Break circular dependencies by introducing intermediate rules
+4. **Increase timeout**: For very large models, the 30-second timeout may be insufficient (contact maintainers)
 
 ### Basic Timer (Alternative)
 
