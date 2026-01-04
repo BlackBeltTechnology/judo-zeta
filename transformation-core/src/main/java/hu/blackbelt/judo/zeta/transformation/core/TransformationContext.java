@@ -1022,9 +1022,12 @@ public class TransformationContext {
             TransformationMetrics.recordEquivalentCacheMiss();
 
             // Try to find and execute a matching lazy rule
+            // Uses pre-filtered lazy rules index for O(1) lookup
             if (transformationRegistry != null) {
                 long getRulesStartNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
-                Collection<TransformRuleDescriptor> rules = transformationRegistry.getRulesForSource(source.getClass());
+                @SuppressWarnings("unchecked")
+                List<TransformRuleDescriptor> rules = transformationRegistry.getLazyRulesForType(
+                        (Class<? extends EObject>) source.getClass());
                 if (TransformationMetrics.isEnabled()) {
                     TransformationMetrics.addGetRulesForSourceNanos(System.nanoTime() - getRulesStartNanos);
                 }
@@ -1032,7 +1035,10 @@ public class TransformationContext {
 
                 for (TransformRuleDescriptor rule : rules) {
                     TransformationMetrics.recordRuleIteration();
-                    if (rule.appliesTo(source) && targetType.isAssignableFrom(rule.getTargetType())) {
+                    // Pre-filtered: isLazy && !isAbstract
+                    // Runtime checks: appliesTo (EMF semantics) and target type compatibility
+                    if (!rule.appliesTo(source)) continue;
+                    if (targetType.isAssignableFrom(rule.getTargetType())) {
                         // Record activation for activity-based rules
                         // This tracks which elements were referenced via equivalent()
                         if (rule.isActivityBased()) {

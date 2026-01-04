@@ -68,6 +68,13 @@ public class TransformRuleDescriptor {
     private Boolean isMultiSourceGuard;
 
     /**
+     * Pre-computed flag indicating if this rule is eligible for eager execution.
+     * True if: !isLazy && !isMultiSource && !isAbstract
+     * Computed once at construction time, not per-element.
+     */
+    private final boolean isEagerExecutable;
+
+    /**
      * Per-rule cache of source elements rejected by this rule's guard.
      *
      * <p>ETL-compatible behavior: Each rule maintains its own rejected set.
@@ -153,6 +160,10 @@ public class TransformRuleDescriptor {
         this.transforms = transforms != null ? transforms : Collections.emptyList();
         this.tos = tos != null ? tos : Collections.emptyList();
 
+        // Pre-compute eager executable flag (avoids per-element checks)
+        // A rule is eager-executable if it's not lazy, not multi-source, and not abstract
+        this.isEagerExecutable = !isLazy && this.transforms.size() <= 1 && !isAbstract;
+
         ruleMethod.setAccessible(true);
         if (guardMethod != null) {
             guardMethod.setAccessible(true);
@@ -216,6 +227,24 @@ public class TransformRuleDescriptor {
      */
     public boolean isActivityBased() {
         return isActivityBased;
+    }
+
+    /**
+     * Check if this rule is eligible for eager (Phase 1) execution.
+     *
+     * <p>Pre-computed at construction time. A rule is eager-executable if:
+     * <ul>
+     *   <li>Not lazy (lazy rules execute on-demand via equivalent())</li>
+     *   <li>Not multi-source (multi-source rules use Cartesian product)</li>
+     *   <li>Not abstract (abstract rules only execute via executeParentRule())</li>
+     * </ul></p>
+     *
+     * <p>Using this pre-computed flag avoids per-element runtime checks.</p>
+     *
+     * @return true if this rule can execute in Phase 1 (eager execution)
+     */
+    public boolean isEagerExecutable() {
+        return isEagerExecutable;
     }
 
     /**

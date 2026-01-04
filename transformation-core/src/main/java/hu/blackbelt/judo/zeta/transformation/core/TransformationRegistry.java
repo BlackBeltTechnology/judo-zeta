@@ -63,6 +63,16 @@ public class TransformationRegistry {
     private final ConcurrentHashMap<Class<?>, List<TransformRuleDescriptor>> rulesBySourceTypeCache =
             new ConcurrentHashMap<>();
 
+    // Pre-filtered index: sourceType → eager-executable rules only
+    // Built at registration time to avoid runtime filtering in executeEagerRulesFor()
+    private final ConcurrentHashMap<Class<?>, List<TransformRuleDescriptor>> eagerRulesByTypeCache =
+            new ConcurrentHashMap<>();
+
+    // Pre-filtered index: sourceType → lazy rules only
+    // Built at registration time to avoid runtime filtering in equivalent()
+    private final ConcurrentHashMap<Class<?>, List<TransformRuleDescriptor>> lazyRulesByTypeCache =
+            new ConcurrentHashMap<>();
+
     /**
      * Register a transformation context class.
      *
@@ -122,6 +132,8 @@ public class TransformationRegistry {
      */
     private void invalidateCaches() {
         rulesBySourceTypeCache.clear();
+        eagerRulesByTypeCache.clear();
+        lazyRulesByTypeCache.clear();
     }
 
     private void registerRule(
@@ -303,6 +315,78 @@ public class TransformationRegistry {
 
         // Return as unmodifiable ArrayList for iteration efficiency and immutability
         return Collections.unmodifiableList(new ArrayList<>(result));
+    }
+
+    /**
+     * Get pre-filtered eager-executable rules for a source type.
+     *
+     * <p>Returns only rules that are eligible for Phase 1 (eager) execution:
+     * <ul>
+     *   <li>Not lazy</li>
+     *   <li>Not multi-source</li>
+     *   <li>Not abstract</li>
+     *   <li>Type matches (exact or greedy subtype)</li>
+     * </ul></p>
+     *
+     * <p>This eliminates 4 runtime checks per rule in executeEagerRulesFor(),
+     * reducing O(n×r) to O(n×m) where m << r.</p>
+     *
+     * @param sourceType the source element's runtime type
+     * @return pre-filtered list of applicable eager rules (unmodifiable)
+     */
+    public List<TransformRuleDescriptor> getEagerRulesForType(Class<? extends EObject> sourceType) {
+        return eagerRulesByTypeCache.computeIfAbsent(sourceType, this::computeEagerRulesForType);
+    }
+
+    /**
+     * Compute pre-filtered eager rules for a type (internal cache population).
+     *
+     * <p>Note: We filter only by isEagerExecutable() here. The actual appliesTo()
+     * check must still happen at runtime because it requires an actual EObject
+     * instance for EMF type matching semantics.</p>
+     */
+    private List<TransformRuleDescriptor> computeEagerRulesForType(Class<?> sourceType) {
+        List<TransformRuleDescriptor> allRules = computeRulesForSource(sourceType);
+        List<TransformRuleDescriptor> eagerRules = new ArrayList<>();
+
+        for (TransformRuleDescriptor rule : allRules) {
+            // Only filter by pre-computed eager flag
+            // appliesTo() check happens at runtime (needs actual EObject for EMF semantics)
+            if (rule.isEagerExecutable()) {
+                eagerRules.add(rule);
+            }
+        }
+
+        return Collections.unmodifiableList(eagerRules);
+    }
+
+    /**
+     * Get pre-filtered lazy rules for a source type.
+     *
+     * <p>Returns only lazy rules that could transform the given source type.
+     * Used by equivalent() to avoid iterating all rules.</p>
+     *
+     * @param sourceType the source element's runtime type
+     * @return pre-filtered list of applicable lazy rules (unmodifiable)
+     */
+    public List<TransformRuleDescriptor> getLazyRulesForType(Class<? extends EObject> sourceType) {
+        return lazyRulesByTypeCache.computeIfAbsent(sourceType, this::computeLazyRulesForType);
+    }
+
+    /**
+     * Compute pre-filtered lazy rules for a type (internal cache population).
+     */
+    private List<TransformRuleDescriptor> computeLazyRulesForType(Class<?> sourceType) {
+        List<TransformRuleDescriptor> allRules = computeRulesForSource(sourceType);
+        List<TransformRuleDescriptor> lazyRules = new ArrayList<>();
+
+        for (TransformRuleDescriptor rule : allRules) {
+            if (rule.isLazy() && !rule.isAbstract()) {
+                lazyRules.add(rule);
+            }
+        }
+
+        return Collections.unmodifiableList(lazyRules);
     }
 
     /**

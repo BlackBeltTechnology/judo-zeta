@@ -804,9 +804,11 @@ public class TransformationExecutor {
     }
 
     private void executeEagerRulesFor(EObject source) {
-        // Time rule lookup
+        // Time rule lookup - uses pre-filtered index for O(1) lookup
         long rulesStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
-        Collection<TransformRuleDescriptor> rules = registry.getRulesForSource(source.getClass());
+        @SuppressWarnings("unchecked")
+        List<TransformRuleDescriptor> rules = registry.getEagerRulesForType(
+                (Class<? extends EObject>) source.getClass());
         if (TransformationMetrics.isEnabled()) {
             TransformationMetrics.addRuleMatchingNanos(System.nanoTime() - rulesStart);
         }
@@ -820,25 +822,18 @@ public class TransformationExecutor {
                 break;
             }
 
-            // Pre-checks that can be done outside the lock (rule metadata, not source-specific state)
-            // Skip multi-source rules - they are handled by executeMultiSourceRule()
-            if (rule.isMultiSource()) continue;
+            // Pre-filtered rules already passed: !isLazy, !isMultiSource, !isAbstract
+            // Runtime checks remain:
 
-            // Skip lazy rules - they execute on-demand via equivalent()
-            if (rule.isLazy()) continue;
+            // 1. Type match check (requires actual EObject for EMF semantics)
+            if (!rule.appliesTo(source)) continue;
 
-            // Skip abstract rules - they only execute via executeParentRule()
-            if (rule.isAbstract()) continue;
-
-            // Skip activity-based rules - they execute only for activated elements in Phase 2
+            // 2. Skip activity-based rules - they execute only for activated elements in Phase 2
             // This matches ETL semantics where @greedy @lazy rules only process
             // elements that were referenced via equivalent()
             if (isEffectivelyActivityBased(rule)) continue;
 
-            // Check if rule applies to this element (type check)
-            if (!rule.appliesTo(source)) continue;
-
-            // Check if element comes from the correct resource alias
+            // 3. Check if element comes from the correct resource alias
             if (!isFromExpectedAlias(source, rule)) continue;
 
             // Atomic get-or-create: lock covers cache check + guard evaluation + rule execution
