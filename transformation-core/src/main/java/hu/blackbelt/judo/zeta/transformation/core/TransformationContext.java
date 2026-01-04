@@ -1075,8 +1075,17 @@ public class TransformationContext {
 
                     if (!guardResult) continue;
 
-                    // Use (source, ruleName) key for cross-rule cache isolation
-                    RuleCacheKey key = new RuleCacheKey(source, rule.getName());
+                    // FIX: Use canonical rule name for lock key to prevent race condition
+                    // between equivalent() and executeParentRule() when multiple rules
+                    // produce the same target type. If there's a @Primary rule for the
+                    // target type, use its name as the canonical key. This ensures both
+                    // access patterns use the same lock key.
+                    String canonicalRuleName = rule.getName();
+                    TransformRuleDescriptor primaryRule = transformationRegistry.getPrimaryRuleForTargetType(targetType);
+                    if (primaryRule != null && primaryRule.appliesTo(source)) {
+                        canonicalRuleName = primaryRule.getName();
+                    }
+                    RuleCacheKey key = new RuleCacheKey(source, canonicalRuleName);
 
                     // Fast path: check if already executed (from cache or concurrent execution)
                     EObject existing = executingLazyRules.get(key);
@@ -1130,7 +1139,11 @@ public class TransformationContext {
                             String structuredId = generateStructuredId(source, rule.getName());
                             T existingByXmiId = findByXmiId(structuredId, targetType);
                             if (existingByXmiId != null) {
+                                // Store under both actual and canonical rule names
                                 resolutionCache.addMapping(source, rule.getName(), existingByXmiId, rule.isPrimary());
+                                if (!canonicalRuleName.equals(rule.getName())) {
+                                    resolutionCache.addMapping(source, canonicalRuleName, existingByXmiId, rule.isPrimary());
+                                }
                                 executingLazyRules.put(key, existingByXmiId);
                                 return existingByXmiId;
                             }
@@ -1154,7 +1167,13 @@ public class TransformationContext {
                                 }
                                 TransformationMetrics.recordRuleExecution(rule.getName());
                                 if (result != null) {
+                                    // Store mapping under both actual rule name AND canonical name
+                                    // to ensure both equivalent() and executeParentRule() can find it
                                     resolutionCache.addMapping(source, rule.getName(), result, rule.isPrimary());
+                                    if (!canonicalRuleName.equals(rule.getName())) {
+                                        // Also store under canonical name if different
+                                        resolutionCache.addMapping(source, canonicalRuleName, result, rule.isPrimary());
+                                    }
                                     executingLazyRules.put(key, result);
                                 }
                                 return (T) result;
@@ -1208,6 +1227,13 @@ public class TransformationContext {
                         TransformationMetrics.recordGuardEvaluation();
 
                         if (guardResult) {
+                            // FIX: Use canonical rule name for lock key (same fix as above)
+                            String canonicalRuleName = rule.getName();
+                            TransformRuleDescriptor primaryRule = transformationRegistry.getPrimaryRuleForTargetType(targetType);
+                            if (primaryRule != null && primaryRule.appliesTo(source)) {
+                                canonicalRuleName = primaryRule.getName();
+                            }
+
                             // When structured IDs are enabled, try XMI ID-based lookup first (ETL semantics)
                             if (useStructuredIds) {
                                 String structuredId = generateStructuredId(source, rule.getName());
@@ -1218,14 +1244,17 @@ public class TransformationContext {
                                 }
                                 TransformationMetrics.recordFindByXmiIdCall();
                                 if (existingByXmiId != null) {
-                                    // Found by XMI ID - cache it and return
+                                    // Found by XMI ID - cache it and return (under both rule names)
                                     resolutionCache.addMapping(source, rule.getName(), existingByXmiId, rule.isPrimary());
+                                    if (!canonicalRuleName.equals(rule.getName())) {
+                                        resolutionCache.addMapping(source, canonicalRuleName, existingByXmiId, rule.isPrimary());
+                                    }
                                     return existingByXmiId;
                                 }
                             }
 
-                            // Use (source, ruleName) key for cross-rule cache isolation
-                            RuleCacheKey key = new RuleCacheKey(source, rule.getName());
+                            // Use (source, canonicalRuleName) key for cross-rule cache isolation
+                            RuleCacheKey key = new RuleCacheKey(source, canonicalRuleName);
 
                             // Fast path: check if already executed (from cache or concurrent execution)
                             EObject existing = executingLazyRules.get(key);
@@ -1301,8 +1330,11 @@ public class TransformationContext {
                                         }
                                         TransformationMetrics.recordRuleExecution(rule.getName());
                                         if (result != null) {
-                                            // Cache the result atomically
+                                            // Cache the result atomically under both rule names
                                             resolutionCache.addMapping(source, rule.getName(), result, rule.isPrimary());
+                                            if (!canonicalRuleName.equals(rule.getName())) {
+                                                resolutionCache.addMapping(source, canonicalRuleName, result, rule.isPrimary());
+                                            }
                                             executingLazyRules.put(key, result);
                                         }
                                         return (T) result;
@@ -1557,58 +1589,86 @@ public class TransformationContext {
                 }
                 // ETL semantics: guards ARE evaluated at invocation time for @lazy rules
                 if (rule != null && rule.appliesTo(source) && rule.evaluateGuard(source, this)) {
+                    // When a named rule is explicitly given, use that rule name for the lock key
+                    // (No @Primary normalization - the caller explicitly requested this specific rule)
+
                     // Check if already in cache by rule name
                     EObject existing = resolutionCache.getByRule(source, ruleName);
                     if (existing != null && targetType.isInstance(existing)) {
                         original = (T) existing;
                     } else {
-                        // Check for recursion - if we're already executing this rule for this source
-                        NamedRuleKey ruleKey = new NamedRuleKey(source, ruleName);
-                        Set<NamedRuleKey> inProgress = inProgressNamedRules.get();
-                        if (inProgress.contains(ruleKey)) {
-                            // Recursive call detected - return null to break the cycle
-                            return null;
-                        }
+                        // Use RuleCacheKey for locking to share lock with executeParentRule()
+                        RuleCacheKey key = new RuleCacheKey(source, ruleName);
 
-                        // Mark as in-progress and execute the rule
-                        inProgress.add(ruleKey);
-                        try {
-                            // Double-check cache after marking in-progress
-                            existing = resolutionCache.getByRule(source, ruleName);
-                            if (existing != null && targetType.isInstance(existing)) {
-                                original = (T) existing;
-                            } else {
-                                // CRITICAL: Save and reset inheritance state for equivalent() calls.
-                                // When a transform function calls equivalent() to look up related elements,
-                                // the nested transformation should start FRESH, not inherit the caller's
-                                // inheritance context. Without this reset, the nested rule would see
-                                // inInheritanceExecution=true and potentially reuse the caller's preCreatedTarget.
-                                boolean wasInInheritance = isInInheritanceExecution();
-                                EObject savedPreCreated = getPreCreatedTarget();
-                                setInInheritanceExecution(false);
-                                clearPreCreatedTarget();
+                        // Fast path: check if already executed (from cache or concurrent execution)
+                        EObject existingFromLazyRules = executingLazyRules.get(key);
+                        if (existingFromLazyRules != null && targetType.isInstance(existingFromLazyRules)) {
+                            original = (T) existingFromLazyRules;
+                        } else {
+                            // Check for recursion
+                            Set<RuleCacheKey> inProgress = inProgressRules.get();
+                            if (inProgress.contains(key)) {
+                                return null;
+                            }
 
-                                try {
-                                    // Execute the specific rule with clean inheritance state
-                                    EObject result = rule.execute(source, this);
-                                    if (result != null) {
-                                        resolutionCache.addMapping(source, ruleName, result, rule.isPrimary());
-                                        if (targetType.isInstance(result)) {
-                                            original = (T) result;
+                            // Acquire per-element lock for thread-safe execution
+                            ReentrantLock lock = ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
+                            boolean lockAcquired;
+                            try {
+                                lockAcquired = lock.tryLock(30, java.util.concurrent.TimeUnit.SECONDS);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                                throw new RuntimeException("Interrupted while waiting for lock on " + key, e);
+                            }
+                            if (!lockAcquired) {
+                                throw new RuntimeException("Potential deadlock detected: timeout waiting for lock on equivalentDiscriminated");
+                            }
+
+                            try {
+                                // Double-check after acquiring lock
+                                existing = resolutionCache.getByRule(source, ruleName);
+                                if (existing != null && targetType.isInstance(existing)) {
+                                    original = (T) existing;
+                                } else {
+                                    existingFromLazyRules = executingLazyRules.get(key);
+                                    if (existingFromLazyRules != null && targetType.isInstance(existingFromLazyRules)) {
+                                        original = (T) existingFromLazyRules;
+                                    } else {
+                                        // Mark as in-progress
+                                        inProgress.add(key);
+                                        try {
+                                            // Save and reset inheritance state
+                                            boolean wasInInheritance = isInInheritanceExecution();
+                                            EObject savedPreCreated = getPreCreatedTarget();
+                                            setInInheritanceExecution(false);
+                                            clearPreCreatedTarget();
+
+                                            try {
+                                                // Execute the specific rule
+                                                EObject result = rule.execute(source, this);
+                                                if (result != null) {
+                                                    resolutionCache.addMapping(source, ruleName, result, rule.isPrimary());
+                                                    executingLazyRules.put(key, result);
+                                                    if (targetType.isInstance(result)) {
+                                                        original = (T) result;
+                                                    }
+                                                }
+                                            } finally {
+                                                setInInheritanceExecution(wasInInheritance);
+                                                if (savedPreCreated != null) {
+                                                    setPreCreatedTarget(savedPreCreated);
+                                                } else {
+                                                    clearPreCreatedTarget();
+                                                }
+                                            }
+                                        } finally {
+                                            inProgress.remove(key);
                                         }
                                     }
-                                } finally {
-                                    // Restore inheritance state for caller
-                                    setInInheritanceExecution(wasInInheritance);
-                                    if (savedPreCreated != null) {
-                                        setPreCreatedTarget(savedPreCreated);
-                                    } else {
-                                        clearPreCreatedTarget();
-                                    }
                                 }
+                            } finally {
+                                lock.unlock();
                             }
-                        } finally {
-                            inProgress.remove(ruleKey);
                         }
                     }
                 }
@@ -1830,8 +1890,8 @@ public class TransformationContext {
                 return (T) cached;
             }
 
-            // Cache miss - need to check executingLazyRules and potentially acquire lock
-            // CRITICAL: Use the SAME lock as equivalent() to prevent dual-locking race condition
+            // When a named rule is explicitly given, use that rule name for the lock key
+            // (No @Primary normalization - the caller explicitly requested this specific rule)
             RuleCacheKey key = new RuleCacheKey(source, parentRuleName);
 
             // Check if currently being executed by another thread
@@ -1841,7 +1901,6 @@ public class TransformationContext {
             }
 
             // Acquire per-element lock for thread-safe execution
-            // Using lock.lock() (same as equivalent()) for consistent lock semantics
             ReentrantLock lock = ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
             lock.lock();
             try {
@@ -1852,7 +1911,6 @@ public class TransformationContext {
                 }
 
                 // Also check XMI ID (target may have been created by eager rule but not yet cached)
-                // This is consistent with the fix in equivalent() that checks all rules
                 if (useStructuredIds) {
                     String structuredId = generateStructuredId(source, parentRuleName);
                     T existingByXmiId = findByXmiId(structuredId, (Class<T>) parentRule.getTargetType());
@@ -1864,7 +1922,7 @@ public class TransformationContext {
                     }
                 }
 
-                // Execute the rule under the unified lock
+                // Execute the rule under the lock
                 EObject result = parentRule.execute(source, this);
                 if (result != null) {
                     // Cache the result atomically

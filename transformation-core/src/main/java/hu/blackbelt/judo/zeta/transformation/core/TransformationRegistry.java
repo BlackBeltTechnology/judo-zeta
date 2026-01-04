@@ -73,6 +73,11 @@ public class TransformationRegistry {
     private final ConcurrentHashMap<Class<?>, List<TransformRuleDescriptor>> lazyRulesByTypeCache =
             new ConcurrentHashMap<>();
 
+    // Cache for @Primary rules by target type
+    // Used to get canonical rule name for lock key normalization in equivalent()
+    private final ConcurrentHashMap<Class<?>, TransformRuleDescriptor> primaryRuleByTargetTypeCache =
+            new ConcurrentHashMap<>();
+
     /**
      * Register a transformation context class.
      *
@@ -273,8 +278,17 @@ public class TransformationRegistry {
         rulesBySourceType.computeIfAbsent(sourceType, k -> new ArrayList<>()).add(descriptor);
         rulesByName.put(name, descriptor);
 
-        log.debug("Registered rule: {} ({} -> {}) with {} transforms, {} tos", 
-                name, sourceType.getSimpleName(), targetType.getSimpleName(), 
+        // Register @Primary rules for target type lookup (used for lock key normalization)
+        if (isPrimary) {
+            TransformRuleDescriptor existingPrimary = primaryRuleByTargetTypeCache.putIfAbsent(targetType, descriptor);
+            if (existingPrimary != null) {
+                log.warn("Multiple @Primary rules for target type {}: '{}' and '{}'. Using first registered: '{}'",
+                        targetType.getSimpleName(), existingPrimary.getName(), name, existingPrimary.getName());
+            }
+        }
+
+        log.debug("Registered rule: {} ({} -> {}) with {} transforms, {} tos",
+                name, sourceType.getSimpleName(), targetType.getSimpleName(),
                 transforms.size(), tos.size());
     }
 
@@ -394,6 +408,20 @@ public class TransformationRegistry {
      */
     public TransformRuleDescriptor getRuleByName(String name) {
         return rulesByName.get(name);
+    }
+
+    /**
+     * Get the @Primary rule for a given target type.
+     *
+     * <p>Used for lock key normalization in equivalent(). When multiple rules produce
+     * the same target type, the @Primary rule's name is used as the canonical lock key
+     * to ensure consistent locking between equivalent() and executeParentRule().</p>
+     *
+     * @param targetType the target type class
+     * @return the @Primary rule for this target type, or null if none exists
+     */
+    public TransformRuleDescriptor getPrimaryRuleForTargetType(Class<?> targetType) {
+        return primaryRuleByTargetTypeCache.get(targetType);
     }
 
     /**

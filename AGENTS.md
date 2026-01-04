@@ -307,13 +307,18 @@ EObject obj = ctx.createTarget(dynamicType, dynamicPackage);
 - Double-check locking pattern in `equivalent()` calls
 - Synchronized XMI ID operations on Resource object
 
-**Approach 2: Deferred EMF Writes (Opt-in)**
-```java
-ctx.enableDeferredWrites();
-Table table = ctx.createTarget(Table.class);  // Returns proxy
-table.setName("Orders");                       // Recorded, not applied
-ctx.commitDeferredOperations();                // Applies all in sequence order
-```
+**Approach 2: Deferred EMF Writes (Auto-enabled for parallel)**
+
+When `parallel=true`, deferred writes are automatically enabled to prevent EMF EList corruption.
+
+| Issue | Impact | Details |
+|-------|--------|---------|
+| Read-after-write | `size()`, `contains()` return stale data | See `agent-docs/EXECUTION.md` |
+| eContainer() null | Containment navigation fails | See `agent-docs/EXECUTION.md` |
+| Cross-rule visibility | Rules can't see other rules' additions | See `agent-docs/EXECUTION.md` |
+| Opt-out | `ctx.disableDeferredWrites()` | See `agent-docs/EXECUTION.md` |
+
+> **Full documentation**: `agent-docs/EXECUTION.md` → "Deferred Writes Compatibility Issues"
 
 **Guard Rejection Caching:**
 - Guard rejections cached per `(source, ruleName)` pair

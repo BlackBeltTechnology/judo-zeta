@@ -79,6 +79,78 @@ TransformationExecutor.builder()
 - Lazy rule tracking: ConcurrentHashMap
 - Cache operations: Per-key ReentrantLock
 
+## Deferred Writes (Auto-enabled for Parallel)
+
+When `parallel=true`, deferred writes are automatically enabled to prevent EMF EList corruption. Transformations can opt-out via `ctx.disableDeferredWrites()`.
+
+```java
+// Automatic in parallel mode:
+Table table = ctx.createTarget(Table.class);  // Returns proxy
+table.getFields().add(field);                  // Recorded, not applied immediately
+// Operations replayed single-threaded after parallel phase
+```
+
+### Deferred Writes Compatibility Issues
+
+**WARNING**: Deferred writes have limitations that may affect transformation behavior:
+
+**1. Read-After-Write Inconsistency**
+```java
+parent.getChildren().add(child);
+int count = parent.getChildren().size();  // Returns OLD size, not +1!
+boolean found = parent.getChildren().contains(child);  // Returns false!
+```
+*Impact*: Rules that read from lists after modifying them will get stale data.
+
+**2. eContainer() Returns Null**
+```java
+parent.getChildren().add(child);
+EObject container = child.eContainer();  // Returns null until replay!
+```
+*Impact*: Containment-based navigation fails during parallel phase.
+
+**3. Cross-Rule Visibility**
+```java
+// Rule A (Thread 1)
+parent.getChildren().add(childA);
+
+// Rule B (Thread 2) - running concurrently
+for (Child c : parent.getChildren()) {  // Won't see childA!
+    // ...
+}
+```
+*Impact*: Rules can't see each other's additions during parallel phase.
+
+**4. Existing Synchronization Conflicts**
+```java
+// If transformation already uses synchronized helpers:
+TransformationHelper.synchronizedAdd(list, element);  // Double-handling?
+```
+*Impact*: May conflict with existing thread-safety workarounds.
+
+**5. List Order Dependencies**
+```java
+// Insertion order may differ between sequential and parallel
+parent.getChildren().add(a);  // seq=5
+parent.getChildren().add(b);  // seq=3 (from different thread)
+// After replay: order is [b, a] not [a, b]
+```
+*Impact*: Element ordering may change vs. sequential mode.
+
+### Mitigation
+
+`DeferredEList` tracks pending additions for `contains()` and `size()` checks. However, **cross-rule visibility** and **eContainer()** issues cannot be mitigated - they're inherent to deferred writes.
+
+### Opt-Out
+
+If deferred writes cause issues, disable for specific transformation:
+```java
+@PreExecution
+public void setup(TransformationContext ctx) {
+    ctx.disableDeferredWrites();  // Use direct EMF writes
+}
+```
+
 ## Atomic Cache Operations
 
 ### Problem: Race Conditions

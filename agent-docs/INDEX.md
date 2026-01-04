@@ -100,6 +100,15 @@ Task: Make legacy transformation parallel-safe
 Task: Understand safe vs unsafe parallel patterns
   → Read: QUICK-REF.md (Thread-Safe Rule Guidelines)
 
+Task: Understand deferred writes limitations
+  → Read: EXECUTION.md (Deferred Writes Compatibility Issues)
+
+Task: Fix eContainer() returns null in parallel mode
+  → Read: EXECUTION.md (Deferred Writes Compatibility Issues)
+
+Task: Opt-out of deferred writes
+  → Read: EXECUTION.md (Deferred Writes - Opt-Out)
+
 Task: Profile transformation performance
   → Read: QUICK-REF.md (Performance Profiling)
 
