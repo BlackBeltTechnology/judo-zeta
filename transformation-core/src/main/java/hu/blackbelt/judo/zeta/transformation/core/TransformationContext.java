@@ -40,7 +40,6 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
@@ -265,10 +264,13 @@ public class TransformationContext {
     private static class RuleCacheKey {
         final EObject source;
         final String ruleName;
+        private final int hashCode;  // Pre-computed for performance
 
         RuleCacheKey(EObject source, String ruleName) {
             this.source = source;
             this.ruleName = ruleName;
+            // Use identity hash for source (fast) instead of EMF hashCode (slow)
+            this.hashCode = System.identityHashCode(source) ^ ruleName.hashCode();
         }
 
         @Override
@@ -276,12 +278,13 @@ public class TransformationContext {
             if (this == o) return true;
             if (o == null || getClass() != o.getClass()) return false;
             RuleCacheKey that = (RuleCacheKey) o;
-            return Objects.equals(source, that.source) && Objects.equals(ruleName, that.ruleName);
+            // Use identity comparison for source (EMF identity = object reference)
+            return source == that.source && Objects.equals(ruleName, that.ruleName);
         }
 
         @Override
         public int hashCode() {
-            return Objects.hash(source, ruleName);
+            return hashCode;  // Return pre-computed hash
         }
 
         @Override
@@ -1660,41 +1663,28 @@ public class TransformationContext {
         }
 
         try {
-            // Use (source, ruleName) key for cross-rule cache isolation
-            // CRITICAL: Use the SAME lock as equivalent() to prevent dual-locking race condition
-            RuleCacheKey key = new RuleCacheKey(source, parentRuleName);
-
-            // Fast path: check if already executed
-            EObject existing = executingLazyRules.get(key);
-            if (existing != null) {
-                return (T) existing;
-            }
-
-            // Check resolution cache
+            // FAST PATH: Check resolution cache BEFORE creating key object (avoids allocation on cache hit)
             EObject cached = resolutionCache.getByRule(source, parentRuleName);
             if (cached != null) {
                 return (T) cached;
             }
 
+            // Cache miss - need to check executingLazyRules and potentially acquire lock
+            // CRITICAL: Use the SAME lock as equivalent() to prevent dual-locking race condition
+            RuleCacheKey key = new RuleCacheKey(source, parentRuleName);
+
+            // Check if currently being executed by another thread
+            EObject existing = executingLazyRules.get(key);
+            if (existing != null) {
+                return (T) existing;
+            }
+
             // Acquire per-element lock for thread-safe execution
-            // CRITICAL: Using ruleLocks (same as equivalent()) ensures that concurrent calls
-            // via equivalent() and executeParentRule() for the same (source, ruleName) pair
-            // are properly synchronized - eliminating the dual-locking race condition
+            // Using lock.lock() (same as equivalent()) for consistent lock semantics
             ReentrantLock lock = ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
-            boolean lockAcquired = false;
+            lock.lock();
             try {
-                lockAcquired = lock.tryLock(30, TimeUnit.SECONDS);
-                if (!lockAcquired) {
-                    throw new RuntimeException("Deadlock detected in executeParentRule for rule: " + parentRuleName);
-                }
-
                 // Double-check after acquiring lock (another thread may have completed)
-                EObject existingAfterLock = executingLazyRules.get(key);
-                if (existingAfterLock != null) {
-                    return (T) existingAfterLock;
-                }
-
-                // Also double-check resolution cache
                 cached = resolutionCache.getByRule(source, parentRuleName);
                 if (cached != null) {
                     return (T) cached;
@@ -1708,13 +1698,8 @@ public class TransformationContext {
                     executingLazyRules.put(key, result);
                 }
                 return (T) result;
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new RuntimeException("Interrupted while waiting for lock in executeParentRule", e);
             } finally {
-                if (lockAcquired) {
-                    lock.unlock();
-                }
+                lock.unlock();
             }
         } finally {
             // Restore previous inheritance state
