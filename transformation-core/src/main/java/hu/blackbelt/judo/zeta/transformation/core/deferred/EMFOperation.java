@@ -98,6 +98,7 @@ public sealed interface EMFOperation permits
 
     /**
      * Set a reference value.
+     * Note: value is already unwrapped at queue time (in DeferredEObject.handleSet)
      */
     record SetReferenceOp(
             EObject target,
@@ -107,12 +108,8 @@ public sealed interface EMFOperation permits
     ) implements EMFOperation {
         @Override
         public void apply() {
-            // Unwrap if the value is a deferred proxy
-            Object realValue = value;
-            if (value instanceof DeferredEObject.ProxyMarker) {
-                realValue = ((DeferredEObject.ProxyMarker) value).getDelegate();
-            }
-            target.eSet(feature, realValue);
+            // Value is already unwrapped at queue time - apply directly
+            target.eSet(feature, value);
         }
     }
 
@@ -132,6 +129,7 @@ public sealed interface EMFOperation permits
 
     /**
      * Add an element to a list.
+     * Note: element is already unwrapped at queue time (in DeferredEList.add)
      */
     record AddToListOp(
             EObject target,
@@ -144,17 +142,18 @@ public sealed interface EMFOperation permits
         @SuppressWarnings("unchecked")
         public void apply() {
             EList<Object> list = (EList<Object>) target.eGet(feature);
-            Object realElement = unwrapIfProxy(element);
+            // Element is already unwrapped at queue time
             if (index < 0 || index >= list.size()) {
-                list.add(realElement);
+                list.add(element);
             } else {
-                list.add(index, realElement);
+                list.add(index, element);
             }
         }
     }
 
     /**
      * Add all elements from a collection to a list.
+     * Note: elements are already unwrapped at queue time (in DeferredEList.addAll)
      */
     record AddAllToListOp(
             EObject target,
@@ -167,17 +166,18 @@ public sealed interface EMFOperation permits
         @SuppressWarnings("unchecked")
         public void apply() {
             EList<Object> list = (EList<Object>) target.eGet(feature);
-            Collection<Object> realElements = unwrapCollection(elements);
+            // Elements are already unwrapped at queue time
             if (index < 0 || index >= list.size()) {
-                list.addAll(realElements);
+                list.addAll((Collection<Object>) elements);
             } else {
-                list.addAll(index, realElements);
+                list.addAll(index, (Collection<Object>) elements);
             }
         }
     }
 
     /**
      * Remove an element from a list.
+     * Note: element is already unwrapped at queue time (in DeferredEList.remove)
      */
     record RemoveFromListOp(
             EObject target,
@@ -189,13 +189,14 @@ public sealed interface EMFOperation permits
         @SuppressWarnings("unchecked")
         public void apply() {
             EList<Object> list = (EList<Object>) target.eGet(feature);
-            Object realElement = unwrapIfProxy(element);
-            list.remove(realElement);
+            // Element is already unwrapped at queue time
+            list.remove(element);
         }
     }
 
     /**
      * Remove all elements from a collection from a list.
+     * Note: elements are already unwrapped at queue time (in DeferredEList.removeAll)
      */
     record RemoveAllFromListOp(
             EObject target,
@@ -207,8 +208,8 @@ public sealed interface EMFOperation permits
         @SuppressWarnings("unchecked")
         public void apply() {
             EList<Object> list = (EList<Object>) target.eGet(feature);
-            Collection<Object> realElements = unwrapCollection(elements);
-            list.removeAll(realElements);
+            // Elements are already unwrapped at queue time
+            list.removeAll((Collection<Object>) elements);
         }
     }
 
@@ -230,6 +231,7 @@ public sealed interface EMFOperation permits
 
     /**
      * Set an element at a specific index in a list.
+     * Note: element is already unwrapped at queue time (in DeferredEList.set)
      */
     record SetListElementOp(
             EObject target,
@@ -242,8 +244,8 @@ public sealed interface EMFOperation permits
         @SuppressWarnings("unchecked")
         public void apply() {
             EList<Object> list = (EList<Object>) target.eGet(feature);
-            Object realElement = unwrapIfProxy(element);
-            list.set(index, realElement);
+            // Element is already unwrapped at queue time
+            list.set(index, element);
         }
     }
 
@@ -265,25 +267,6 @@ public sealed interface EMFOperation permits
         }
     }
 
-    // ==================== Helper Methods ====================
-
-    /**
-     * Unwrap a value if it's a deferred proxy.
-     */
-    static Object unwrapIfProxy(Object value) {
-        if (value instanceof DeferredEObject.ProxyMarker) {
-            return ((DeferredEObject.ProxyMarker) value).getDelegate();
-        }
-        return value;
-    }
-
-    /**
-     * Unwrap all elements in a collection if they are deferred proxies.
-     */
-    @SuppressWarnings("unchecked")
-    static Collection<Object> unwrapCollection(Collection<?> collection) {
-        return collection.stream()
-                .map(EMFOperation::unwrapIfProxy)
-                .toList();
-    }
+    // Note: unwrapIfProxy and unwrapCollection removed - unwrapping now happens
+    // at queue time in DeferredEObject.handleSet() and DeferredEList methods.
 }

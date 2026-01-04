@@ -231,21 +231,25 @@ class DeferredWritesTest {
         }
 
         @Test
-        void testSetReferenceOpUnwrapsProxy() {
-            // Create an EClass and use its eAttributeType reference via an EReference
+        void testSetReferenceOpUnwrapsProxyAtQueueTime() {
+            // Unwrapping now happens at queue time in DeferredEObject.handleSet(),
+            // not at apply time. This test verifies the correct flow.
             EReference ref = EcoreFactory.eINSTANCE.createEReference();
             EClass targetClass = EcoreFactory.eINSTANCE.createEClass();
             targetClass.setName("TargetClass");
 
-            // Create a proxy of targetClass
+            // Create a proxy of the reference (the object being set ON)
             OperationQueue testQueue = new OperationQueue();
+            EReference proxiedRef = DeferredEObject.createProxy(ref, testQueue);
+
+            // Create a proxy of the value (the object being set TO)
             EClass proxiedTarget = DeferredEObject.createProxy(targetClass, testQueue);
 
-            EStructuralFeature typeFeature = EcorePackage.Literals.ETYPED_ELEMENT__ETYPE;
+            // Set reference through proxy - handleSet should unwrap the value
+            proxiedRef.setEType(proxiedTarget);
 
-            // Operation should unwrap the proxy
-            EMFOperation op = new EMFOperation.SetReferenceOp(ref, typeFeature, proxiedTarget, 0);
-            op.apply();
+            // Commit the queued operations
+            testQueue.commit();
 
             // Should be the real object, not the proxy
             assertSame(targetClass, ref.getEType());

@@ -265,18 +265,21 @@ public class DeferredEObject implements InvocationHandler {
     }
 
     private void handleSet(EStructuralFeature feature, Object value) {
-        // Store pending value for read-after-write consistency
+        // Store pending value (may be proxy) for read-after-write consistency
         if (value != null) {
             pendingValues.put(feature, value);
         } else {
             pendingValues.remove(feature);
         }
 
-        // Queue the operation
+        // Queue the operation with UNWRAPPED values
+        // EMF's inverse handling (eInverseAdd) requires real EObject instances,
+        // not proxies. Unwrap at queue time to ensure correct bidirectional refs.
         if (feature instanceof EReference) {
             EObject refValue = (EObject) value;
+            EObject realRefValue = unwrap(refValue);  // Unwrap before queueing
             queue.add(new EMFOperation.SetReferenceOp(
-                    delegate, feature, refValue, queue.nextSequence()
+                    delegate, feature, realRefValue, queue.nextSequence()
             ));
         } else {
             queue.add(new EMFOperation.SetAttributeOp(
