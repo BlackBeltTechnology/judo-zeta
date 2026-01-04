@@ -1021,6 +1021,161 @@ public class TransformationContext {
             }
             TransformationMetrics.recordEquivalentCacheMiss();
 
+            // FIX: Check XMI ID lookup and on-demand execution for ALL rules (eager AND lazy)
+            // This handles the case where equivalent() is called for a source that is
+            // transformed by an EAGER rule (which has no lazy rule). Without this fix,
+            // equivalent() returns null because XMI ID lookup was inside the lazy rule loop.
+            if (transformationRegistry != null) {
+                @SuppressWarnings("unchecked")
+                Collection<TransformRuleDescriptor> allRules = transformationRegistry.getRulesForSource(
+                        (Class<? extends EObject>) source.getClass());
+                for (TransformRuleDescriptor rule : allRules) {
+                    TransformationMetrics.recordRuleIteration();
+                    // Only check rules with compatible target type
+                    if (!targetType.isAssignableFrom(rule.getTargetType())) continue;
+                    // Skip abstract rules (they don't create targets)
+                    if (rule.isAbstract()) continue;
+                    // Runtime check: appliesTo (EMF type semantics)
+                    if (!rule.appliesTo(source)) continue;
+
+                    // First try XMI ID lookup (for already-created targets)
+                    if (useStructuredIds) {
+                        String structuredId = generateStructuredId(source, rule.getName());
+                        long xmiIdStartNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+                        T existingByXmiId = findByXmiId(structuredId, targetType);
+                        if (TransformationMetrics.isEnabled()) {
+                            TransformationMetrics.addFindByXmiIdNanos(System.nanoTime() - xmiIdStartNanos);
+                        }
+                        TransformationMetrics.recordFindByXmiIdCall();
+
+                        if (existingByXmiId != null) {
+                            // Found by XMI ID - cache it and return
+                            resolutionCache.addMapping(source, rule.getName(), existingByXmiId, rule.isPrimary());
+                            return existingByXmiId;
+                        }
+                    }
+
+                    // XMI ID lookup failed - target doesn't exist yet
+                    // Execute the rule on-demand (works for both lazy AND eager rules)
+                    // This is the key fix: eager rules are executed on-demand like lazy rules
+                    // when called via equivalent() and the target doesn't exist yet.
+
+                    // Record activation for activity-based rules
+                    if (rule.isActivityBased()) {
+                        activate(rule.getName(), source);
+                    }
+
+                    // Evaluate guard
+                    long guardStartNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+                    boolean guardResult = rule.evaluateGuard(source, this);
+                    if (TransformationMetrics.isEnabled()) {
+                        TransformationMetrics.addGuardEvaluationNanos(System.nanoTime() - guardStartNanos);
+                    }
+                    TransformationMetrics.recordGuardEvaluation();
+
+                    if (!guardResult) continue;
+
+                    // Use (source, ruleName) key for cross-rule cache isolation
+                    RuleCacheKey key = new RuleCacheKey(source, rule.getName());
+
+                    // Fast path: check if already executed (from cache or concurrent execution)
+                    EObject existing = executingLazyRules.get(key);
+                    if (existing != null) {
+                        return (T) existing;
+                    }
+
+                    // Check if this key is currently being executed in this thread (recursion)
+                    Set<RuleCacheKey> inProgress = inProgressRules.get();
+                    if (inProgress.contains(key)) {
+                        // Recursive call detected - return null to break the cycle
+                        return null;
+                    }
+
+                    // Acquire per-element lock for thread-safe execution
+                    long lockStartNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+                    ReentrantLock lock = ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
+                    boolean lockAcquired;
+                    try {
+                        lockAcquired = lock.tryLock(30, java.util.concurrent.TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException("Interrupted while waiting for lock on " + key, e);
+                    }
+                    if (!lockAcquired) {
+                        throw new RuntimeException(
+                            "Potential deadlock detected: timeout waiting for lock on equivalent(" +
+                            source.eClass().getName() + ", " + rule.getName() + "). " +
+                            "This may indicate circular rule dependencies.");
+                    }
+                    if (TransformationMetrics.isEnabled()) {
+                        TransformationMetrics.addLockWaitNanos(System.nanoTime() - lockStartNanos);
+                    }
+                    TransformationMetrics.recordLockAcquisition();
+
+                    try {
+                        // Double-check after acquiring lock (another thread may have completed)
+                        EObject existingAfterLock = executingLazyRules.get(key);
+                        if (existingAfterLock != null) {
+                            return (T) existingAfterLock;
+                        }
+
+                        // Also double-check resolution cache
+                        T cachedAgain = resolutionCache.getEquivalent(source, targetType);
+                        if (cachedAgain != null) {
+                            return cachedAgain;
+                        }
+
+                        // Check XMI ID again after lock (target may have been created)
+                        if (useStructuredIds) {
+                            String structuredId = generateStructuredId(source, rule.getName());
+                            T existingByXmiId = findByXmiId(structuredId, targetType);
+                            if (existingByXmiId != null) {
+                                resolutionCache.addMapping(source, rule.getName(), existingByXmiId, rule.isPrimary());
+                                executingLazyRules.put(key, existingByXmiId);
+                                return existingByXmiId;
+                            }
+                        }
+
+                        // Mark as in-progress for recursion detection
+                        inProgress.add(key);
+                        try {
+                            // Save and reset inheritance state for equivalent() calls
+                            boolean wasInInheritance = isInInheritanceExecution();
+                            EObject savedPreCreated = getPreCreatedTarget();
+                            setInInheritanceExecution(false);
+                            clearPreCreatedTarget();
+
+                            try {
+                                // Execute the rule
+                                long ruleStartNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+                                EObject result = rule.execute(source, this);
+                                if (TransformationMetrics.isEnabled()) {
+                                    TransformationMetrics.addRuleExecutionNanos(rule.getName(), System.nanoTime() - ruleStartNanos);
+                                }
+                                TransformationMetrics.recordRuleExecution(rule.getName());
+                                if (result != null) {
+                                    resolutionCache.addMapping(source, rule.getName(), result, rule.isPrimary());
+                                    executingLazyRules.put(key, result);
+                                }
+                                return (T) result;
+                            } finally {
+                                // Restore inheritance state
+                                setInInheritanceExecution(wasInInheritance);
+                                if (savedPreCreated != null) {
+                                    setPreCreatedTarget(savedPreCreated);
+                                }
+                            }
+                        } finally {
+                            inProgress.remove(key);
+                        }
+                    } finally {
+                        lock.unlock();
+                    }
+                }
+            }
+
+            // If no matching rules found via the unified path above, fall back to
+            // the original lazy rule loop (for backwards compatibility with edge cases)
             // Try to find and execute a matching lazy rule
             // Uses pre-filtered lazy rules index for O(1) lookup
             if (transformationRegistry != null) {
@@ -1694,6 +1849,19 @@ public class TransformationContext {
                 cached = resolutionCache.getByRule(source, parentRuleName);
                 if (cached != null) {
                     return (T) cached;
+                }
+
+                // Also check XMI ID (target may have been created by eager rule but not yet cached)
+                // This is consistent with the fix in equivalent() that checks all rules
+                if (useStructuredIds) {
+                    String structuredId = generateStructuredId(source, parentRuleName);
+                    T existingByXmiId = findByXmiId(structuredId, (Class<T>) parentRule.getTargetType());
+                    if (existingByXmiId != null) {
+                        // Found by XMI ID - cache it and return
+                        resolutionCache.addMapping(source, parentRuleName, existingByXmiId, parentRule.isPrimary());
+                        executingLazyRules.put(key, existingByXmiId);
+                        return existingByXmiId;
+                    }
                 }
 
                 // Execute the rule under the unified lock
