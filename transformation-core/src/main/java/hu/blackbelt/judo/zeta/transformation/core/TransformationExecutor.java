@@ -392,10 +392,16 @@ public class TransformationExecutor {
 
         long startTime = System.currentTimeMillis();
 
+        // Start total transformation timing
+        TransformationMetrics.startTransformation();
+
         // Invoke pre-transformation hooks
         registry.invokePreTransformationHooks(context);
 
         try {
+            // Time element collection phase
+            long elementCollectionStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+
             // Collect single-source elements for single-source rules
             Set<EObject> singleSourceElements = new LinkedHashSet<>();
 
@@ -421,6 +427,11 @@ public class TransformationExecutor {
                         singleSourceElements.addAll(elements);
                     }
                 }
+            }
+
+            // Record element collection time
+            if (TransformationMetrics.isEnabled()) {
+                TransformationMetrics.addModelIterationNanos(System.nanoTime() - elementCollectionStart);
             }
             
             // Process single-source elements
@@ -470,6 +481,9 @@ public class TransformationExecutor {
             return new TransformationResult(context, duration);
 
         } finally {
+            // End total transformation timing
+            TransformationMetrics.endTransformation();
+
             // Always disable staging and cleanup
             context.disableStaging();
 
@@ -569,7 +583,11 @@ public class TransformationExecutor {
             }
 
             // Phase 2: Commit staged elements to Resource (single-threaded)
+            long commitStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
             context.commitStagedElements();
+            if (TransformationMetrics.isEnabled()) {
+                TransformationMetrics.addStagingCommitNanos(System.nanoTime() - commitStart);
+            }
 
         } finally {
             context.disableStaging();
@@ -593,14 +611,24 @@ public class TransformationExecutor {
     }
 
     private void transformParallel(Collection<? extends EObject> sourceElements) {
+        // Time list conversion (ArrayList creation from Set)
+        long listConversionStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
         List<EObject> elementList = new ArrayList<>(sourceElements);
+        if (TransformationMetrics.isEnabled()) {
+            TransformationMetrics.addModelIterationNanos(System.nanoTime() - listConversionStart);
+        }
+
         int numProcessors = Runtime.getRuntime().availableProcessors();
 
         // Calculate chunk size (use configured value as minimum)
         int effectiveChunkSize = Math.max(chunkSize, (elementList.size() + numProcessors - 1) / numProcessors);
 
-        // Partition elements
+        // Time partitioning
+        long partitionStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
         List<List<EObject>> chunks = partitionList(elementList, effectiveChunkSize);
+        if (TransformationMetrics.isEnabled()) {
+            TransformationMetrics.addModelIterationNanos(System.nanoTime() - partitionStart);
+        }
 
         // Process chunks in parallel
         ExecutorService exec = getOrCreateExecutor();
