@@ -632,19 +632,31 @@ public class TransformationExecutor {
 
         // Process chunks in parallel
         ExecutorService exec = getOrCreateExecutor();
+
+        // Time future creation
+        long futureStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
         List<CompletableFuture<Void>> futures = chunks.stream()
                 .map(chunk -> CompletableFuture.runAsync(() -> transformChunk(chunk), exec))
                 .collect(Collectors.toList());
+        if (TransformationMetrics.isEnabled()) {
+            TransformationMetrics.addFutureCreationNanos(System.nanoTime() - futureStart);
+        }
 
-        // Wait for completion
+        // Time parallel wait
+        long waitStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
         CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+        if (TransformationMetrics.isEnabled()) {
+            TransformationMetrics.addParallelWaitNanos(System.nanoTime() - waitStart);
+        }
     }
 
     private void transformChunk(List<EObject> chunk) {
+        long chunkStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+
         for (EObject source : chunk) {
             // Check for fail-fast - stop if another thread encountered an error
             if (firstError.get() != null) {
-                return;
+                break;
             }
             try {
                 context.setCurrentSource(source);
@@ -652,6 +664,10 @@ public class TransformationExecutor {
             } finally {
                 context.clearCurrentSource();
             }
+        }
+
+        if (TransformationMetrics.isEnabled()) {
+            TransformationMetrics.addChunkProcessingNanos(System.nanoTime() - chunkStart);
         }
     }
 
@@ -788,12 +804,20 @@ public class TransformationExecutor {
     }
 
     private void executeEagerRulesFor(EObject source) {
+        // Time rule lookup
+        long rulesStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
         Collection<TransformRuleDescriptor> rules = registry.getRulesForSource(source.getClass());
+        if (TransformationMetrics.isEnabled()) {
+            TransformationMetrics.addRuleMatchingNanos(System.nanoTime() - rulesStart);
+        }
+
+        // Time rule iteration loop
+        long loopStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
 
         for (TransformRuleDescriptor rule : rules) {
             // Check for fail-fast
             if (firstError.get() != null) {
-                return;
+                break;
             }
 
             // Pre-checks that can be done outside the lock (rule metadata, not source-specific state)
@@ -821,6 +845,8 @@ public class TransformationExecutor {
             // This prevents race conditions where multiple threads could create duplicate targets
             try {
                 final String ruleName = rule.getName();
+                // Time cache operation separately
+                long cacheStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
                 context.getElementResolutionCache().getOrCreate(
                         source,
                         ruleName,
@@ -839,6 +865,9 @@ public class TransformationExecutor {
                         },
                         rule.isPrimary()
                 );
+                if (TransformationMetrics.isEnabled()) {
+                    TransformationMetrics.addCacheGetOrCreateNanos(System.nanoTime() - cacheStart);
+                }
             } catch (Exception e) {
                 log.error("Error executing rule '{}' on {}: {}",
                         rule.getName(), source, e.getMessage(), e);
@@ -847,8 +876,12 @@ public class TransformationExecutor {
                         "Error executing rule '" + rule.getName() + "': " + e.getMessage(),
                         e, source, rule.getName());
                 firstError.compareAndSet(null, transformException);
-                return; // Stop processing this element
+                break; // Stop processing this element
             }
+        }
+
+        if (TransformationMetrics.isEnabled()) {
+            TransformationMetrics.addRuleLoopNanos(System.nanoTime() - loopStart);
         }
     }
 

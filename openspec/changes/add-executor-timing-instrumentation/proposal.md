@@ -1,123 +1,183 @@
 # Proposal: Add Executor Timing Instrumentation
 
 **Change ID:** add-executor-timing-instrumentation
-**Status:** Proposed
+**Status:** In Progress
 **Created:** 2026-01-04
 **Updated:** 2026-01-04
 
 ## Why
 
-The `TransformationMetrics` class already has timing metrics defined but they are not being called from `TransformationExecutor`. This leaves significant portions of transformation time unaccounted for in performance reports, making it difficult to identify bottlenecks.
+The `TransformationMetrics` class has timing metrics but they don't cover all significant execution phases. Initial instrumentation reduced UNACCOUNTED time but ~70% remains untracked.
 
-Current report shows high UNACCOUNTED percentage because:
-- Total transformation timing not recorded
-- Element collection/model iteration not timed
-- Staging commit phase not timed
-- Parallel execution overhead not tracked
+Analysis shows the main bottlenecks are:
+- **executeEagerRulesFor loop** - Called 22K times, each iterating through ALL rules (~50+)
+- **Rule skip checks** - 22K × 50 = 1.1M checks per transformation
+- **Parallel execution overhead** - Future creation, wait, chunk processing
+- **Cache getOrCreate overhead** - Outside of actual rule execution
 
 ## What Changes
 
-Add instrumentation calls in `TransformationExecutor.java` to use existing `TransformationMetrics` methods:
+### Phase 1 (Completed)
 
-1. **Total transformation timing** - wrap the entire `transform()` method
-2. **Element collection timing** - measure source element gathering phase
-3. **Staging commit timing** - measure `commitStagedElements()` call
-4. **Parallel execution overhead** - track list conversion and partitioning
+Added instrumentation calls for existing `TransformationMetrics` methods:
+1. Total transformation timing (`startTransformation`/`endTransformation`)
+2. Element collection timing (`addModelIterationNanos`)
+3. Staging commit timing (`addStagingCommitNanos`)
+4. List conversion and partitioning (`addModelIterationNanos`)
+
+### Phase 2 (This Update)
+
+Add NEW metrics to track the remaining ~70% UNACCOUNTED time:
+
+1. **Rule matching** - `registry.getRulesForSource()` lookup time
+2. **Rule loop overhead** - Iteration through rules in `executeEagerRulesFor`
+3. **Chunk processing** - Total time in `transformChunk` method
+4. **Future creation** - Stream/CompletableFuture setup overhead
+5. **Parallel wait** - Time waiting for parallel tasks to complete
+6. **Cache getOrCreate** - Cache operation overhead (outside rule execution)
 
 ## Implementation Details
 
-### 1. Total Transformation Timing (in `transform()`)
+### 1. New Metrics in TransformationMetrics.java
 
 ```java
-public TransformationResult transform() {
-    reset();
-    initElementCache();
-    long startTime = System.currentTimeMillis();
+// New counters
+private static final AtomicLong ruleMatchingNanos = new AtomicLong(0);
+private static final AtomicLong ruleLoopNanos = new AtomicLong(0);
+private static final AtomicLong chunkProcessingNanos = new AtomicLong(0);
+private static final AtomicLong futureCreationNanos = new AtomicLong(0);
+private static final AtomicLong parallelWaitNanos = new AtomicLong(0);
+private static final AtomicLong cacheGetOrCreateNanos = new AtomicLong(0);
 
-    TransformationMetrics.startTransformation();  // ADD
+// New recording methods
+public static void addRuleMatchingNanos(long nanos) {
+    if (enabled.get()) ruleMatchingNanos.addAndGet(nanos);
+}
+public static void addRuleLoopNanos(long nanos) {
+    if (enabled.get()) ruleLoopNanos.addAndGet(nanos);
+}
+public static void addChunkProcessingNanos(long nanos) {
+    if (enabled.get()) chunkProcessingNanos.addAndGet(nanos);
+}
+public static void addFutureCreationNanos(long nanos) {
+    if (enabled.get()) futureCreationNanos.addAndGet(nanos);
+}
+public static void addParallelWaitNanos(long nanos) {
+    if (enabled.get()) parallelWaitNanos.addAndGet(nanos);
+}
+public static void addCacheGetOrCreateNanos(long nanos) {
+    if (enabled.get()) cacheGetOrCreateNanos.addAndGet(nanos);
+}
+```
 
-    registry.invokePreTransformationHooks(context);
-    try {
-        // ... existing code ...
-        return new TransformationResult(context, duration);
-    } finally {
-        TransformationMetrics.endTransformation();  // ADD
-        context.disableStaging();
-        registry.invokePostTransformationHooks(context);
-        context.clearExtensionCache();
-        clearElementCache();
+### 2. Instrument transformChunk (lines 643-656)
+
+```java
+private void transformChunk(List<EObject> chunk) {
+    long chunkStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+
+    for (EObject source : chunk) {
+        if (firstError.get() != null) return;
+        try {
+            context.setCurrentSource(source);
+            executeEagerRulesFor(source);
+        } finally {
+            context.clearCurrentSource();
+        }
+    }
+
+    if (TransformationMetrics.isEnabled()) {
+        TransformationMetrics.addChunkProcessingNanos(System.nanoTime() - chunkStart);
     }
 }
 ```
 
-### 2. Element Collection Timing
+### 3. Instrument executeEagerRulesFor (lines 790-853)
+
+This is the **prime suspect** for the 70% UNACCOUNTED time:
+- Called 22,134 times (once per source element)
+- Each call iterates through ALL registered rules (~50+ rules)
+- That's 22,134 × 50 = 1,106,700 rule checks
 
 ```java
-long elementCollectionStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+private void executeEagerRulesFor(EObject source) {
+    // Time rule lookup
+    long rulesStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+    Collection<TransformRuleDescriptor> rules = registry.getRulesForSource(source.getClass());
+    if (TransformationMetrics.isEnabled()) {
+        TransformationMetrics.addRuleMatchingNanos(System.nanoTime() - rulesStart);
+    }
 
-Set<EObject> singleSourceElements = new LinkedHashSet<>();
-// ... element collection loop ...
+    // Time rule iteration loop
+    long loopStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
 
-if (TransformationMetrics.isEnabled()) {
-    TransformationMetrics.addModelIterationNanos(System.nanoTime() - elementCollectionStart);
+    for (TransformRuleDescriptor rule : rules) {
+        if (rule.isMultiSource()) continue;
+        if (rule.isLazy()) continue;
+        if (rule.isAbstract()) continue;
+        if (isEffectivelyActivityBased(rule)) continue;
+        if (!rule.appliesTo(source)) continue;
+        if (!isFromExpectedAlias(source, rule)) continue;
+
+        // Time cache operation separately
+        long cacheStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+        context.getElementResolutionCache().getOrCreate(...);
+        if (TransformationMetrics.isEnabled()) {
+            TransformationMetrics.addCacheGetOrCreateNanos(System.nanoTime() - cacheStart);
+        }
+    }
+
+    if (TransformationMetrics.isEnabled()) {
+        TransformationMetrics.addRuleLoopNanos(System.nanoTime() - loopStart);
+    }
 }
 ```
 
-### 3. Staging Commit Timing
+### 4. Instrument transformParallel (lines 633-640)
 
 ```java
-long commitStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
-context.commitStagedElements();
+// Time future creation
+long futureStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+List<CompletableFuture<Void>> futures = chunks.stream()
+        .map(chunk -> CompletableFuture.runAsync(() -> transformChunk(chunk), exec))
+        .collect(Collectors.toList());
 if (TransformationMetrics.isEnabled()) {
-    TransformationMetrics.addStagingCommitNanos(System.nanoTime() - commitStart);
-}
-```
-
-### 4. Parallel Execution Overhead
-
-```java
-// Time list conversion
-long listConversionStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
-List<EObject> elementList = new ArrayList<>(sourceElements);
-if (TransformationMetrics.isEnabled()) {
-    TransformationMetrics.addModelIterationNanos(System.nanoTime() - listConversionStart);
+    TransformationMetrics.addFutureCreationNanos(System.nanoTime() - futureStart);
 }
 
-// Time partitioning
-long partitionStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
-List<List<EObject>> chunks = partitionList(elementList, effectiveChunkSize);
+// Time parallel wait
+long waitStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
 if (TransformationMetrics.isEnabled()) {
-    TransformationMetrics.addModelIterationNanos(System.nanoTime() - partitionStart);
+    TransformationMetrics.addParallelWaitNanos(System.nanoTime() - waitStart);
 }
 ```
 
 ## Expected Report Output
 
-After these changes, the timing breakdown will show:
+After Phase 2 changes:
 
 ```
 === TIMING BREAKDOWN (ALL COMPONENTS) ===
   Greedy rule execution:          1,200 ms (15.0%)
   equivalent() total:               400 ms ( 5.0%)
   createTarget():                   300 ms ( 3.8%)
-  Model iteration:                2,500 ms (31.3%)  <-- Now tracked
-  Staging commit:                   800 ms (10.0%)  <-- Now tracked
+  Model iteration:                  500 ms ( 6.3%)
+  Staging commit:                   800 ms (10.0%)
+  Rule matching:                    200 ms ( 2.5%)   <-- NEW
+  Rule loop overhead:             2,500 ms (31.3%)   <-- NEW (likely bottleneck)
+  Chunk processing:               1,000 ms (12.5%)   <-- NEW
+  Cache getOrCreate:                300 ms ( 3.8%)   <-- NEW
+  Future creation:                   50 ms ( 0.6%)   <-- NEW
+  Parallel wait:                    100 ms ( 1.3%)   <-- NEW
   ----------------------------------------
-  ACCOUNTED:                      5,200 ms (65.0%)
-  UNACCOUNTED:                    2,800 ms (35.0%)  <-- Reduced
+  ACCOUNTED:                      7,350 ms (91.9%)
+  UNACCOUNTED:                      650 ms ( 8.1%)   <-- Target: <10%
 ```
-
-## No New Metrics Required
-
-All timing methods already exist in `TransformationMetrics`:
-- `startTransformation()` / `endTransformation()` - lines 238-246
-- `addModelIterationNanos()` - line 335
-- `addStagingCommitNanos()` - line 331
-
-This proposal only adds the INSTRUMENTATION CALLS in `TransformationExecutor`.
 
 ## Success Criteria
 
-1. UNACCOUNTED percentage reduced from ~50%+ to <30%
-2. All 500+ existing tests pass
-3. No measurable performance overhead when metrics disabled
+1. UNACCOUNTED percentage reduced from ~70% to <10%
+2. Rule loop overhead clearly visible as major contributor
+3. All 500+ existing tests pass
+4. No measurable performance overhead when metrics disabled

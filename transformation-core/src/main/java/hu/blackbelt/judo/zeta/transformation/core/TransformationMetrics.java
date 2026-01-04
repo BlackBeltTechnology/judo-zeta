@@ -74,6 +74,14 @@ public class TransformationMetrics {
     private static final AtomicLong stagingCommitNanos = new AtomicLong(0);
     private static final AtomicLong modelIterationNanos = new AtomicLong(0);
 
+    // Phase 2: Executor-level timing metrics
+    private static final AtomicLong ruleMatchingNanos = new AtomicLong(0);
+    private static final AtomicLong ruleLoopNanos = new AtomicLong(0);
+    private static final AtomicLong chunkProcessingNanos = new AtomicLong(0);
+    private static final AtomicLong futureCreationNanos = new AtomicLong(0);
+    private static final AtomicLong parallelWaitNanos = new AtomicLong(0);
+    private static final AtomicLong cacheGetOrCreateNanos = new AtomicLong(0);
+
     // Per-extension method metrics
     private static final ConcurrentHashMap<String, AtomicLong> extensionMethodCounts = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<String, AtomicLong> extensionMethodNanosMap = new ConcurrentHashMap<>();
@@ -141,6 +149,14 @@ public class TransformationMetrics {
         postProcessingNanos.set(0);
         stagingCommitNanos.set(0);
         modelIterationNanos.set(0);
+
+        // Phase 2 metrics
+        ruleMatchingNanos.set(0);
+        ruleLoopNanos.set(0);
+        chunkProcessingNanos.set(0);
+        futureCreationNanos.set(0);
+        parallelWaitNanos.set(0);
+        cacheGetOrCreateNanos.set(0);
 
         // Per-rule and per-method maps
         ruleExecutionCounts.clear();
@@ -336,6 +352,31 @@ public class TransformationMetrics {
         if (enabled) modelIterationNanos.addAndGet(nanos);
     }
 
+    // Phase 2: Executor-level timing methods
+    public static void addRuleMatchingNanos(long nanos) {
+        if (enabled) ruleMatchingNanos.addAndGet(nanos);
+    }
+
+    public static void addRuleLoopNanos(long nanos) {
+        if (enabled) ruleLoopNanos.addAndGet(nanos);
+    }
+
+    public static void addChunkProcessingNanos(long nanos) {
+        if (enabled) chunkProcessingNanos.addAndGet(nanos);
+    }
+
+    public static void addFutureCreationNanos(long nanos) {
+        if (enabled) futureCreationNanos.addAndGet(nanos);
+    }
+
+    public static void addParallelWaitNanos(long nanos) {
+        if (enabled) parallelWaitNanos.addAndGet(nanos);
+    }
+
+    public static void addCacheGetOrCreateNanos(long nanos) {
+        if (enabled) cacheGetOrCreateNanos.addAndGet(nanos);
+    }
+
     /**
      * Print a comprehensive performance report.
      */
@@ -382,8 +423,17 @@ public class TransformationMetrics {
         long modelIterMs = modelIterationNanos.get() / 1_000_000;
         long postProcMs = postProcessingNanos.get() / 1_000_000;
 
+        // Phase 2 metrics
+        long ruleMatchMs = ruleMatchingNanos.get() / 1_000_000;
+        long ruleLoopMs = ruleLoopNanos.get() / 1_000_000;
+        long chunkProcMs = chunkProcessingNanos.get() / 1_000_000;
+        long futureCreateMs = futureCreationNanos.get() / 1_000_000;
+        long parallelWaitMs = parallelWaitNanos.get() / 1_000_000;
+        long cacheGetOrCreateMs = cacheGetOrCreateNanos.get() / 1_000_000;
+
         long accountedMs = greedyMs + equivalentMs + createTargetMs + setXmiIdMs + extensionMs
-                + equivDiscMs + equivsMs + stagingMs + modelIterMs + postProcMs;
+                + equivDiscMs + equivsMs + stagingMs + modelIterMs + postProcMs
+                + ruleMatchMs + ruleLoopMs + chunkProcMs + futureCreateMs + parallelWaitMs + cacheGetOrCreateMs;
         long unaccountedMs = totalTransformMs > 0 ? totalTransformMs - accountedMs : 0;
 
         sb.append("\n=== TIMING BREAKDOWN (ALL COMPONENTS) ===\n");
@@ -408,6 +458,18 @@ public class TransformationMetrics {
                     stagingMs, 100.0 * stagingMs / totalTransformMs));
             sb.append(String.format("  Post-processing:              %,7d ms (%5.1f%%)\n",
                     postProcMs, 100.0 * postProcMs / totalTransformMs));
+            sb.append(String.format("  Rule matching:                %,7d ms (%5.1f%%)\n",
+                    ruleMatchMs, 100.0 * ruleMatchMs / totalTransformMs));
+            sb.append(String.format("  Rule loop overhead:           %,7d ms (%5.1f%%)\n",
+                    ruleLoopMs, 100.0 * ruleLoopMs / totalTransformMs));
+            sb.append(String.format("  Chunk processing:             %,7d ms (%5.1f%%)\n",
+                    chunkProcMs, 100.0 * chunkProcMs / totalTransformMs));
+            sb.append(String.format("  Cache getOrCreate:            %,7d ms (%5.1f%%)\n",
+                    cacheGetOrCreateMs, 100.0 * cacheGetOrCreateMs / totalTransformMs));
+            sb.append(String.format("  Future creation:              %,7d ms (%5.1f%%)\n",
+                    futureCreateMs, 100.0 * futureCreateMs / totalTransformMs));
+            sb.append(String.format("  Parallel wait:                %,7d ms (%5.1f%%)\n",
+                    parallelWaitMs, 100.0 * parallelWaitMs / totalTransformMs));
             sb.append(String.format("  ----------------------------------------\n"));
             sb.append(String.format("  ACCOUNTED:                    %,7d ms (%5.1f%%)\n",
                     accountedMs, 100.0 * accountedMs / totalTransformMs));
