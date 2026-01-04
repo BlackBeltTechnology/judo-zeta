@@ -423,7 +423,7 @@ public class TransformationMetrics {
         long modelIterMs = modelIterationNanos.get() / 1_000_000;
         long postProcMs = postProcessingNanos.get() / 1_000_000;
 
-        // Phase 2 metrics
+        // Phase 2 metrics (these are nested/overlapping - shown for debugging)
         long ruleMatchMs = ruleMatchingNanos.get() / 1_000_000;
         long ruleLoopMs = ruleLoopNanos.get() / 1_000_000;
         long chunkProcMs = chunkProcessingNanos.get() / 1_000_000;
@@ -431,9 +431,18 @@ public class TransformationMetrics {
         long parallelWaitMs = parallelWaitNanos.get() / 1_000_000;
         long cacheGetOrCreateMs = cacheGetOrCreateNanos.get() / 1_000_000;
 
+        // Calculate exclusive times to avoid double-counting
+        // Hierarchy: parallelWait > chunkProcessing > ruleLoop > (ruleMatching + cacheGetOrCreate + greedyExecution)
+        // ruleLoop exclusive = ruleLoop - cacheGetOrCreate - ruleMatching (greedy is already separate)
+        long ruleLoopExclusiveMs = Math.max(0, ruleLoopMs - cacheGetOrCreateMs - ruleMatchMs);
+        // cacheGetOrCreate exclusive = cacheGetOrCreate - greedy execution (greedy is measured inside)
+        long cacheExclusiveMs = Math.max(0, cacheGetOrCreateMs - greedyMs);
+
+        // ACCOUNTED uses exclusive metrics only (no container metrics that overlap)
+        // parallelWait is wall-clock time (not additive with CPU time metrics)
         long accountedMs = greedyMs + equivalentMs + createTargetMs + setXmiIdMs + extensionMs
                 + equivDiscMs + equivsMs + stagingMs + modelIterMs + postProcMs
-                + ruleMatchMs + ruleLoopMs + chunkProcMs + futureCreateMs + parallelWaitMs + cacheGetOrCreateMs;
+                + ruleMatchMs + ruleLoopExclusiveMs + cacheExclusiveMs + futureCreateMs;
         long unaccountedMs = totalTransformMs > 0 ? totalTransformMs - accountedMs : 0;
 
         sb.append("\n=== TIMING BREAKDOWN (ALL COMPONENTS) ===\n");
@@ -460,21 +469,28 @@ public class TransformationMetrics {
                     postProcMs, 100.0 * postProcMs / totalTransformMs));
             sb.append(String.format("  Rule matching:                %,7d ms (%5.1f%%)\n",
                     ruleMatchMs, 100.0 * ruleMatchMs / totalTransformMs));
-            sb.append(String.format("  Rule loop overhead:           %,7d ms (%5.1f%%)\n",
-                    ruleLoopMs, 100.0 * ruleLoopMs / totalTransformMs));
-            sb.append(String.format("  Chunk processing:             %,7d ms (%5.1f%%)\n",
-                    chunkProcMs, 100.0 * chunkProcMs / totalTransformMs));
-            sb.append(String.format("  Cache getOrCreate:            %,7d ms (%5.1f%%)\n",
-                    cacheGetOrCreateMs, 100.0 * cacheGetOrCreateMs / totalTransformMs));
+            sb.append(String.format("  Rule loop (exclusive):        %,7d ms (%5.1f%%)\n",
+                    ruleLoopExclusiveMs, 100.0 * ruleLoopExclusiveMs / totalTransformMs));
+            sb.append(String.format("  Cache ops (exclusive):        %,7d ms (%5.1f%%)\n",
+                    cacheExclusiveMs, 100.0 * cacheExclusiveMs / totalTransformMs));
             sb.append(String.format("  Future creation:              %,7d ms (%5.1f%%)\n",
                     futureCreateMs, 100.0 * futureCreateMs / totalTransformMs));
-            sb.append(String.format("  Parallel wait:                %,7d ms (%5.1f%%)\n",
-                    parallelWaitMs, 100.0 * parallelWaitMs / totalTransformMs));
             sb.append(String.format("  ----------------------------------------\n"));
             sb.append(String.format("  ACCOUNTED:                    %,7d ms (%5.1f%%)\n",
                     accountedMs, 100.0 * accountedMs / totalTransformMs));
             sb.append(String.format("  UNACCOUNTED:                  %,7d ms (%5.1f%%)\n",
                     unaccountedMs, 100.0 * unaccountedMs / totalTransformMs));
+
+            // Show parallel execution summary (wall-clock vs CPU time)
+            if (parallelWaitMs > 0) {
+                sb.append(String.format("\n  --- Parallel Execution (wall-clock) ---\n"));
+                sb.append(String.format("  Parallel wait (wall-clock):   %,7d ms\n", parallelWaitMs));
+                sb.append(String.format("  Chunk CPU time (total):       %,7d ms\n", chunkProcMs));
+                if (chunkProcMs > 0) {
+                    sb.append(String.format("  Parallelization efficiency:   %5.1fx\n",
+                            (double) chunkProcMs / parallelWaitMs));
+                }
+            }
         } else {
             sb.append("  (No total time recorded - call startTransformation/endTransformation)\n");
         }
