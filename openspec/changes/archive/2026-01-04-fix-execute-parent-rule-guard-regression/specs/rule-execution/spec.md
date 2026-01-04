@@ -1,6 +1,6 @@
 # Rule Execution Specification Delta
 
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: executeParentRule MUST NOT evaluate guards
 

@@ -573,8 +573,11 @@ public class TransformationExecutor {
      */
     private void transformWithStaging(Collection<? extends EObject> sourceElements) {
         try {
-            // Phase 1: Enable staging and transform in parallel
+            // Phase 1: Enable staging + deferred writes, transform in parallel
+            // Deferred writes prevent race conditions when multiple threads modify
+            // the same EList (e.g., adding annotations to shared target elements)
             context.enableStaging();
+            context.enableDeferredWrites();
             transformParallel(sourceElements);
 
             // Check for errors before commit
@@ -582,7 +585,15 @@ public class TransformationExecutor {
                 return;
             }
 
-            // Phase 2: Commit staged elements to Resource (single-threaded)
+            // Phase 2: Apply deferred operations (single-threaded)
+            // This replays all queued EMF modifications in sequence order
+            long replayStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+            context.commitDeferredOperations();
+            if (TransformationMetrics.isEnabled()) {
+                TransformationMetrics.addDeferredOperationsNanos(System.nanoTime() - replayStart);
+            }
+
+            // Phase 3: Commit staged elements to Resource (single-threaded)
             long commitStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
             context.commitStagedElements();
             if (TransformationMetrics.isEnabled()) {
@@ -590,7 +601,9 @@ public class TransformationExecutor {
             }
 
         } finally {
+            context.disableDeferredWrites();
             context.disableStaging();
+            context.clearDeferredOperations();
             context.clearStagedElements();
         }
     }

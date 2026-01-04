@@ -1724,7 +1724,11 @@ public class TransformationContext {
                 }
 
                 // Clone for discriminated version
-                T clone = (T) EcoreUtil.copy(original);
+                // Unwrap and apply pending values before cloning to ensure proper EMF copy
+                // This is necessary because deferred writes store values in the proxy's pendingValues map,
+                // and EcoreUtil.copy() reads directly from the delegate which wouldn't have those values applied
+                EObject unwrappedOriginal = DeferredEObject.unwrapWithPendingValues(original);
+                T clone = (T) EcoreUtil.copy(unwrappedOriginal);
 
                 // Generate discriminated ID following ETL semantics
                 // Format: <source-path>/<rule-name>/(discriminator/<discriminator-value>)

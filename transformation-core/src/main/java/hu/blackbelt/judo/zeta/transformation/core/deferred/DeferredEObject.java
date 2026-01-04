@@ -72,6 +72,18 @@ public class DeferredEObject implements InvocationHandler {
          * @return the real EObject
          */
         EObject getDelegate();
+
+        /**
+         * Apply all pending values to the delegate.
+         *
+         * <p>This flushes pending attribute/reference values that were set on the proxy
+         * to the actual EMF object. This is necessary before operations like
+         * {@code EcoreUtil.copy()} that read directly from the delegate.</p>
+         *
+         * <p>Note: This only applies single-valued features. List operations are
+         * handled separately by the OperationQueue.</p>
+         */
+        void applyPendingValues();
     }
 
     private static final Set<String> PASSTHROUGH_METHODS = Set.of(
@@ -147,6 +159,28 @@ public class DeferredEObject implements InvocationHandler {
         return object;
     }
 
+    /**
+     * Apply pending values to the delegate and return the unwrapped object.
+     *
+     * <p>If the object is a deferred proxy, this flushes all pending single-valued
+     * feature values to the delegate before returning it. This is necessary before
+     * operations like {@code EcoreUtil.copy()} that read directly from the delegate.</p>
+     *
+     * <p>If the object is not a proxy, it is returned unchanged.</p>
+     *
+     * @param object the object (may be a proxy)
+     * @param <T> the type
+     * @return the unwrapped object with pending values applied
+     */
+    @SuppressWarnings("unchecked")
+    public static <T> T unwrapWithPendingValues(T object) {
+        if (object instanceof ProxyMarker proxy) {
+            proxy.applyPendingValues();
+            return (T) proxy.getDelegate();
+        }
+        return object;
+    }
+
     @Override
     public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
         String methodName = method.getName();
@@ -154,6 +188,11 @@ public class DeferredEObject implements InvocationHandler {
         // Handle ProxyMarker interface
         if ("getDelegate".equals(methodName) && args == null) {
             return delegate;
+        }
+
+        if ("applyPendingValues".equals(methodName) && args == null) {
+            doApplyPendingValues();
+            return null;
         }
 
         // Pass through certain methods directly
@@ -260,6 +299,24 @@ public class DeferredEObject implements InvocationHandler {
 
         // Delegate to real object
         return delegate.eGet(feature);
+    }
+
+    /**
+     * Apply all pending single-valued feature values to the delegate.
+     *
+     * <p>This is called before operations that need to read the delegate directly,
+     * such as {@code EcoreUtil.copy()}.</p>
+     */
+    private void doApplyPendingValues() {
+        for (var entry : pendingValues.entrySet()) {
+            EStructuralFeature feature = entry.getKey();
+            Object value = entry.getValue();
+            // Apply to delegate - unwrap if value is also a proxy
+            Object realValue = unwrap(value);
+            delegate.eSet(feature, realValue);
+        }
+        // Don't clear pendingValues - they're still needed for read-after-write consistency
+        // and will be replayed via OperationQueue anyway
     }
 
     @SuppressWarnings("unchecked")

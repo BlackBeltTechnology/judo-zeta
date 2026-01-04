@@ -73,6 +73,7 @@ public class TransformationMetrics {
     private static final AtomicLong postProcessingNanos = new AtomicLong(0);
     private static final AtomicLong stagingCommitNanos = new AtomicLong(0);
     private static final AtomicLong modelIterationNanos = new AtomicLong(0);
+    private static final AtomicLong deferredOperationsNanos = new AtomicLong(0);
 
     // Phase 2: Executor-level timing metrics
     private static final AtomicLong ruleMatchingNanos = new AtomicLong(0);
@@ -149,6 +150,7 @@ public class TransformationMetrics {
         postProcessingNanos.set(0);
         stagingCommitNanos.set(0);
         modelIterationNanos.set(0);
+        deferredOperationsNanos.set(0);
 
         // Phase 2 metrics
         ruleMatchingNanos.set(0);
@@ -346,6 +348,10 @@ public class TransformationMetrics {
 
     public static void addStagingCommitNanos(long nanos) {
         if (enabled) stagingCommitNanos.addAndGet(nanos);
+    }
+
+    public static void addDeferredOperationsNanos(long nanos) {
+        if (enabled) deferredOperationsNanos.addAndGet(nanos);
     }
 
     public static void addModelIterationNanos(long nanos) {
