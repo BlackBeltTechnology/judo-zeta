@@ -26,7 +26,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Method;
-import java.util.*;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -39,11 +50,28 @@ public class TransformationRegistry {
 
     private static final Logger log = LoggerFactory.getLogger(TransformationRegistry.class);
 
-    private final Map<Class<? extends EObject>, List<TransformRuleDescriptor>> rulesBySourceType = new HashMap<>();
-    private final Map<String, TransformRuleDescriptor> rulesByName = new HashMap<>();
+    // Use LinkedHashMap to preserve registration order for deterministic rule execution
+    // This ensures rules execute in the same order as they are defined in the source class
+    private final Map<Class<? extends EObject>, List<TransformRuleDescriptor>> rulesBySourceType = new LinkedHashMap<>();
+    private final Map<String, TransformRuleDescriptor> rulesByName = new LinkedHashMap<>();
     private final List<Method> preTransformationHooks = new ArrayList<>();
     private final List<Method> postTransformationHooks = new ArrayList<>();
-    private final Map<Method, Object> hookInstances = new HashMap<>();
+    private final Map<Method, Object> hookInstances = new LinkedHashMap<>();
+
+    // Cache for getRulesForSource() results - O(1) lookup for repeated calls with same type
+    // Thread-safe for parallel transformation execution
+    private final ConcurrentHashMap<Class<?>, List<TransformRuleDescriptor>> rulesBySourceTypeCache =
+            new ConcurrentHashMap<>();
+
+    // Pre-filtered index: sourceType → eager-executable rules only
+    // Built at registration time to avoid runtime filtering in executeEagerRulesFor()
+    private final ConcurrentHashMap<Class<?>, List<TransformRuleDescriptor>> eagerRulesByTypeCache =
+            new ConcurrentHashMap<>();
+
+    // Pre-filtered index: sourceType → lazy rules only
+    // Built at registration time to avoid runtime filtering in equivalent()
+    private final ConcurrentHashMap<Class<?>, List<TransformRuleDescriptor>> lazyRulesByTypeCache =
+            new ConcurrentHashMap<>();
 
     /**
      * Register a transformation context class.
@@ -88,10 +116,24 @@ public class TransformationRegistry {
             }
 
             log.debug("Registered transformation rules from: {}", transformationClass.getName());
+
+            // Invalidate caches when rules are registered dynamically
+            // This ensures new rules are visible in subsequent lookups
+            invalidateCaches();
         } catch (Exception e) {
             log.error("Failed to register transformation class: {}", transformationClass.getName(), e);
             throw new RuntimeException("Failed to register transformation: " + transformationClass.getName(), e);
         }
+    }
+
+    /**
+     * Invalidate all cached rule lookups.
+     * Called when rules are registered dynamically after initial setup.
+     */
+    private void invalidateCaches() {
+        rulesBySourceTypeCache.clear();
+        eagerRulesByTypeCache.clear();
+        lazyRulesByTypeCache.clear();
     }
 
     private void registerRule(
@@ -104,26 +146,88 @@ public class TransformationRegistry {
         String name = ruleAnnotation.name();
         String description = ruleAnnotation.description();
 
-        // Determine source and target types
+        // Extract @Transform annotations (new API)
+        List<TransformDefinition> transforms = new ArrayList<>();
+        Transform[] transformAnnotations = ruleMethod.getAnnotationsByType(Transform.class);
+        for (Transform t : transformAnnotations) {
+            transforms.add(new TransformDefinition(t.alias(), t.type()));
+        }
+
+        // Extract @To annotations (new API)
+        List<ToDefinition> tos = new ArrayList<>();
+        To[] toAnnotations = ruleMethod.getAnnotationsByType(To.class);
+        for (To t : toAnnotations) {
+            tos.add(new ToDefinition(t.alias(), t.type()));
+        }
+
+        // Determine source and target types (backward compatibility)
         Class<? extends EObject>[] sourceTypes = ruleAnnotation.sourceTypes();
         Class<? extends EObject>[] targetTypes = ruleAnnotation.targetTypes();
 
-        Class<? extends EObject> sourceType = sourceTypes.length > 0 ? sourceTypes[0] : defaultSourceType;
-        Class<? extends EObject> targetType = targetTypes.length > 0 ? targetTypes[0] : defaultTargetType;
+        Class<? extends EObject> sourceType;
+        Class<? extends EObject> targetType;
+
+        // Priority: @Transform annotations > sourceTypes attribute > default from @TransformationContext
+        if (!transforms.isEmpty()) {
+            sourceType = transforms.get(0).getType();
+        } else if (sourceTypes.length > 0) {
+            sourceType = sourceTypes[0];
+            // Convert sourceTypes to TransformDefinitions with default alias
+            for (Class<? extends EObject> st : sourceTypes) {
+                transforms.add(new TransformDefinition("source", st));
+            }
+        } else {
+            sourceType = defaultSourceType;
+            transforms.add(new TransformDefinition("source", defaultSourceType));
+        }
+
+        // Priority: @To annotations > targetTypes attribute > method return type > default from @TransformationContext
+        if (!tos.isEmpty()) {
+            targetType = tos.get(0).getType();
+        } else if (targetTypes.length > 0) {
+            targetType = targetTypes[0];
+            // Convert targetTypes to ToDefinitions with default alias
+            for (Class<? extends EObject> tt : targetTypes) {
+                tos.add(new ToDefinition("target", tt));
+            }
+        } else {
+            // Try to extract target type from method return type (TransformFunction<Source, Target>)
+            Class<? extends EObject> extractedTargetType = extractTargetTypeFromReturnType(ruleMethod);
+            if (extractedTargetType != null) {
+                targetType = extractedTargetType;
+                tos.add(new ToDefinition("target", extractedTargetType));
+                log.debug("Extracted target type from method return type: {} for rule: {}",
+                        extractedTargetType.getSimpleName(), name);
+            } else {
+                targetType = defaultTargetType;
+                tos.add(new ToDefinition("target", defaultTargetType));
+            }
+        }
 
         // Find guard method if specified
         Guard guardAnnotation = ruleMethod.getAnnotation(Guard.class);
         Method guardMethod = null;
         if (guardAnnotation != null) {
+            // Try multi-source guard signature first (EObject[], TransformationContext)
             try {
                 guardMethod = instance.getClass().getDeclaredMethod(
                         guardAnnotation.method(),
-                        EObject.class,
+                        EObject[].class,
                         TransformationContext.class
                 );
             } catch (NoSuchMethodException e) {
-                throw new RuntimeException(
-                        "Guard method not found: " + guardAnnotation.method() + " for rule: " + name, e);
+                // Fall back to single-source guard signature (EObject, TransformationContext)
+                try {
+                    guardMethod = instance.getClass().getDeclaredMethod(
+                            guardAnnotation.method(),
+                            EObject.class,
+                            TransformationContext.class
+                    );
+                } catch (NoSuchMethodException e2) {
+                    throw new RuntimeException(
+                            "Guard method not found: " + guardAnnotation.method() + " for rule: " + name + 
+                            ". Expected signature: (EObject, TransformationContext) or (EObject[], TransformationContext)", e2);
+                }
             }
         }
 
@@ -132,6 +236,14 @@ public class TransformationRegistry {
         boolean isAbstract = ruleMethod.isAnnotationPresent(Abstract.class);
         boolean isPrimary = ruleMethod.isAnnotationPresent(Primary.class);
         boolean isGreedy = ruleMethod.isAnnotationPresent(Greedy.class);
+        boolean isDetached = ruleMethod.isAnnotationPresent(Detached.class);
+        boolean isActivityBased = ruleMethod.isAnnotationPresent(ActivityBased.class);
+
+        // Warn if @ActivityBased is used without required @Greedy and @Lazy
+        if (isActivityBased && (!isGreedy || !isLazy)) {
+            log.warn("Rule '{}' has @ActivityBased but is missing @Greedy and/or @Lazy. " +
+                    "@ActivityBased only has effect when used with both @Greedy and @Lazy.", name);
+        }
 
         // Get extends rules
         Extends extendsAnnotation = ruleMethod.getAnnotation(Extends.class);
@@ -151,40 +263,130 @@ public class TransformationRegistry {
                 isAbstract,
                 isPrimary,
                 isGreedy,
-                extendsRules
+                isDetached,
+                isActivityBased,
+                extendsRules,
+                transforms,
+                tos
         );
 
         rulesBySourceType.computeIfAbsent(sourceType, k -> new ArrayList<>()).add(descriptor);
         rulesByName.put(name, descriptor);
 
-        log.debug("Registered rule: {} ({} -> {})", name, sourceType.getSimpleName(), targetType.getSimpleName());
+        log.debug("Registered rule: {} ({} -> {}) with {} transforms, {} tos", 
+                name, sourceType.getSimpleName(), targetType.getSimpleName(), 
+                transforms.size(), tos.size());
     }
 
     /**
      * Get all rules for a given source type (including greedy matches from supertypes).
      *
+     * <p>Results are cached for O(1) lookup on repeated calls with the same type.
+     * The cache uses ConcurrentHashMap for thread-safe parallel execution.</p>
+     *
      * @param sourceType the source type
-     * @return collection of applicable rules
+     * @return collection of applicable rules (unmodifiable)
      */
     public Collection<TransformRuleDescriptor> getRulesForSource(Class<? extends EObject> sourceType) {
-        List<TransformRuleDescriptor> result = new ArrayList<>();
+        return rulesBySourceTypeCache.computeIfAbsent(sourceType, this::computeRulesForSource);
+    }
+
+    /**
+     * Compute rules for a given source type (internal method for cache population).
+     * Uses LinkedHashSet for O(1) deduplication while preserving registration order.
+     */
+    private List<TransformRuleDescriptor> computeRulesForSource(Class<?> sourceType) {
+        // Use LinkedHashSet for O(1) deduplication while preserving insertion order
+        Set<TransformRuleDescriptor> result = new LinkedHashSet<>();
 
         // Get rules for this exact type
         result.addAll(rulesBySourceType.getOrDefault(sourceType, Collections.emptyList()));
 
-        // Get greedy rules from supertypes
+        // Get rules from supertypes/interfaces that apply to this type
+        // For greedy rules: always include if supertype matches
+        // For non-greedy rules: include if the rule's sourceType is assignable from the element type
         for (Map.Entry<Class<? extends EObject>, List<TransformRuleDescriptor>> entry : rulesBySourceType.entrySet()) {
             Class<? extends EObject> ruleSourceType = entry.getKey();
             if (ruleSourceType.isAssignableFrom(sourceType) && !ruleSourceType.equals(sourceType)) {
-                for (TransformRuleDescriptor rule : entry.getValue()) {
-                    if (rule.isGreedy() && !result.contains(rule)) {
-                        result.add(rule);
-                    }
-                }
+                // LinkedHashSet.addAll handles deduplication in O(1) per element
+                result.addAll(entry.getValue());
             }
         }
 
-        return result;
+        // Return as unmodifiable ArrayList for iteration efficiency and immutability
+        return Collections.unmodifiableList(new ArrayList<>(result));
+    }
+
+    /**
+     * Get pre-filtered eager-executable rules for a source type.
+     *
+     * <p>Returns only rules that are eligible for Phase 1 (eager) execution:
+     * <ul>
+     *   <li>Not lazy</li>
+     *   <li>Not multi-source</li>
+     *   <li>Not abstract</li>
+     *   <li>Type matches (exact or greedy subtype)</li>
+     * </ul></p>
+     *
+     * <p>This eliminates 4 runtime checks per rule in executeEagerRulesFor(),
+     * reducing O(n×r) to O(n×m) where m << r.</p>
+     *
+     * @param sourceType the source element's runtime type
+     * @return pre-filtered list of applicable eager rules (unmodifiable)
+     */
+    public List<TransformRuleDescriptor> getEagerRulesForType(Class<? extends EObject> sourceType) {
+        return eagerRulesByTypeCache.computeIfAbsent(sourceType, this::computeEagerRulesForType);
+    }
+
+    /**
+     * Compute pre-filtered eager rules for a type (internal cache population).
+     *
+     * <p>Note: We filter only by isEagerExecutable() here. The actual appliesTo()
+     * check must still happen at runtime because it requires an actual EObject
+     * instance for EMF type matching semantics.</p>
+     */
+    private List<TransformRuleDescriptor> computeEagerRulesForType(Class<?> sourceType) {
+        List<TransformRuleDescriptor> allRules = computeRulesForSource(sourceType);
+        List<TransformRuleDescriptor> eagerRules = new ArrayList<>();
+
+        for (TransformRuleDescriptor rule : allRules) {
+            // Only filter by pre-computed eager flag
+            // appliesTo() check happens at runtime (needs actual EObject for EMF semantics)
+            if (rule.isEagerExecutable()) {
+                eagerRules.add(rule);
+            }
+        }
+
+        return Collections.unmodifiableList(eagerRules);
+    }
+
+    /**
+     * Get pre-filtered lazy rules for a source type.
+     *
+     * <p>Returns only lazy rules that could transform the given source type.
+     * Used by equivalent() to avoid iterating all rules.</p>
+     *
+     * @param sourceType the source element's runtime type
+     * @return pre-filtered list of applicable lazy rules (unmodifiable)
+     */
+    public List<TransformRuleDescriptor> getLazyRulesForType(Class<? extends EObject> sourceType) {
+        return lazyRulesByTypeCache.computeIfAbsent(sourceType, this::computeLazyRulesForType);
+    }
+
+    /**
+     * Compute pre-filtered lazy rules for a type (internal cache population).
+     */
+    private List<TransformRuleDescriptor> computeLazyRulesForType(Class<?> sourceType) {
+        List<TransformRuleDescriptor> allRules = computeRulesForSource(sourceType);
+        List<TransformRuleDescriptor> lazyRules = new ArrayList<>();
+
+        for (TransformRuleDescriptor rule : allRules) {
+            if (rule.isLazy() && !rule.isAbstract()) {
+                lazyRules.add(rule);
+            }
+        }
+
+        return Collections.unmodifiableList(lazyRules);
     }
 
     /**
@@ -201,6 +403,18 @@ public class TransformationRegistry {
         return rulesBySourceType.values().stream()
                 .flatMap(List::stream)
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * Clear all rules' rejected element caches.
+     *
+     * <p>Called during executor reset to ensure fresh state for reused executors.
+     * Each rule maintains its own rejected set for ETL-compatible guard caching.</p>
+     */
+    public void clearAllRejectedSets() {
+        for (TransformRuleDescriptor rule : getAllRules()) {
+            rule.clearRejected();
+        }
     }
 
     /**
@@ -229,5 +443,57 @@ public class TransformationRegistry {
                 log.error("Failed to invoke post-transformation hook: {}", hook.getName(), e);
             }
         }
+    }
+
+    /**
+     * Extract the target type from a rule method's return type.
+     *
+     * <p>For methods returning {@code TransformFunction<SourceType, TargetType>},
+     * extracts TargetType as the second generic type argument.</p>
+     *
+     * <p>This enables lazy rules to declare their target type via the method signature
+     * without requiring explicit @To annotations, e.g.:</p>
+     * <pre>{@code
+     * public TransformFunction<ActorType, UnmappedTransferObjectType> createMetadataType() {
+     *     // Target type UnmappedTransferObjectType is extracted from the return type
+     * }
+     * }</pre>
+     *
+     * @param ruleMethod the rule method
+     * @return the extracted target type, or null if extraction fails
+     */
+    @SuppressWarnings("unchecked")
+    private Class<? extends EObject> extractTargetTypeFromReturnType(Method ruleMethod) {
+        Type returnType = ruleMethod.getGenericReturnType();
+
+        // Check if return type is parameterized (e.g., TransformFunction<S, T>)
+        if (returnType instanceof ParameterizedType) {
+            ParameterizedType parameterizedType = (ParameterizedType) returnType;
+            Type[] typeArgs = parameterizedType.getActualTypeArguments();
+
+            // TransformFunction has 2 type parameters: <SourceType, TargetType>
+            // We want the second one (index 1)
+            if (typeArgs.length >= 2) {
+                Type targetTypeArg = typeArgs[1];
+
+                // Handle direct class reference
+                if (targetTypeArg instanceof Class) {
+                    Class<?> targetClass = (Class<?>) targetTypeArg;
+                    if (EObject.class.isAssignableFrom(targetClass)) {
+                        return (Class<? extends EObject>) targetClass;
+                    }
+                }
+
+                // Handle parameterized types (e.g., if target is itself generic)
+                if (targetTypeArg instanceof ParameterizedType) {
+                    Type rawType = ((ParameterizedType) targetTypeArg).getRawType();
+                    if (rawType instanceof Class && EObject.class.isAssignableFrom((Class<?>) rawType)) {
+                        return (Class<? extends EObject>) rawType;
+                    }
+                }
+            }
+        }
+
+        return null;
     }
 }
