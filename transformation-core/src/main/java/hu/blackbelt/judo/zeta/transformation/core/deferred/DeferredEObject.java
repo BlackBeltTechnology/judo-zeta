@@ -21,6 +21,7 @@ package hu.blackbelt.judo.zeta.transformation.core.deferred;
  */
 
 import org.eclipse.emf.common.util.EList;
+import org.eclipse.emf.common.util.EMap;
 import org.eclipse.emf.ecore.EAttribute;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EReference;
@@ -236,6 +237,12 @@ public class DeferredEObject implements InvocationHandler {
             String featureName = decapitalize(methodName.substring(3));
             EStructuralFeature feature = findFeature(featureName);
             if (feature != null && feature.isMany()) {
+                // Don't wrap EMap (e.g., EAnnotation.getDetails()) - it has special semantics
+                // that DeferredEList doesn't support (put, get by key, etc.)
+                Object realValue = delegate.eGet(feature);
+                if (realValue instanceof EMap) {
+                    return realValue;
+                }
                 return getWrappedList(feature);
             }
             // Single-valued getter - check pending values
@@ -292,8 +299,13 @@ public class DeferredEObject implements InvocationHandler {
             return pending;
         }
 
-        // For lists, return wrapped list
+        // For lists, return wrapped list (but not EMap)
         if (feature.isMany()) {
+            Object realValue = delegate.eGet(feature);
+            // Don't wrap EMap - it has special semantics that DeferredEList doesn't support
+            if (realValue instanceof EMap) {
+                return realValue;
+            }
             return getWrappedList(feature);
         }
 
