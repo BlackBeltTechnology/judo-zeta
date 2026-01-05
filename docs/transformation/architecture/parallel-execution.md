@@ -187,7 +187,8 @@ flowchart LR
 1. **Proxy Objects**: `ctx.createTarget()` returns a JDK dynamic proxy wrapping the real EMF object
 2. **Operation Capture**: All `eSet()` and `EList` modifications are captured as immutable operation records
 3. **Queue Storage**: Operations stored in thread-safe `OperationQueue` with sequence numbers
-4. **Single-Thread Commit**: After parallel phase, operations are replayed sequentially in order
+4. **Optimized Pending State**: `DeferredEList` uses `Collections.synchronizedList` for pending additions to ensure O(1) performance during parallel execution (avoiding O(N²) copy overhead of `CopyOnWriteArrayList`)
+5. **Single-Thread Commit**: After parallel phase, operations are replayed sequentially in order
 
 ### Proxy Unwrapping for EMF Bidirectional References
 
