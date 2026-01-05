@@ -210,13 +210,15 @@ private void handleSet(EStructuralFeature feature, Object value) {
 
 ### Clearing Pending State After Commit
 
-After `commitDeferredOperations()`, all proxy pending state must be cleared to prevent stale data:
+After `commitDeferredOperations()`, all proxy pending state must be cleared to prevent stale data and double-counting:
 
 ```java
 public int commitDeferredOperations() {
     int committed = operationQueue.commit();
 
     // Clear pending state on all proxies
+    // This prevents double-counting: without clearing, DeferredEList.getCombinedView()
+    // would return both delegate elements (committed) AND pendingAdditions (stale)
     for (ProxyMarker proxy : createdProxies) {
         proxy.clearPendingState();
     }
@@ -225,7 +227,11 @@ public int commitDeferredOperations() {
 }
 ```
 
-Without this, subsequent operations would see both committed values AND stale pending values.
+**Why this matters**: Without clearing, `DeferredEList` would return both:
+- Elements already committed to the real EMF list
+- Stale pending additions that were already applied
+
+This would cause issues like double-counting in list operations.
 
 ### Deferred Writes Compatibility Notes
 
@@ -236,6 +242,35 @@ Without this, subsequent operations would see both committed values AND stale pe
 | `list.contains(x)` | Checks both committed and pending | Checks real list |
 | `element.eContainer()` | Returns null | Returns real container |
 | Cross-rule visibility | Not visible | Visible |
+
+### Two-Phase Proxy Unwrapping After Transformation
+
+After transformation completes, all deferred proxies must be unwrapped to ensure the target model is fully materialised:
+
+```java
+public int unwrapAllProxiesInModel() {
+    int unwrappedCount = 0;
+
+    // Phase 1: Unwrap all proxies in the resolution cache
+    // This is critical because equivalent() returns cached values, and if those
+    // are proxies, they could end up in containment references after transformation
+    unwrappedCount += resolutionCache.unwrapAllProxies();
+
+    // Phase 2: Unwrap proxies in the target resource
+    if (!targetResourceSet.getResources().isEmpty()) {
+        Resource targetResource = targetResourceSet.getResources().get(0);
+        for (EObject root : targetResource.getContents()) {
+            unwrappedCount += unwrapProxiesRecursively(root);
+        }
+    }
+
+    return unwrappedCount;
+}
+```
+
+**Why Phase 1 matters**: The resolution cache may contain proxy objects returned by `equivalent()`. If these cached proxies aren't unwrapped, they can end up in containment references after transformation completes.
+
+**Why Phase 2 matters**: Nested elements within the target resource may still be wrapped in proxies that need to be unwrapped.
 
 ## Error Handling: Fail-Fast
 

@@ -104,16 +104,16 @@ cache = {
 
 ```java
 public class ElementResolutionCache {
-    private final ConcurrentMap<EObject, 
-        ConcurrentMap<String, 
+    private final ConcurrentMap<EObject,
+        ConcurrentMap<String,
             ConcurrentMap<String, EObject>>> cache = new ConcurrentHashMap<>();
-    
+
     public void store(EObject source, String ruleName, String discriminator, EObject target) {
         cache.computeIfAbsent(source, k -> new ConcurrentHashMap<>())
              .computeIfAbsent(ruleName, k -> new ConcurrentHashMap<>())
              .put(discriminator, target);
     }
-    
+
     public EObject get(EObject source, String ruleName, String discriminator) {
         return Optional.ofNullable(cache.get(source))
             .map(m -> m.get(ruleName))
@@ -122,6 +122,55 @@ public class ElementResolutionCache {
     }
 }
 ```
+
+## Shared Lock Acquisition
+
+For parallel execution, the cache provides a shared locking mechanism that ensures consistent lock acquisition across different entry points:
+
+```java
+/**
+ * Get or create the lock for a specific (source, ruleName) pair.
+ * Used by both getOrCreate() and executeParentRule() to prevent race conditions.
+ * CRITICAL: All code paths that access the same (source, ruleName) must use this method
+ * to avoid deadlocks from inconsistent lock acquisition.
+ */
+public ReentrantLock getLockFor(EObject source, String ruleName) {
+    CacheKey key = new CacheKey(source, ruleName);
+    return ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
+}
+```
+
+**Why this matters**: Without shared lock acquisition, `equivalent()` and `executeParentRule()` could acquire different locks for the same `(source, ruleName)` pair, leading to race conditions where both execute the same rule simultaneously.
+
+## Proxy Unwrapping After Transformation
+
+After transformation completes, all cached proxies must be unwrapped to ensure the target model is fully materialised:
+
+```java
+/**
+ * Unwrap all proxy objects stored in the cache.
+ * This is critical because equivalent() returns cached values, and if those
+ * are proxies, they could end up in containment references after transformation.
+ */
+public int unwrapAllProxies() {
+    int count = 0;
+    for (Map<String, Map<String, EObject>> ruleMap : cache.values()) {
+        for (Map<String, EObject> discriminatorMap : ruleMap.values()) {
+            for (EObject target : discriminatorMap.values()) {
+                if (target instanceof DeferredEObject.ProxyMarker proxy) {
+                    EObject real = proxy.getDelegate();
+                    // Replace proxy with real object in cache
+                    // ...
+                    count++;
+                }
+            }
+        }
+    }
+    return count;
+}
+```
+
+**Key insight**: Phase 1 of `unwrapAllProxiesInModel()` runs this method to ensure the cache contains real EMF objects, not proxies. This prevents stale proxy references from contaminating the final model.
 
 ## Structured XMI ID Format
 

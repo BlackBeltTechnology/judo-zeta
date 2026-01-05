@@ -220,6 +220,36 @@ public void setup(TransformationContext ctx) {
 }
 ```
 
+### Two-Phase Proxy Unwrapping
+
+After transformation completes, all proxies must be unwrapped. This happens in two phases:
+
+```java
+public int unwrapAllProxiesInModel() {
+    int unwrappedCount = 0;
+
+    // Phase 1: Unwrap all proxies in the resolution cache
+    // Critical: equivalent() returns cached values; if these are proxies,
+    // they end up in containment references after transformation
+    unwrappedCount += resolutionCache.unwrapAllProxies();
+
+    // Phase 2: Unwrap proxies in the target resource
+    // Handles nested elements that may still be wrapped
+    if (!targetResourceSet.getResources().isEmpty()) {
+        Resource targetResource = targetResourceSet.getResources().get(0);
+        for (EObject root : targetResource.getContents()) {
+            unwrappedCount += unwrapProxiesRecursively(root);
+        }
+    }
+
+    return unwrappedCount;
+}
+```
+
+**Why Phase 1 matters**: The resolution cache may contain proxy objects. If not unwrapped, these proxies contaminate the final model.
+
+**Why Phase 2 matters**: Nested elements within the target resource may still be wrapped.
+
 ## Atomic Cache Operations
 
 ### Problem: Race Conditions
@@ -252,6 +282,17 @@ rejectedKeys.add(new CacheKey(source, ruleName));
 Benefits:
 - Guards don't re-evaluate for rejected elements
 - Fast path: rejection check before acquiring lock
+
+### Shared Lock Acquisition
+
+To prevent race conditions between `getOrCreate()` and `executeParentRule()`, both use the same lock source:
+
+```java
+// Both methods use the SAME lock to prevent race conditions
+ReentrantLock lock = resolutionCache.getLockFor(source, ruleName);
+```
+
+**Why this matters**: Without shared locks, `equivalent()` and `executeParentRule()` could acquire different locks for the same `(source, ruleName)` pair, allowing both to execute simultaneously and create duplicates.
 
 ## Parent Rule Atomicity
 
