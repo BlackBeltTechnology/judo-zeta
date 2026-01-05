@@ -20,6 +20,7 @@ package hu.blackbelt.judo.zeta.transformation.core;
  * #L%
  */
 
+import hu.blackbelt.judo.zeta.transformation.core.deferred.DeferredEObject;
 import org.eclipse.emf.ecore.EObject;
 
 import java.util.*;
@@ -451,6 +452,81 @@ public class ElementResolutionCache {
 
     private String getTypeName(Class<? extends EObject> targetType) {
         return targetType.getSimpleName();
+    }
+
+    /**
+     * Unwrap all proxy objects stored in the cache.
+     *
+     * <p>After parallel transformation with deferred writes, the cache may contain
+     * JDK proxy objects (implementing ProxyMarker) instead of real EMF objects.
+     * This method replaces all cached proxies with their underlying delegates.</p>
+     *
+     * <p>This is critical because:</p>
+     * <ol>
+     *   <li>Proxies implement EMF interfaces but cannot extend *Impl classes</li>
+     *   <li>EMF internal code (e.g., EClassImpl.getEAllOperations()) casts to *Impl</li>
+     *   <li>If equivalent() returns a cached proxy after transformation, and that
+     *       proxy is added to a containment reference, EMF will crash with ClassCastException</li>
+     * </ol>
+     *
+     * @return the number of proxy references that were unwrapped
+     */
+    public int unwrapAllProxies() {
+        int count = 0;
+
+        // Unwrap ruleCache: Map<EObject, Map<String, EObject>>
+        for (Map<String, EObject> ruleMap : ruleCache.values()) {
+            for (Map.Entry<String, EObject> entry : ruleMap.entrySet()) {
+                EObject target = entry.getValue();
+                if (target instanceof DeferredEObject.ProxyMarker) {
+                    EObject unwrapped = DeferredEObject.unwrap(target);
+                    entry.setValue(unwrapped);
+                    count++;
+                }
+            }
+        }
+
+        // Unwrap typeCache: Map<EObject, Map<String, List<EObject>>>
+        for (Map<String, List<EObject>> typeMap : typeCache.values()) {
+            for (List<EObject> targets : typeMap.values()) {
+                for (int i = 0; i < targets.size(); i++) {
+                    EObject target = targets.get(i);
+                    if (target instanceof DeferredEObject.ProxyMarker) {
+                        EObject unwrapped = DeferredEObject.unwrap(target);
+                        targets.set(i, unwrapped);
+                        count++;
+                    }
+                }
+            }
+        }
+
+        // Unwrap primaryCache: Map<EObject, Map<String, EObject>>
+        for (Map<String, EObject> primaryMap : primaryCache.values()) {
+            for (Map.Entry<String, EObject> entry : primaryMap.entrySet()) {
+                EObject target = entry.getValue();
+                if (target instanceof DeferredEObject.ProxyMarker) {
+                    EObject unwrapped = DeferredEObject.unwrap(target);
+                    entry.setValue(unwrapped);
+                    count++;
+                }
+            }
+        }
+
+        // Unwrap discriminatedCache: Map<EObject, Map<String, Map<String, EObject>>>
+        for (Map<String, Map<String, EObject>> ruleMap : discriminatedCache.values()) {
+            for (Map<String, EObject> discMap : ruleMap.values()) {
+                for (Map.Entry<String, EObject> entry : discMap.entrySet()) {
+                    EObject target = entry.getValue();
+                    if (target instanceof DeferredEObject.ProxyMarker) {
+                        EObject unwrapped = DeferredEObject.unwrap(target);
+                        entry.setValue(unwrapped);
+                        count++;
+                    }
+                }
+            }
+        }
+
+        return count;
     }
 
     /**

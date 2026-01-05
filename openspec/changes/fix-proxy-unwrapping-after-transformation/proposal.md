@@ -150,13 +150,17 @@ The `TransformationExecutor.transformWithStaging()` method performs:
 
 But it does **NOT** call `unwrapAllProxiesInModel()` after commit. This method exists in `TransformationContext` and correctly unwraps all proxy references, but it's never invoked by the executor.
 
+**Additional Issue Discovered**: The original `unwrapAllProxiesInModel()` only traversed elements in the target resource. However, proxies are also cached in `ElementResolutionCache`. When code calls `equivalent()` after transformation (e.g., in postProcess), it gets cached proxies which can then end up in containment references.
+
 ## Proposed Solution
 
-### Option A: Unwrap Proxies After Transform (Recommended)
+### Option A: Unwrap Proxies After Transform (Implemented)
 
 Call `unwrapAllProxiesInModel()` after the commit phase in `transformWithStaging()`.
 
-This is the minimal fix - the method already exists and works correctly.
+The implementation required two parts:
+1. Add `unwrapAllProxiesInModel()` call in TransformationExecutor
+2. **Update `unwrapAllProxiesInModel()` to also unwrap the resolution cache**
 
 ```java
 // In TransformationExecutor.transformWithStaging()
@@ -164,7 +168,30 @@ context.commitDeferredOperations();
 context.commitStagedElements();
 
 // Add this call:
-context.unwrapAllProxiesInModel();
+context.unwrapAllProxiesInModel();  // Now unwraps both cache AND model
+```
+
+```java
+// In TransformationContext.unwrapAllProxiesInModel()
+public int unwrapAllProxiesInModel() {
+    int unwrappedCount = 0;
+
+    // Phase 1: Unwrap all proxies in the resolution cache
+    // Critical: equivalent() returns cached values, if those are proxies,
+    // they could end up in containment references after transformation
+    unwrappedCount += resolutionCache.unwrapAllProxies();
+
+    // Phase 2: Unwrap proxies in the target resource
+    // ...
+}
+```
+
+```java
+// In ElementResolutionCache.unwrapAllProxies()
+public int unwrapAllProxies() {
+    // Unwrap ruleCache, typeCache, primaryCache, discriminatedCache
+    // Replace all cached proxies with their underlying delegates
+}
 ```
 
 ### Option B: Don't Use Proxies for Target Objects
@@ -220,7 +247,9 @@ public <T extends EObject> T createTarget(Class<T> type) {
 ## Implementation Changes
 
 1. **TransformationExecutor.transformWithStaging()**: Add call to `context.unwrapAllProxiesInModel()` after `commitStagedElements()`
-2. Add metrics tracking for unwrap phase
+2. **ElementResolutionCache**: Add `unwrapAllProxies()` method to unwrap all cached targets
+3. **TransformationContext.unwrapAllProxiesInModel()**: Update to unwrap cache first, then model
+4. Add metrics tracking for unwrap phase
 
 ## Test Case
 
@@ -253,6 +282,7 @@ void testProxiesUnwrappedAfterTransform() {
 4. All EMF internal iterators work correctly
 5. All existing tests pass
 6. PSM2ASM transformation succeeds without ClassCastException
+7. **`equivalent()` returns real EMF objects, not cached proxies**
 
 ## Summary
 
@@ -261,8 +291,13 @@ void testProxiesUnwrappedAfterTransform() {
 | Proxy in model  | createTarget() returns proxy | Return real object or unwrap after     |
 | EMF cast fails  | EMF casts to *Impl classes   | Proxies can't extend impl classes      |
 | No unwrap phase | Missing proxy resolution     | Add unwrapAllProxies() after transform |
+| Cached proxies  | addMapping() stores proxies  | Unwrap cache before model traversal    |
 
 The fundamental issue: Zeta's deferred containment uses JDK proxies which implement interfaces but cannot extend EMF's implementation classes. EMF internally relies on concrete implementation types, making proxy-based approaches incompatible without an unwrap phase.
+
+**Complete Solution**: The fix requires unwrapping proxies in **two locations**:
+1. **Resolution cache** - so `equivalent()` returns real objects after transformation
+2. **Target resource** - so model traversal finds real objects in containment references
 
 ## Related Issues
 

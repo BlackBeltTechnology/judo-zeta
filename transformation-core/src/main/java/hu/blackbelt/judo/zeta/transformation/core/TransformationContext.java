@@ -3069,16 +3069,21 @@ public class TransformationContext {
      */
     @SuppressWarnings("unchecked")
     public int unwrapAllProxiesInModel() {
-        if (targetResourceSet.getResources().isEmpty()) {
-            return 0;
-        }
-
-        Resource targetResource = targetResourceSet.getResources().get(0);
         int unwrappedCount = 0;
 
-        // Traverse all elements in the resource
-        for (EObject root : new ArrayList<>(targetResource.getContents())) {
-            unwrappedCount += unwrapProxiesRecursively(root);
+        // Phase 1: Unwrap all proxies in the resolution cache
+        // This is critical because equivalent() returns cached values, and if those
+        // are proxies, they could end up in containment references after transformation
+        unwrappedCount += resolutionCache.unwrapAllProxies();
+
+        // Phase 2: Unwrap proxies in the target resource
+        if (!targetResourceSet.getResources().isEmpty()) {
+            Resource targetResource = targetResourceSet.getResources().get(0);
+
+            // Traverse all elements in the resource
+            for (EObject root : new ArrayList<>(targetResource.getContents())) {
+                unwrappedCount += unwrapProxiesRecursively(root);
+            }
         }
 
         return unwrappedCount;
