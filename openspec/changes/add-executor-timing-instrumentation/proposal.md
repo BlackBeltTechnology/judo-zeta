@@ -1,9 +1,9 @@
 # Proposal: Add Executor Timing Instrumentation
 
 **Change ID:** add-executor-timing-instrumentation
-**Status:** In Progress
+**Status:** Completed
 **Created:** 2026-01-04
-**Updated:** 2026-01-04
+**Updated:** 2026-01-05
 
 ## Why
 

@@ -78,6 +78,7 @@ TransformationExecutor.builder()
 - Element ordering: AtomicLong sequence
 - Lazy rule tracking: ConcurrentHashMap
 - Cache operations: Per-key ReentrantLock
+- Deferred writes: SynchronizedList for pending additions (O(1) vs O(N) copy-on-write)
 
 ### Per-Key Locking (Not Lock Striping)
 

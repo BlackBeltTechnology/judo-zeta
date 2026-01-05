@@ -60,8 +60,12 @@ public class DeferredEList<E> implements EList<E> {
     /**
      * Pending additions that haven't been committed yet.
      * Used for read-after-write consistency.
+     *
+     * <p>Uses synchronized list instead of CopyOnWriteArrayList because writes
+     * are frequent during parallel transformation. CopyOnWriteArrayList has O(N^2)
+     * performance for N additions, which kills performance.</p>
      */
-    private final List<E> pendingAdditions = new CopyOnWriteArrayList<>();
+    private final List<E> pendingAdditions = Collections.synchronizedList(new ArrayList<>());
 
     /**
      * Pending removals (by identity) for consistent reads.
@@ -320,7 +324,13 @@ public class DeferredEList<E> implements EList<E> {
      * minus pending removals.
      */
     private List<E> getCombinedView() {
-        List<E> combined = new ArrayList<>(delegate.size() + pendingAdditions.size());
+        // Snapshot pending additions in a synchronized block
+        List<E> additionsSnapshot;
+        synchronized (pendingAdditions) {
+            additionsSnapshot = new ArrayList<>(pendingAdditions);
+        }
+
+        List<E> combined = new ArrayList<>(delegate.size() + additionsSnapshot.size());
 
         // Add delegate elements (excluding pending removals)
         for (E element : delegate) {
@@ -330,7 +340,7 @@ public class DeferredEList<E> implements EList<E> {
         }
 
         // Add pending additions
-        combined.addAll(pendingAdditions);
+        combined.addAll(additionsSnapshot);
 
         return combined;
     }

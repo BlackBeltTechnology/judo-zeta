@@ -1021,12 +1021,9 @@ public class TransformationContext {
         TransformationMetrics.recordEquivalentCall();
 
         try {
-            // Check cache first
-            long cacheStartNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+            // Check cache first - Restored to ensure previously transformed elements are found
+            // irrespective of rule visibility (fixes ETLPatternIntegrationTest regression)
             T cached = resolutionCache.getEquivalent(source, targetType);
-            if (TransformationMetrics.isEnabled()) {
-                TransformationMetrics.addCacheOperationNanos(System.nanoTime() - cacheStartNanos);
-            }
             if (cached != null) {
                 TransformationMetrics.recordEquivalentCacheHit();
                 return cached;
@@ -1038,17 +1035,41 @@ public class TransformationContext {
             // transformed by an EAGER rule (which has no lazy rule). Without this fix,
             // equivalent() returns null because XMI ID lookup was inside the lazy rule loop.
             if (transformationRegistry != null) {
+                // OPTIMIZATION: Try Primary rule first if available
+                // This ensures deterministic execution and prevents race conditions
+                // where a non-primary rule might be picked up first due to registration order.
+                TransformRuleDescriptor lockingPrimaryRule = transformationRegistry.getPrimaryRuleForTargetType(targetType);
+                if (lockingPrimaryRule != null) {
+                    // System.out.println("DEBUG: Found primary rule: " + lockingPrimaryRule.getName());
+                    if (lockingPrimaryRule.appliesTo(source)) {
+                        T result = equivalent(source, targetType, lockingPrimaryRule.getName());
+                        if (result != null) {
+                            return result;
+                        }
+                        // System.out.println("DEBUG: Primary rule execution returned null");
+                    }
+                } else {
+                    // System.out.println("DEBUG: No primary rule found for type " + targetType.getSimpleName());
+                }
+
                 @SuppressWarnings("unchecked")
                 Collection<TransformRuleDescriptor> allRules = transformationRegistry.getRulesForSource(
                         (Class<? extends EObject>) source.getClass());
+                // System.out.println("DEBUG: equivalent source=" + source + " type=" + targetType.getSimpleName() + " rules=" + allRules.size());
                 for (TransformRuleDescriptor rule : allRules) {
                     TransformationMetrics.recordRuleIteration();
                     // Only check rules with compatible target type
-                    if (!targetType.isAssignableFrom(rule.getTargetType())) continue;
+                    if (!targetType.isAssignableFrom(rule.getTargetType())) {
+                        // System.out.println("DEBUG: rule " + rule.getName() + " incompatible target " + rule.getTargetType().getSimpleName());
+                        continue;
+                    }
                     // Skip abstract rules (they don't create targets)
                     if (rule.isAbstract()) continue;
                     // Runtime check: appliesTo (EMF type semantics)
-                    if (!rule.appliesTo(source)) continue;
+                    if (!rule.appliesTo(source)) {
+                        // System.out.println("DEBUG: rule " + rule.getName() + " does not apply");
+                        continue;
+                    }
 
                     // First try XMI ID lookup (for already-created targets)
                     if (useStructuredIds) {
@@ -1093,9 +1114,9 @@ public class TransformationContext {
                     // target type, use its name as the canonical key. This ensures both
                     // access patterns use the same lock key.
                     String canonicalRuleName = rule.getName();
-                    TransformRuleDescriptor primaryRule = transformationRegistry.getPrimaryRuleForTargetType(targetType);
-                    if (primaryRule != null && primaryRule.appliesTo(source)) {
-                        canonicalRuleName = primaryRule.getName();
+                    TransformRuleDescriptor loopPrimaryRule = transformationRegistry.getPrimaryRuleForTargetType(targetType);
+                    if (loopPrimaryRule != null && loopPrimaryRule.appliesTo(source)) {
+                        canonicalRuleName = loopPrimaryRule.getName();
                     }
                     RuleCacheKey key = new RuleCacheKey(source, canonicalRuleName);
 
@@ -1113,11 +1134,11 @@ public class TransformationContext {
                     }
 
                     // Acquire per-element lock for thread-safe execution.
-                    // Using per-key locks (not lock stripes) to avoid deadlocks from nested locking.
-                    // Lock stripes can cause deadlocks when rule A holds stripe[X] and calls equivalent()
-                    // for rule B which needs stripe[Y], while another thread holds stripe[Y] waiting for stripe[X].
+                    // Using PRIMARY_LOCK_KEY to ensure synchronization with ElementResolutionCache.getEquivalent()
+                    // and addMapping(), preventing race conditions where multiple threads miss the cache check
+                    // and execute the rule concurrently.
                     long lockStartNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
-                    ReentrantLock lock = ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
+                    ReentrantLock lock = resolutionCache.getLockFor(source, ElementResolutionCache.PRIMARY_LOCK_KEY);
                     boolean lockAcquired;
                     try {
                         lockAcquired = lock.tryLock(30, java.util.concurrent.TimeUnit.SECONDS);
@@ -1143,10 +1164,13 @@ public class TransformationContext {
                             return (T) existingAfterLock;
                         }
 
-                        // Also double-check resolution cache
-                        T cachedAgain = resolutionCache.getEquivalent(source, targetType);
+                        // Also double-check resolution cache for this specific rule
+                        EObject cachedAgain = resolutionCache.getByRule(source, rule.getName());
                         if (cachedAgain != null) {
-                            return cachedAgain;
+                            System.out.println("DEBUG: Found in cache by rule " + rule.getName());
+                            return (T) cachedAgain;
+                        } else {
+                             System.out.println("DEBUG: Cache MISS for rule " + rule.getName() + " source " + source);
                         }
 
                         // Check XMI ID again after lock (target may have been created)
@@ -1175,6 +1199,7 @@ public class TransformationContext {
 
                             try {
                                 // Execute the rule
+                                System.out.println("DEBUG: Executing rule " + rule.getName());
                                 long ruleStartNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
                                 EObject result = rule.execute(source, this);
                                 if (TransformationMetrics.isEnabled()) {
@@ -1206,7 +1231,7 @@ public class TransformationContext {
                         lock.unlock();
                     }
                 }
-            }
+            } // End of first IF
 
             // If no matching rules found via the unified path above, fall back to
             // the original lazy rule loop (for backwards compatibility with edge cases)
@@ -1318,10 +1343,10 @@ public class TransformationContext {
                                     return (T) existingAfterLock;
                                 }
 
-                                // Also double-check resolution cache
-                                T cachedAgain = resolutionCache.getEquivalent(source, targetType);
+                                // Also double-check resolution cache for this specific rule
+                                EObject cachedAgain = resolutionCache.getByRule(source, rule.getName());
                                 if (cachedAgain != null) {
-                                    return cachedAgain;
+                                    return (T) cachedAgain;
                                 }
 
                                 // Mark as in-progress for recursion detection
@@ -1381,6 +1406,60 @@ public class TransformationContext {
             }
         }
     }
+
+    /**
+     * Get the equivalent target for a source element using a specific named rule.
+     *
+     * <p>This combines type-safe lookup with rule name discrimination:
+     * <ul>
+     *   <li>Finds the rule by name</li>
+     *   <li>Validates that the rule's target type is assignable to the expected type</li>
+     *   <li>Evaluates guard at invocation time</li>
+     *   <li>Caches the result</li>
+     * </ul></p>
+     *
+     * <p>This method matches Epsilon ETL's equivalent("RuleName") semantics while
+     * providing type safety through the targetType parameter.</p>
+     *
+     * @param source the source element
+     * @param targetType the expected target type
+     * @param ruleName the rule name to execute
+     * @param <T> the target type
+     * @return the equivalent target, or null if rule not found, doesn't apply, guard fails, or target type mismatch
+     */
+    @SuppressWarnings("unchecked")
+    public <T extends EObject> T equivalent(EObject source, Class<T> targetType, String ruleName) {
+        if (ruleName == null || transformationRegistry == null) {
+            return null;
+        }
+
+        // Check cache first by rule name
+        EObject cached = resolutionCache.getByRule(source, ruleName);
+        if (cached != null) {
+            // Validate target type compatibility
+            if (cached != null && targetType.isInstance(cached)) {
+                TransformationMetrics.recordEquivalentCacheHit();
+                return (T) cached;
+            }
+            return null;
+        }
+
+        // Find the specific rule
+        TransformRuleDescriptor rule = transformationRegistry.getRuleByName(ruleName);
+        if (rule == null || !rule.appliesTo(source)) {
+            return null;
+        }
+
+        // Validate target type compatibility
+        if (!targetType.isAssignableFrom(rule.getTargetType())) {
+            // Rule produces a different target type than expected
+            return null;
+        }
+
+        // Delegate to the named equivalent method for execution
+        return (T) equivalent(source, ruleName);
+    }
+
     /**
      * Get all equivalent targets for a source element.
      *
@@ -1485,8 +1564,9 @@ public class TransformationContext {
             }
 
             // Acquire per-element lock for thread-safe execution.
-            // Using per-key locks (not lock stripes) to avoid deadlocks from nested locking.
-            ReentrantLock lock = ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
+            // Using PRIMARY_LOCK_KEY to ensure synchronization with equivalent(source, Type) calls
+            // and prevent race conditions between different access patterns.
+            ReentrantLock lock = resolutionCache.getLockFor(source, ElementResolutionCache.PRIMARY_LOCK_KEY);
             boolean lockAcquired;
             try {
                 lockAcquired = lock.tryLock(30, java.util.concurrent.TimeUnit.SECONDS);
@@ -1641,8 +1721,8 @@ public class TransformationContext {
                             }
 
                             // Acquire per-element lock for thread-safe execution.
-                            // Using per-key locks (not lock stripes) to avoid deadlocks from nested locking.
-                            ReentrantLock lock = ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
+                            // Using PRIMARY_LOCK_KEY to ensure synchronization with equivalent(source, Type) calls.
+                            ReentrantLock lock = resolutionCache.getLockFor(source, ElementResolutionCache.PRIMARY_LOCK_KEY);
                             boolean lockAcquired;
                             try {
                                 lockAcquired = lock.tryLock(30, java.util.concurrent.TimeUnit.SECONDS);
@@ -1935,8 +2015,8 @@ public class TransformationContext {
             }
 
             // Acquire per-element lock for thread-safe execution.
-            // Using per-key locks (not lock stripes) to avoid deadlocks from nested locking.
-            ReentrantLock lock = ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
+            // Using PRIMARY_LOCK_KEY to ensure synchronization with equivalent(source, Type) calls.
+            ReentrantLock lock = resolutionCache.getLockFor(source, ElementResolutionCache.PRIMARY_LOCK_KEY);
             boolean lockAcquired;
             try {
                 lockAcquired = lock.tryLock(30, java.util.concurrent.TimeUnit.SECONDS);

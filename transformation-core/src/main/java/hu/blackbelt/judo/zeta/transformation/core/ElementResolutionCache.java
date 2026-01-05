@@ -50,43 +50,38 @@ public class ElementResolutionCache {
     private final Map<EObject, Map<String, Map<String, EObject>>> discriminatedCache = new ConcurrentHashMap<>();
 
     /**
-     * Lock striping for atomic getOrCreate operations.
+     * Per-key locks for atomic getOrCreate operations.
      *
-     * <p>Uses a fixed array of 1024 locks instead of per-key locks. This reduces
-     * memory allocation from O(n × r) = 300K lock objects for large models to
-     * exactly 1024 locks (~40KB fixed memory).</p>
+     * <p>Uses a ConcurrentHashMap to store locks for each (source, ruleName) pair.
+     * This eliminates "artificial" deadlocks caused by hash collisions in lock striping,
+     * where unrelated keys happen to map to the same lock stripe.</p>
      *
-     * <p>Lock selection uses hash of (source identity, ruleName) to distribute
-     * load evenly across stripes. With 1024 stripes and uniform hash distribution,
-     * collision probability is low for typical workloads.</p>
+     * <p>Memory overhead: Each ReentrantLock is small (~32 bytes). Even with 1 million
+     * unique (source, rule) pairs, the overhead is ~40MB, which is acceptable for
+     * the correctness guarantee.</p>
      */
-    private static final int LOCK_STRIPE_COUNT = 1024;
-    private final ReentrantLock[] lockStripes;
+    private final Map<CacheKey, ReentrantLock> ruleLocks = new ConcurrentHashMap<>();
 
     // Track rejected (source, ruleName) pairs to avoid re-evaluating guards
     private final Set<CacheKey> rejectedKeys = ConcurrentHashMap.newKeySet();
 
+    // Special lock key for primary cache access to prevent races between addMapping and getEquivalent
+    public static final String PRIMARY_LOCK_KEY = "ElementResolutionCache.PRIMARY_LOCK";
+
     public ElementResolutionCache() {
-        // Initialize lock stripes
-        lockStripes = new ReentrantLock[LOCK_STRIPE_COUNT];
-        for (int i = 0; i < LOCK_STRIPE_COUNT; i++) {
-            lockStripes[i] = new ReentrantLock();
-        }
+        // No initialization needed for ruleLocks
     }
 
     /**
-     * Get the lock stripe for a given (source, ruleName) pair.
-     *
-     * <p>Uses XOR of source identity hash and ruleName hash for better distribution.
-     * Math.abs handles negative hash codes, modulo selects the stripe index.</p>
+     * Get the lock for a given (source, ruleName) pair.
      *
      * @param source the source element
      * @param ruleName the rule name
-     * @return the lock stripe for this key
+     * @return the unique lock for this key
      */
     public ReentrantLock getLockFor(EObject source, String ruleName) {
-        int hash = System.identityHashCode(source) ^ ruleName.hashCode();
-        return lockStripes[Math.abs(hash % LOCK_STRIPE_COUNT)];
+        CacheKey key = new CacheKey(source, ruleName);
+        return ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
     }
 
     /**
@@ -155,8 +150,14 @@ public class ElementResolutionCache {
 
         // Add to primary cache if marked
         if (isPrimary) {
-            primaryCache.computeIfAbsent(source, k -> new ConcurrentHashMap<>())
-                    .put(targetTypeName, target);
+            ReentrantLock lock = getLockFor(source, PRIMARY_LOCK_KEY);
+            lock.lock();
+            try {
+                primaryCache.computeIfAbsent(source, k -> new ConcurrentHashMap<>())
+                        .put(targetTypeName, target);
+            } finally {
+                lock.unlock();
+            }
         }
     }
 
@@ -275,19 +276,26 @@ public class ElementResolutionCache {
         String typeName = getTypeName(targetType);
 
         // Check primary cache first (exact match)
-        Map<String, EObject> primaryMap = primaryCache.get(source);
-        if (primaryMap != null) {
-            EObject primary = primaryMap.get(typeName);
-            if (primary != null) {
-                return targetType.cast(primary);
-            }
-            // Fall back to assignable type check in primary cache
-            // Use snapshot to avoid ConcurrentModificationException
-            for (EObject primary2 : new ArrayList<>(primaryMap.values())) {
-                if (targetType.isInstance(primary2)) {
-                    return targetType.cast(primary2);
+        // Use shared lock to ensure visibility of updates from addMapping
+        ReentrantLock lock = getLockFor(source, PRIMARY_LOCK_KEY);
+        lock.lock();
+        try {
+            Map<String, EObject> primaryMap = primaryCache.get(source);
+            if (primaryMap != null) {
+                EObject primary = primaryMap.get(typeName);
+                if (primary != null) {
+                    return targetType.cast(primary);
+                }
+                // Fall back to assignable type check in primary cache
+                // Iterate directly over concurrent map values
+                for (EObject primary2 : primaryMap.values()) {
+                    if (targetType.isInstance(primary2)) {
+                        return targetType.cast(primary2);
+                    }
                 }
             }
+        } finally {
+            lock.unlock();
         }
 
         // Check for assignable types in type cache (e.g., EDataType when requesting EClassifier)
@@ -300,8 +308,8 @@ public class ElementResolutionCache {
                 return targetType.cast(exactTargets.get(0));
             }
             // Fall back to assignable type check
-            // CopyOnWriteArrayList is already safe for iteration, but we need snapshot of typeMap.values()
-            for (List<EObject> targets : new ArrayList<>(typeMap.values())) {
+            // Iterate directly over concurrent map values
+            for (List<EObject> targets : typeMap.values()) {
                 for (EObject target : targets) {
                     if (targetType.isInstance(target)) {
                         return targetType.cast(target);
@@ -339,8 +347,8 @@ public class ElementResolutionCache {
         
         // Check all cached targets for type assignability
         // This handles cases where EDataType is cached but EClassifier is requested
-        // Use snapshot of typeMap.values() to avoid ConcurrentModificationException
-        for (List<EObject> targets : new ArrayList<>(typeMap.values())) {
+        // Iterate directly over concurrent map values
+        for (List<EObject> targets : typeMap.values()) {
             // CopyOnWriteArrayList is already safe for iteration
             for (EObject target : targets) {
                 if (targetType.isInstance(target)) {
@@ -532,8 +540,7 @@ public class ElementResolutionCache {
     /**
      * Clear all caches.
      *
-     * <p>Note: Lock stripes are not cleared as they are a fixed array that
-     * is reused across transformations.</p>
+     * <p>Also clears the rule locks to free memory.</p>
      */
     public void clear() {
         ruleCache.clear();
@@ -541,6 +548,7 @@ public class ElementResolutionCache {
         primaryCache.clear();
         discriminatedCache.clear();
         rejectedKeys.clear();
+        ruleLocks.clear();
     }
 
     /**
