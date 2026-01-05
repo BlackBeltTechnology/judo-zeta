@@ -1,0 +1,52 @@
+# Tasks: Fix Proxy Unwrapping After Transformation
+
+## Status: Implemented
+
+## Phase 1: Implementation
+
+- [x] **1.1** Add `unwrapAllProxiesInModel()` call in `TransformationExecutor.transformWithStaging()`
+  - Location: After `commitStagedElements()`, before finally block
+  - Added as Phase 4 with metrics tracking via `addProxyUnwrapNanos()`
+
+## Phase 2: Unit Tests
+
+- [x] **2.1** Add test verifying no proxies remain after parallel transformation
+  - Created `ProxyUnwrapAfterTransformTest.java`
+  - Tests `testNoProxiesAfterParallelTransform()` - 50 sources with containment
+  - Tests `testEMFGetEAllOperationsWorks()` - verifies EOperationImpl casting
+
+- [x] **2.2** Add stress test with many containment proxies
+  - Test `testStressManyContainmentProxies()` - 100 sources with 5 operations each
+  - Verified all 500 operations are real objects, not proxies
+
+## Phase 3: Integration Testing
+
+- [x] **3.1** Run existing parallel transformation tests
+  - All tests pass (BUILD SUCCESS)
+  - No proxy ClassCastException errors
+
+- [x] **3.2** Verify with PSM2ASM-like patterns
+  - Tests iterate `getEAllOperations()` without ClassCastException
+  - Tests verify objects can be cast to `EOperationImpl`
+
+## Files Changed
+
+- `TransformationExecutor.java` - Added Phase 4 proxy unwrap call
+- `TransformationMetrics.java` - Added `proxyUnwrapNanos` field and methods
+- `ProxyUnwrapAfterTransformTest.java` - New test file (3 tests)
+
+## Acceptance Criteria
+
+1. [x] No proxy objects (`$ProxyN`) remain in model after transformation
+2. [x] All EMF internal iterators work correctly (getEAllOperations, etc.)
+3. [x] All existing tests pass
+4. [x] No ClassCastException when accessing model elements
+
+## Dependencies
+
+- None (self-contained change in judo-zeta)
+
+## Parallelizable Work
+
+- Phase 1 and Phase 2 can be done in parallel
+- Phase 3 depends on Phase 1

@@ -79,9 +79,78 @@ TransformationExecutor.builder()
 - Lazy rule tracking: ConcurrentHashMap
 - Cache operations: Per-key ReentrantLock
 
+### Per-Key Locking (Not Lock Striping)
+
+The framework uses **per-key locks** for thread-safe cache operations:
+
+```java
+// Each (source, ruleName) pair has its own lock
+ReentrantLock lock = ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
+```
+
+**Why not lock striping?** Lock striping (fixed array of 1024 locks) causes deadlocks with nested locking:
+- Thread A holds stripe[42], calls `equivalent()` needing stripe[99]
+- Thread B holds stripe[99], calls `equivalent()` needing stripe[42]
+- Different `(source, rule)` pairs can hash to same stripe → DEADLOCK
+
+Per-key locks guarantee unique locks per `(source, rule)`, eliminating hash collision deadlocks.
+
+### Timeout-Based Deadlock Detection
+
+All lock acquisitions use 30-second timeout:
+```java
+if (!lock.tryLock(30, TimeUnit.SECONDS)) {
+    throw new RuntimeException("Potential deadlock detected...");
+}
+```
+
 ## Deferred Writes (Auto-enabled for Parallel)
 
 When `parallel=true`, deferred writes are automatically enabled to prevent EMF EList corruption. Transformations can opt-out via `ctx.disableDeferredWrites()`.
+
+### How Deferred Writes Work
+
+```
+┌──────────────────────────────────────────────────────┐
+│ 1. ctx.createTarget() returns JDK dynamic proxy      │
+│ 2. Proxy intercepts all eSet() and EList.add() calls │
+│ 3. Operations stored in thread-safe OperationQueue   │
+│ 4. After parallel phase, operations replayed         │
+│    single-threaded in sequence order                 │
+└──────────────────────────────────────────────────────┘
+```
+
+### EMF Bidirectional Reference Handling
+
+EMF's bidirectional references (`eOpposite`) require special handling:
+
+```java
+// EMF internally calls:
+newValue.eInverseAdd(this, OPPOSITE_FEATURE_ID, ...);
+
+// Problem: If newValue is a proxy, eInverseAdd fails
+// Solution: Unwrap at QUEUE TIME, not apply time
+```
+
+Reference values are unwrapped when the operation is queued:
+```java
+// In DeferredEObject.handleSet():
+if (feature instanceof EReference) {
+    EObject realValue = unwrap(value);  // Unwrap NOW
+    queue.add(new SetReferenceOp(delegate, feature, realValue, seq));
+}
+```
+
+### Pending State Cleanup
+
+After commit, pending state must be cleared on all proxies:
+```java
+// In commitDeferredOperations():
+for (ProxyMarker proxy : createdProxies) {
+    proxy.clearPendingState();
+}
+```
+Without this, `DeferredEList.getCombinedView()` would return both committed and stale pending values.
 
 ```java
 // Automatic in parallel mode:

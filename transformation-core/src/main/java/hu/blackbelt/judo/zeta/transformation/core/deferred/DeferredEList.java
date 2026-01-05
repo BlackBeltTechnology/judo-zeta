@@ -295,6 +295,24 @@ public class DeferredEList<E> implements EList<E> {
         return removeAll(toRemove);
     }
 
+    // ==================== Lifecycle Methods ====================
+
+    /**
+     * Clear all pending state after commit.
+     *
+     * <p>After {@link OperationQueue#commit()} is called, all pending additions
+     * have been applied to the delegate list. This method clears the pending
+     * state so that subsequent reads only see the delegate list.</p>
+     *
+     * <p>This is important to prevent double-counting: without clearing,
+     * {@link #getCombinedView()} would return both delegate elements AND
+     * pending additions, resulting in 2x the actual element count.</p>
+     */
+    public void clearPendingState() {
+        pendingAdditions.clear();
+        pendingRemovals.clear();
+    }
+
     // ==================== Helper Methods ====================
 
     /**

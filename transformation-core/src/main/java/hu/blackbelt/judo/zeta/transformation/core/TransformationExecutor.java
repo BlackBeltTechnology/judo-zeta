@@ -28,6 +28,7 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.HashSet;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -77,6 +78,28 @@ public class TransformationExecutor {
      * Reset for each transform() call.
      */
     private final AtomicReference<Throwable> firstError = new AtomicReference<>();
+
+    /**
+     * Source-level locks for serializing eager rule execution per source element.
+     *
+     * <p>When multiple @Greedy rules transform the same source type and one rule
+     * calls ctx.equivalent() to look up another rule's target for the SAME source,
+     * a deadlock can occur if both rules execute concurrently on the same source.</p>
+     *
+     * <p>This map provides per-source locking to ensure all eager rules for a given
+     * source element execute under a single lock, preventing the deadlock while
+     * still allowing different source elements to be processed in parallel.</p>
+     *
+     * <p>Uses ReentrantLock to allow same-thread nested equivalent() calls.</p>
+     */
+    private final ConcurrentHashMap<EObject, ReentrantLock> sourceLocks = new ConcurrentHashMap<>();
+
+    /**
+     * Timeout for source lock acquisition (in seconds).
+     * If a lock cannot be acquired within this time, a potential circular
+     * cross-source dependency is detected and an error is thrown.
+     */
+    private static final int SOURCE_LOCK_TIMEOUT_SECONDS = 30;
 
     /**
      * Cache for model traversal results during element collection.
@@ -318,6 +341,8 @@ public class TransformationExecutor {
         context.getElementResolutionCache().clearRejections();
         // Propagate ETL compatibility mode to context for equivalent() calls
         context.setEtlCompatibilityMode(etlCompatibilityMode);
+        // Clear source-level locks from previous transformation
+        sourceLocks.clear();
     }
 
     /**
@@ -600,6 +625,17 @@ public class TransformationExecutor {
                 TransformationMetrics.addStagingCommitNanos(System.nanoTime() - commitStart);
             }
 
+            // Phase 4: Unwrap all proxies in the model (single-threaded)
+            // JDK proxies implement interfaces but cannot extend EMF's *Impl classes.
+            // EMF internal code (e.g., EClassImpl.getEAllOperations()) casts to *Impl types,
+            // causing ClassCastException if proxies remain. This phase replaces all proxy
+            // references with their underlying EMF delegates.
+            long unwrapStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+            context.unwrapAllProxiesInModel();
+            if (TransformationMetrics.isEnabled()) {
+                TransformationMetrics.addProxyUnwrapNanos(System.nanoTime() - unwrapStart);
+            }
+
         } finally {
             context.disableDeferredWrites();
             context.disableStaging();
@@ -671,11 +707,33 @@ public class TransformationExecutor {
             if (firstError.get() != null) {
                 break;
             }
+
+            // Acquire source-level lock to serialize all eager rules for this source element.
+            // This prevents deadlocks when multiple @Greedy rules for the same source type
+            // call ctx.equivalent() to look up each other's targets.
+            ReentrantLock sourceLock = sourceLocks.computeIfAbsent(source, k -> new ReentrantLock());
+            boolean lockAcquired;
+            try {
+                lockAcquired = sourceLock.tryLock(SOURCE_LOCK_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Interrupted while waiting for source lock on " +
+                        source.eClass().getName(), e);
+            }
+
+            if (!lockAcquired) {
+                throw new RuntimeException(
+                        "Potential circular cross-source dependency detected: timeout waiting for source lock on " +
+                        source.eClass().getName() + ". This may indicate Rule A(X) calls equivalent(Y) while " +
+                        "Rule B(Y) calls equivalent(X) concurrently.");
+            }
+
             try {
                 context.setCurrentSource(source);
                 executeEagerRulesFor(source);
             } finally {
                 context.clearCurrentSource();
+                sourceLock.unlock();
             }
         }
 

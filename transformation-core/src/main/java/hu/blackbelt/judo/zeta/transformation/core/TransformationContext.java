@@ -239,6 +239,13 @@ public class TransformationContext {
     private final OperationQueue operationQueue = new OperationQueue();
 
     /**
+     * Collection of all created deferred proxies.
+     * Used to clear pending state after commit to prevent double-counting.
+     */
+    private final Set<DeferredEObject.ProxyMarker> createdProxies =
+            ConcurrentHashMap.newKeySet();
+
+    /**
      * Wrapper for staged elements with ordering metadata.
      */
     private static class StagedElement {
@@ -934,7 +941,12 @@ public class TransformationContext {
             // Wrap with deferred proxy if deferred writes mode is enabled
             // The proxy intercepts setter and list operations, deferring them until commit
             if (deferredWritesEnabled) {
-                return DeferredEObject.createProxy((T) instance, operationQueue);
+                T proxy = DeferredEObject.createProxy((T) instance, operationQueue);
+                // Track the proxy so we can clear pending state after commit
+                if (proxy instanceof DeferredEObject.ProxyMarker marker) {
+                    createdProxies.add(marker);
+                }
+                return proxy;
             }
 
             return (T) instance;
@@ -1100,7 +1112,10 @@ public class TransformationContext {
                         return null;
                     }
 
-                    // Acquire per-element lock for thread-safe execution
+                    // Acquire per-element lock for thread-safe execution.
+                    // Using per-key locks (not lock stripes) to avoid deadlocks from nested locking.
+                    // Lock stripes can cause deadlocks when rule A holds stripe[X] and calls equivalent()
+                    // for rule B which needs stripe[Y], while another thread holds stripe[Y] waiting for stripe[X].
                     long lockStartNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
                     ReentrantLock lock = ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
                     boolean lockAcquired;
@@ -1271,12 +1286,13 @@ public class TransformationContext {
                             }
 
                             // Acquire per-element lock for thread-safe execution
-                            // Uses computeIfAbsent for atomic lock creation
+                            // CRITICAL: Use the SAME lock stripe as ElementResolutionCache.getOrCreate()
+                            // to prevent race conditions between eager execution and equivalent() calls
                             // IMPORTANT: Use tryLock with timeout to prevent deadlocks from
                             // circular dependencies (e.g., RuleA calls equivalent(B) while
                             // RuleB calls equivalent(A) from different threads)
                             long lockStartNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
-                            ReentrantLock lock = ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
+                            ReentrantLock lock = resolutionCache.getLockFor(source, canonicalRuleName);
                             boolean lockAcquired;
                             try {
                                 // 30 second timeout to detect deadlocks
@@ -1468,9 +1484,22 @@ public class TransformationContext {
                 return null;
             }
 
-            // Acquire per-element lock for thread-safe execution
+            // Acquire per-element lock for thread-safe execution.
+            // Using per-key locks (not lock stripes) to avoid deadlocks from nested locking.
             ReentrantLock lock = ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
-            lock.lock();
+            boolean lockAcquired;
+            try {
+                lockAcquired = lock.tryLock(30, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Interrupted while waiting for lock on " + key, e);
+            }
+            if (!lockAcquired) {
+                throw new RuntimeException(
+                    "Potential deadlock detected: timeout waiting for lock on executeLazyRule(" +
+                    source.eClass().getName() + ", " + ruleName + "). " +
+                    "This may indicate circular rule dependencies.");
+            }
             try {
                 // Double-check after acquiring lock (another thread may have completed)
                 EObject existingAfterLock = executingLazyRules.get(key);
@@ -1611,7 +1640,8 @@ public class TransformationContext {
                                 return null;
                             }
 
-                            // Acquire per-element lock for thread-safe execution
+                            // Acquire per-element lock for thread-safe execution.
+                            // Using per-key locks (not lock stripes) to avoid deadlocks from nested locking.
                             ReentrantLock lock = ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
                             boolean lockAcquired;
                             try {
@@ -1904,9 +1934,22 @@ public class TransformationContext {
                 return (T) existing;
             }
 
-            // Acquire per-element lock for thread-safe execution
+            // Acquire per-element lock for thread-safe execution.
+            // Using per-key locks (not lock stripes) to avoid deadlocks from nested locking.
             ReentrantLock lock = ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
-            lock.lock();
+            boolean lockAcquired;
+            try {
+                lockAcquired = lock.tryLock(30, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Interrupted while waiting for lock on " + key, e);
+            }
+            if (!lockAcquired) {
+                throw new RuntimeException(
+                    "Potential deadlock detected: timeout waiting for lock on executeParentRule(" +
+                    source.eClass().getName() + ", " + parentRuleName + "). " +
+                    "This may indicate circular rule dependencies.");
+            }
             try {
                 // Double-check after acquiring lock (another thread may have completed)
                 cached = resolutionCache.getByRule(source, parentRuleName);
@@ -2955,7 +2998,16 @@ public class TransformationContext {
      * @return the number of operations applied
      */
     public int commitDeferredOperations() {
-        return operationQueue.commit();
+        int committed = operationQueue.commit();
+
+        // Clear pending state on all proxies after commit
+        // This prevents double-counting: without clearing, DeferredEList.getCombinedView()
+        // would return both delegate elements (committed) AND pendingAdditions (stale)
+        for (DeferredEObject.ProxyMarker proxy : createdProxies) {
+            proxy.clearPendingState();
+        }
+
+        return committed;
     }
 
     /**
@@ -2975,6 +3027,7 @@ public class TransformationContext {
     public void resetDeferredWrites() {
         operationQueue.reset();
         deferredWritesEnabled = false;
+        createdProxies.clear();
     }
 
     /**

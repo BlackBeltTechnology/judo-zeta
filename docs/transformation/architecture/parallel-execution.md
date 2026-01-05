@@ -97,10 +97,62 @@ T target = cache.getOrCreate(source, ruleName, () -> {
 }, isPrimary);
 ```
 
-### Per-Key Locking
+### Per-Key Locking Strategy
 - Each `(source, ruleName)` pair has its own `ReentrantLock`
 - Different source/rule combinations execute in parallel
 - Same source+rule: first thread executes, others wait for cached result
+- Uses `ReentrantLock` to handle recursive calls from the same thread
+
+```java
+// Lock stored in ConcurrentHashMap per (source, ruleName) key
+ReentrantLock lock = ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
+```
+
+### Why Per-Key Locks (Not Lock Striping)
+
+The framework uses **per-key locks** rather than lock striping (fixed array of locks) to avoid deadlocks:
+
+```
+Lock Striping Problem:
+┌─────────────────────────────────────────────────────────────┐
+│ Thread A: holds stripe[42] for (src1, ruleA)                │
+│           → calls equivalent() → needs stripe[99]           │
+│                                                             │
+│ Thread B: holds stripe[99] for (src2, ruleB)                │
+│           → calls equivalent() → needs stripe[42]           │
+│                                                             │
+│ DEADLOCK! Both threads waiting for each other's stripe      │
+└─────────────────────────────────────────────────────────────┘
+
+Per-Key Locks:
+┌─────────────────────────────────────────────────────────────┐
+│ Thread A: holds lock for (src1, ruleA)                      │
+│           → calls equivalent() → gets lock for (src1, ruleB)│
+│           → No collision with other threads                 │
+│                                                             │
+│ Thread B: holds lock for (src2, ruleB)                      │
+│           → calls equivalent() → gets lock for (src2, ruleA)│
+│           → No collision with Thread A                      │
+│                                                             │
+│ NO DEADLOCK - each (source, rule) has unique lock           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Key insight**: Rule bodies can call `equivalent()` which acquires another lock (nested locking). With lock striping, different `(source, rule)` pairs can hash to the same stripe, causing cross-thread deadlocks. Per-key locks guarantee each pair has its own lock, eliminating collision-based deadlocks.
+
+### Timeout-Based Deadlock Detection
+
+All lock acquisitions use `tryLock()` with a 30-second timeout to detect circular dependencies:
+
+```java
+boolean lockAcquired = lock.tryLock(30, TimeUnit.SECONDS);
+if (!lockAcquired) {
+    throw new RuntimeException(
+        "Potential deadlock detected: timeout waiting for lock on " +
+        "equivalent(" + source.eClass().getName() + ", " + ruleName + "). " +
+        "This may indicate circular rule dependencies.");
+}
+```
 
 ### Guard Rejection Caching
 ```java
@@ -108,6 +160,82 @@ T target = cache.getOrCreate(source, ruleName, () -> {
 rejectedKeys.add(new CacheKey(source, ruleName));
 // Subsequent calls return null without re-evaluating guard
 ```
+
+## Deferred Writes for EMF Thread-Safety
+
+EMF's `EList` and `eSet()` operations are **not thread-safe**. The framework uses a deferred writes mechanism to prevent data corruption during parallel execution.
+
+### The Problem: EMF is Not Thread-Safe
+
+```java
+// UNSAFE - Concurrent modifications corrupt EList internal state
+Thread A: parent.getChildren().add(childA);  // Modifies internal array
+Thread B: parent.getChildren().add(childB);  // Race condition!
+```
+
+### The Solution: Deferred EMF Operations
+
+```mermaid
+flowchart LR
+    A[Rule Body] --> B[Proxy Intercepts]
+    B --> C[Queue Operation]
+    C --> D[OperationQueue]
+    D --> E[Single-Thread Commit]
+    E --> F[Real EMF Objects]
+```
+
+1. **Proxy Objects**: `ctx.createTarget()` returns a JDK dynamic proxy wrapping the real EMF object
+2. **Operation Capture**: All `eSet()` and `EList` modifications are captured as immutable operation records
+3. **Queue Storage**: Operations stored in thread-safe `OperationQueue` with sequence numbers
+4. **Single-Thread Commit**: After parallel phase, operations are replayed sequentially in order
+
+### Proxy Unwrapping for EMF Bidirectional References
+
+EMF's bidirectional reference mechanism (`eOpposite`) uses `eInverseAdd()`/`eInverseRemove()` internally. These methods require **real `InternalEObject` instances**, not proxies.
+
+```java
+// Problem: EMF calls eInverseAdd with proxy
+newValue.eInverseAdd(this, OPPOSITE_FEATURE_ID, ...);  // Fails if newValue is proxy!
+
+// Solution: Unwrap at queue time, not apply time
+private void handleSet(EStructuralFeature feature, Object value) {
+    if (feature instanceof EReference) {
+        EObject realValue = unwrap(value);  // Get real EMF object
+        queue.add(new SetReferenceOp(delegate, feature, realValue, seq));
+    }
+}
+```
+
+**Key insight**: Reference values are unwrapped **when the operation is queued**, not when applied. This ensures EMF's inverse handling receives real objects during the single-threaded commit phase.
+
+### Clearing Pending State After Commit
+
+After `commitDeferredOperations()`, all proxy pending state must be cleared to prevent stale data:
+
+```java
+public int commitDeferredOperations() {
+    int committed = operationQueue.commit();
+
+    // Clear pending state on all proxies
+    for (ProxyMarker proxy : createdProxies) {
+        proxy.clearPendingState();
+    }
+
+    return committed;
+}
+```
+
+Without this, subsequent operations would see both committed values AND stale pending values.
+
+### Deferred Writes Compatibility Notes
+
+| Operation | During Parallel Phase | After Commit |
+|-----------|----------------------|--------------|
+| `list.add(element)` | Queued, not visible | Applied, visible |
+| `list.size()` | Returns combined size (committed + pending) | Returns real size |
+| `list.contains(x)` | Checks both committed and pending | Checks real list |
+| `element.eContainer()` | Returns null | Returns real container |
+| Cross-rule visibility | Not visible | Visible |
 
 ## Error Handling: Fail-Fast
 

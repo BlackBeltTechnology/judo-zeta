@@ -85,6 +85,15 @@ public class DeferredEObject implements InvocationHandler {
          * handled separately by the OperationQueue.</p>
          */
         void applyPendingValues();
+
+        /**
+         * Clear all pending state after commit.
+         *
+         * <p>After deferred operations have been committed to the EMF model,
+         * this clears pending values and list states. This ensures subsequent
+         * reads through the proxy return only the committed state.</p>
+         */
+        void clearPendingState();
     }
 
     private static final Set<String> PASSTHROUGH_METHODS = Set.of(
@@ -182,6 +191,24 @@ public class DeferredEObject implements InvocationHandler {
         return object;
     }
 
+    /**
+     * Clear pending state on an object if it is a deferred proxy.
+     *
+     * <p>After deferred operations have been committed to the EMF model,
+     * this should be called on all proxies to clear their pending state.
+     * This ensures subsequent reads through proxies return only the
+     * committed state.</p>
+     *
+     * <p>If the object is not a proxy, this method does nothing.</p>
+     *
+     * @param object the object (may be a proxy)
+     */
+    public static void clearPendingStateIfProxy(Object object) {
+        if (object instanceof ProxyMarker proxy) {
+            proxy.clearPendingState();
+        }
+    }
+
     @Override
     public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
         String methodName = method.getName();
@@ -193,6 +220,11 @@ public class DeferredEObject implements InvocationHandler {
 
         if ("applyPendingValues".equals(methodName) && args == null) {
             doApplyPendingValues();
+            return null;
+        }
+
+        if ("clearPendingState".equals(methodName) && args == null) {
+            doClearPendingState();
             return null;
         }
 
@@ -332,6 +364,24 @@ public class DeferredEObject implements InvocationHandler {
         }
         // Don't clear pendingValues - they're still needed for read-after-write consistency
         // and will be replayed via OperationQueue anyway
+    }
+
+    /**
+     * Clear all pending state after commit.
+     *
+     * <p>After deferred operations have been committed to the EMF model,
+     * this clears pending values and wrapped lists' pending state.
+     * This ensures subsequent reads through the proxy return only
+     * the committed state.</p>
+     */
+    private void doClearPendingState() {
+        // Clear pending attribute/reference values
+        pendingValues.clear();
+
+        // Clear pending state in all wrapped lists
+        for (DeferredEList<?> list : wrappedLists.values()) {
+            list.clearPendingState();
+        }
     }
 
     @SuppressWarnings("unchecked")

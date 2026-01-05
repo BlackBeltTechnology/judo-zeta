@@ -327,7 +327,7 @@ Zeta includes several optimizations enabled by default:
 | **Pending XMI ID Index** | O(1) lookup | Reverse index `pendingXmiIdIndex` replaces O(n) linear scan in `findByXmiId()` |
 | **Model Traversal Caching** | **-80%** collection time | Results of `context.all(alias, type)` are cached by (alias, type) pair. Same type traversed only once even if 10 rules use it. |
 | **Rule Lookup Caching** | **-90%** lookup time | `getRulesForSource(type)` results cached in `ConcurrentHashMap` with O(1) deduplication. |
-| **Lock Striping** | **-3%** overhead | Uses 1024 striped locks instead of per-key locks, reducing 300K lock allocations to 1024. |
+| **Per-Key Locking** | Thread-safe | Uses per-key `ReentrantLock` for each `(source, ruleName)` pair to prevent duplicate element creation and avoid deadlocks from nested locking. |
 | **Deadlock Prevention** | Thread-safe | Uses `tryLock()` with 30s timeout instead of blocking locks to prevent circular wait deadlocks. |
 | **Atomic Cache Operations** | Thread-safe | `getOrCreate()` pattern prevents duplicate element creation |
 | **Two-Phase Staging** | Parallel-safe | Elements staged during parallel execution, committed single-threaded |
@@ -342,30 +342,46 @@ Zeta includes several optimizations enabled by default:
 
 ### Deadlock Prevention
 
-Zeta uses `tryLock()` with a 30-second timeout instead of blocking `lock()` calls to prevent circular wait deadlocks in parallel execution.
+Zeta uses two mechanisms to prevent deadlocks in parallel execution:
 
-#### The Problem
+1. **Per-key locking** instead of lock striping
+2. **Timeout-based lock acquisition** with `tryLock(30, TimeUnit.SECONDS)`
 
-In parallel mode, deadlocks can occur when rules have circular dependencies:
+#### Why Per-Key Locks (Not Lock Striping)
+
+Lock striping (using a fixed array of 1024 locks) can cause deadlocks due to hash collisions when combined with nested locking:
 
 ```
+Lock Striping Deadlock (AVOIDED):
+┌─────────────────────────────────────────────────────────────┐
+│ Thread A: holds stripe[42] for (src1, ruleA)                │
+│           → rule body calls equivalent() → needs stripe[99] │
+│                                                             │
+│ Thread B: holds stripe[99] for (src2, ruleB)                │
+│           → rule body calls equivalent() → needs stripe[42] │
+│                                                             │
+│ DEADLOCK: Different (source, rule) pairs hash to same stripe│
+└─────────────────────────────────────────────────────────────┘
+```
+
+Per-key locks guarantee each `(source, ruleName)` pair has its own unique lock, eliminating hash collision deadlocks. Rule bodies calling `equivalent()` (nested locking) safely acquire different locks.
+
+#### Circular Dependency Detection
+
+Even with per-key locks, true circular dependencies can still cause deadlocks:
+
+```
+Circular Dependency (Detected via Timeout):
 Thread A: Holds lock(Entity1, "EntityToTable")
-          Waits for lock(Entity2, "ReferenceToFK")
+          Calls equivalent(Entity2, "ReferenceToFK") → waits
 
 Thread B: Holds lock(Entity2, "ReferenceToFK")
-          Waits for lock(Entity1, "EntityToTable")
-
-Result: Both threads wait forever (deadlock)
+          Calls equivalent(Entity1, "EntityToTable") → waits
 ```
-
-This can happen when:
-- Rule A transforms Entity1 and calls `equivalent(Entity2, ...)` to look up a related element
-- Rule B transforms Entity2 and calls `equivalent(Entity1, ...)` at the same time
-- Both rules need each other's locks to proceed
 
 #### The Solution
 
-Instead of blocking forever, Zeta uses `tryLock(30, TimeUnit.SECONDS)`:
+`tryLock(30, TimeUnit.SECONDS)` detects potential deadlocks:
 - If the lock is acquired within 30 seconds, execution continues normally
 - If timeout occurs, a descriptive exception is thrown identifying the deadlock source
 

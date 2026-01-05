@@ -74,6 +74,7 @@ public class TransformationMetrics {
     private static final AtomicLong stagingCommitNanos = new AtomicLong(0);
     private static final AtomicLong modelIterationNanos = new AtomicLong(0);
     private static final AtomicLong deferredOperationsNanos = new AtomicLong(0);
+    private static final AtomicLong proxyUnwrapNanos = new AtomicLong(0);
 
     // Phase 2: Executor-level timing metrics
     private static final AtomicLong ruleMatchingNanos = new AtomicLong(0);
@@ -151,6 +152,7 @@ public class TransformationMetrics {
         stagingCommitNanos.set(0);
         modelIterationNanos.set(0);
         deferredOperationsNanos.set(0);
+        proxyUnwrapNanos.set(0);
 
         // Phase 2 metrics
         ruleMatchingNanos.set(0);
@@ -358,6 +360,10 @@ public class TransformationMetrics {
         if (enabled) modelIterationNanos.addAndGet(nanos);
     }
 
+    public static void addProxyUnwrapNanos(long nanos) {
+        if (enabled) proxyUnwrapNanos.addAndGet(nanos);
+    }
+
     // Phase 2: Executor-level timing methods
     public static void addRuleMatchingNanos(long nanos) {
         if (enabled) ruleMatchingNanos.addAndGet(nanos);
@@ -426,6 +432,7 @@ public class TransformationMetrics {
         long equivDiscMs = equivalentDiscriminatedNanos.get() / 1_000_000;
         long equivsMs = equivalentsNanos.get() / 1_000_000;
         long stagingMs = stagingCommitNanos.get() / 1_000_000;
+        long proxyUnwrapMs = proxyUnwrapNanos.get() / 1_000_000;
         long modelIterMs = modelIterationNanos.get() / 1_000_000;
         long postProcMs = postProcessingNanos.get() / 1_000_000;
 
@@ -447,7 +454,7 @@ public class TransformationMetrics {
         // ACCOUNTED uses exclusive metrics only (no container metrics that overlap)
         // parallelWait is wall-clock time (not additive with CPU time metrics)
         long accountedMs = greedyMs + equivalentMs + createTargetMs + setXmiIdMs + extensionMs
-                + equivDiscMs + equivsMs + stagingMs + modelIterMs + postProcMs
+                + equivDiscMs + equivsMs + stagingMs + proxyUnwrapMs + modelIterMs + postProcMs
                 + ruleMatchMs + ruleLoopExclusiveMs + cacheExclusiveMs + futureCreateMs;
         long unaccountedMs = totalTransformMs > 0 ? totalTransformMs - accountedMs : 0;
 
@@ -471,6 +478,8 @@ public class TransformationMetrics {
                     modelIterMs, 100.0 * modelIterMs / totalTransformMs));
             sb.append(String.format("  Staging commit:               %,7d ms (%5.1f%%)\n",
                     stagingMs, 100.0 * stagingMs / totalTransformMs));
+            sb.append(String.format("  Proxy unwrap:                 %,7d ms (%5.1f%%)\n",
+                    proxyUnwrapMs, 100.0 * proxyUnwrapMs / totalTransformMs));
             sb.append(String.format("  Post-processing:              %,7d ms (%5.1f%%)\n",
                     postProcMs, 100.0 * postProcMs / totalTransformMs));
             sb.append(String.format("  Rule matching:                %,7d ms (%5.1f%%)\n",

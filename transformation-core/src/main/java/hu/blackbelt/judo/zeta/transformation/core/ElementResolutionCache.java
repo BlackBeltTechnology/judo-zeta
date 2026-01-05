@@ -83,7 +83,7 @@ public class ElementResolutionCache {
      * @param ruleName the rule name
      * @return the lock stripe for this key
      */
-    private ReentrantLock getLockFor(EObject source, String ruleName) {
+    public ReentrantLock getLockFor(EObject source, String ruleName) {
         int hash = System.identityHashCode(source) ^ ruleName.hashCode();
         return lockStripes[Math.abs(hash % LOCK_STRIPE_COUNT)];
     }
