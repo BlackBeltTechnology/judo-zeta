@@ -65,9 +65,6 @@ public class ElementResolutionCache {
     // Track rejected (source, ruleName) pairs to avoid re-evaluating guards
     private final Set<CacheKey> rejectedKeys = ConcurrentHashMap.newKeySet();
 
-    // Special lock key for primary cache access to prevent races between addMapping and getEquivalent
-    public static final String PRIMARY_LOCK_KEY = "ElementResolutionCache.PRIMARY_LOCK";
-
     public ElementResolutionCache() {
         // No initialization needed for ruleLocks
     }
@@ -149,15 +146,10 @@ public class ElementResolutionCache {
                 .add(target);
 
         // Add to primary cache if marked
+        // ConcurrentHashMap provides thread safety for single operations
         if (isPrimary) {
-            ReentrantLock lock = getLockFor(source, PRIMARY_LOCK_KEY);
-            lock.lock();
-            try {
-                primaryCache.computeIfAbsent(source, k -> new ConcurrentHashMap<>())
-                        .put(targetTypeName, target);
-            } finally {
-                lock.unlock();
-            }
+            primaryCache.computeIfAbsent(source, k -> new ConcurrentHashMap<>())
+                    .put(targetTypeName, target);
         }
     }
 
@@ -276,26 +268,20 @@ public class ElementResolutionCache {
         String typeName = getTypeName(targetType);
 
         // Check primary cache first (exact match)
-        // Use shared lock to ensure visibility of updates from addMapping
-        ReentrantLock lock = getLockFor(source, PRIMARY_LOCK_KEY);
-        lock.lock();
-        try {
-            Map<String, EObject> primaryMap = primaryCache.get(source);
-            if (primaryMap != null) {
-                EObject primary = primaryMap.get(typeName);
-                if (primary != null) {
-                    return targetType.cast(primary);
-                }
-                // Fall back to assignable type check in primary cache
-                // Iterate directly over concurrent map values
-                for (EObject primary2 : primaryMap.values()) {
-                    if (targetType.isInstance(primary2)) {
-                        return targetType.cast(primary2);
-                    }
+        // ConcurrentHashMap provides thread-safe visibility
+        Map<String, EObject> primaryMap = primaryCache.get(source);
+        if (primaryMap != null) {
+            EObject primary = primaryMap.get(typeName);
+            if (primary != null) {
+                return targetType.cast(primary);
+            }
+            // Fall back to assignable type check in primary cache
+            // Iterate directly over concurrent map values
+            for (EObject primary2 : primaryMap.values()) {
+                if (targetType.isInstance(primary2)) {
+                    return targetType.cast(primary2);
                 }
             }
-        } finally {
-            lock.unlock();
         }
 
         // Check for assignable types in type cache (e.g., EDataType when requesting EClassifier)

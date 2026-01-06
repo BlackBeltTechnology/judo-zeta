@@ -1,14 +1,14 @@
 # Proposal: Fix ctx.equivalent() Returns Null for Greedy Pass Targets
 
 **Change ID**: `fix-greedy-rule-target-lookup`
-**Status**: Draft
+**Status**: In Progress
 **Author**: Robson
 **Date**: 2026-01-05
 **Related Issue**: ZETA-EQ-001 (ctx.equivalent() Returns Null for Greedy Pass Targets)
 
 ## Executive Summary
 
-Fix a critical bug where `ctx.equivalent(source, RULE_NAME)` returns `null` when trying to retrieve targets created by other `@Greedy` rules during the same greedy pass. This blocks full ETL equivalence and causes ~8,000 missing elements in judo-tatami-esm2ui.
+Fix a critical bug where `ctx.equivalent(source, "RULE_NAME")` returns `null` when called from another `@Greedy` rule during the same transformation pass. This blocks cross-rule target lookups and causes ~8,000 missing elements in judo-tatami-esm2ui.
 
 ## Problem Statement
 
@@ -30,7 +30,7 @@ mvn test -Dtest=Esm2UiExternalModelTest
 ### Affected Pattern
 
 ```java
-// Rule A: Creates targets during greedy pass
+// Rule A: Creates targets (marked @Lazy for Phase 2 execution)
 @Greedy
 @Primary
 @Lazy
@@ -47,7 +47,7 @@ public TransformFunction<Class, ClassType> classType() {
 @Greedy
 public TransformFunction<RelationFeature, RelationType> relationType() {
     return (source, ctx) -> {
-        // This returns NULL - BUG
+        // This returns NULL - BUG!
         ClassType targetType = ctx.equivalent(source.getTarget(), CLASS_TYPE);
         target.setTarget(targetType);  // Sets null!
     };
@@ -56,84 +56,84 @@ public TransformFunction<RelationFeature, RelationType> relationType() {
 
 ## Root Cause Analysis
 
-### Hypothesis 1: XMI ID Lookup Not Triggered for Eager Rules
+### Confirmed Root Cause: Lazy Rule Activation Only
 
-The `equivalent()` method may not be performing XMI ID lookup when the rule is eager (not lazy). Looking at the current implementation, the XMI ID lookup might only be triggered after checking the cache, but eager rule targets may not have their XMI IDs set correctly before other rules try to look them up.
+The issue is in `TransformationContext.equivalent(source, String)`:
 
-### Hypothesis 2: Staging Delay Affects ID Availability
+```java
+// Line 1480-1484
+if (isEffectivelyActivityBased(rule)) {
+    activate(rule.getName(), source);
+    // Don't execute now - Phase 2 will execute for activated elements
+    return null;  // ❌ Returns null!
+}
+```
 
-When parallel transformation uses staging, XMI IDs are applied during commit, not immediately on creation. If `equivalent()` checks XMI IDs before commit completes, the IDs won't be found.
+When `equivalent(source, "ClassType")` is called from RelationType rule:
 
-### Hypothesis 3: Target Caching Before ID Generation
+1. It finds the ClassType rule which is `@Lazy`
+2. `isEffectivelyActivityBased(rule)` returns true (since it's @Greedy @Lazy)
+3. It only **records activation** and returns `null`
+4. The actual ClassType execution happens in **Phase 2**
+5. But by then, RelationType has already set `target.setTarget(null)`!
 
-Targets might be cached in `ElementResolutionCache` before their XMI IDs are generated, causing the lookup to fail when `equivalent()` tries to find them by ID.
+### The Fix
+
+When `equivalent()` is called **explicitly with a rule name** (not via type-based lookup), lazy rules should execute **immediately** rather than just recording activation for Phase 2.
 
 ## Proposed Solution
 
-### Option A: Fix XMI ID Lookup Timing
+Modify `equivalent(EObject source, String ruleName)` to execute lazy rules immediately when called explicitly:
 
-Ensure `equivalent()` checks XMI IDs immediately after cache miss, regardless of whether the rule is eager or lazy. The XMI ID should be generated at target creation time (not deferred).
+```java
+// Before: Just records activation
+if (isEffectivelyActivityBased(rule)) {
+    activate(rule.getName(), source);
+    return null;
+}
 
-**Pros**: Minimal change, preserves existing behavior
-**Cons**: May impact performance if IDs are generated for elements that are never looked up
-
-### Option B: Cache Targets with Correct ID Immediately
-
-Ensure targets are added to the XMI ID index immediately upon creation, before being cached.
-
-**Pros**: Correct semantics, no timing issues
-**Cons**: Requires restructuring target creation flow
-
-### Option C: Sequential Greedy Pass to Staging
-
-Run greedy pass sequentially (no parallel) to ensure all targets are committed before cross-rule lookups.
-
-**Pros**: Simple fix, matches ETL sequential behavior
-**Cons**: Performance impact for large models
-
-## Recommended Approach
-
-**Option A with verification**: Fix XMI ID lookup timing and add comprehensive tests for the greedy-to-greedy pattern.
+// After: Execute immediately for explicit calls
+if (isEffectivelyActivityBased(rule)) {
+    // For explicit calls (with rule name), execute immediately
+    // This ensures cross-rule lookups work during the same pass
+    EObject result = executeLazyRuleImmediately(source, rule);
+    if (result != null) {
+        return (T) result;
+    }
+    // Fall back to activation for Phase 2
+    activate(rule.getName(), source);
+    return null;
+}
+```
 
 ## Scope
 
 ### In Scope
 
-1. Fix `TransformationContext.equivalent()` to correctly find targets from eager greedy rules
-2. Ensure XMI ID lookup works for targets created in the same greedy pass
-3. Add integration test for `@Greedy` → `ctx.equivalent()` → `@Greedy` pattern
-4. Verify fix works in both sequential and parallel modes
+1. Modify `TransformationContext.equivalent(source, String)` to execute lazy rules immediately
+2. Add unit test for cross-rule target lookup pattern
+3. Verify fix in sequential and parallel modes
 
 ### Out of Scope
 
-1. Changes to `@ActivityBased` behavior (already covered by existing specs)
-2. Performance optimization beyond the fix
-3. Changes to rule execution ordering
+1. Changes to Phase 2 activity-based processing
+2. Changes to type-based `equivalent(source, Type)` overload
 
 ## Dependencies
 
-- `parallel-transformation` spec (existing)
 - `activity-based-greedy` spec (existing)
-- `element-resolution-cache` implementation
 
 ## Risks
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| Fix breaks parallel transformation | High | Test in both modes |
-| Performance regression | Medium | Benchmark before/after |
-| Unintended side effects | Medium | Add regression tests |
+| Fix breaks Phase 2 activation | Medium | Only affect explicit rule name calls |
+| Performance regression | Low | Lazy rules still cached normally |
 
 ## Acceptance Criteria
 
-1. `ctx.equivalent()` returns non-null for targets created by other greedy rules in the same pass
+1. `ctx.equivalent(source, "ClassType")` returns non-null when called from another greedy rule
 2. `Esm2UiExternalModelTest` passes with 208 dataElements matching
 3. All RelationType.target values are correctly set
 4. Both sequential and parallel modes produce identical results
 5. No regression in existing transformation tests
-
-## References
-
-- Related Issue: ZETA-EQ-001
-- Affected Module: judo-tatami-esm2ui
-- Related Specs: parallel-transformation, activity-based-greedy

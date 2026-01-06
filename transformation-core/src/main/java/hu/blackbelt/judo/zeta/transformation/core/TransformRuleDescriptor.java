@@ -331,50 +331,36 @@ public class TransformRuleDescriptor {
     /**
      * Check if this rule applies to the given source element.
      *
-     * <p>ETL semantics:</p>
+     * <p>ETL semantics (Epsilon ETL documentation):</p>
      * <ul>
-     *   <li><b>Non-greedy, non-lazy (default)</b>: Rule matches ONLY elements whose type is exactly
-     *       the declared sourceType. For interfaces, uses isInstance since EMF generates
-     *       implementation classes (e.g., EClassImpl for EClass interface).</li>
-     *   <li><b>Greedy (@Greedy) or Lazy (@Lazy)</b>: Rule matches elements whose type is the declared
-     *       sourceType OR any subtype (kind-of semantics). This allows @Lazy rules to be
-     *       triggered via equivalent() for any matching source element.</li>
+     *   <li><b>Non-greedy, non-lazy (default)</b>: Rule matches elements where the element's type
+     *       has a <b>type-of relationship</b> with the declared sourceType. This means the
+     *       element's type must be exactly the declared source type (not a subtype).</li>
+     *   <li><b>Greedy (@Greedy)</b>: Rule matches elements where the element's type has a
+     *       <b>kind-of relationship</b> with the declared sourceType. This means the
+     *       element's type is the source type OR any subtype. For example, GreedyRule(A) matches B
+     *       if B extends A.</li>
+     *   <li><b>Lazy (@Lazy)</b>: Uses same matching semantics as non-greedy (type-of).
+     *       Lazy rules are triggered explicitly via equivalent() calls.</li>
      * </ul>
      *
      * @param source the source element to check
      * @return true if this rule should transform the source element
      */
     public boolean appliesTo(EObject source) {
-        if (isGreedy || isLazy) {
-            // Greedy/Lazy: Kind-of semantics - matches sourceType and all subtypes
+        if (isGreedy) {
+            // Greedy: Kind-of semantics - matches sourceType and all subtypes
             return sourceType.isInstance(source);
         } else {
-            // Non-greedy: Type-of semantics - matches ONLY the exact declared type
-            // For interfaces (like EClass), we check if source implements the interface
-            // but NOT if source implements a MORE SPECIFIC subinterface
+            // Non-greedy, Lazy: Type-of semantics - matches ONLY the exact declared type
+            // For EMF interfaces (like EClass), use EMF type name matching
+            // For concrete classes, use exact Java class match
             if (sourceType.isInterface()) {
-                // Get all interfaces the source's class directly implements
-                // The source must implement sourceType but NOT a more specific subtype
-                Class<?> sourceClass = source.getClass();
-                
-                // Check if source is an instance of sourceType
-                if (!sourceType.isInstance(source)) {
-                    return false;
-                }
-                
-                // For EMF, we need to check the EClass, not the Java class
-                // EMF implementation classes (EClassImpl) implement the interface (EClass)
-                // We should match based on the EMF type, not Java inheritance
-                org.eclipse.emf.ecore.EClass sourceEClass = source.eClass();
-                
-                // Get the expected EClass name from the sourceType interface
+                // Match based on EMF EClass name, not Java class
                 String expectedTypeName = sourceType.getSimpleName();
-                String actualTypeName = sourceEClass.getName();
-                
-                // Match if the EMF type name matches exactly
+                String actualTypeName = source.eClass().getName();
                 return expectedTypeName.equals(actualTypeName);
             } else {
-                // For concrete classes, exact class match
                 return sourceType.equals(source.getClass());
             }
         }

@@ -1186,6 +1186,157 @@ class ETLSemanticsTest {
         }
     }
 
+    // ==================== Cross-Rule Target Lookup Tests ====================
+
+    @Nested
+    @DisplayName("Cross-Rule Target Lookup")
+    class CrossRuleTargetLookupTests {
+
+        /**
+         * ETL Semantics: When a greedy rule calls equivalent() with a rule name,
+         * lazy rules should execute immediately to enable cross-rule lookups.
+         */
+        @Test
+        @DisplayName("Greedy rule can find targets from lazy rules via equivalent()")
+        void greedyRuleFindsLazyRuleTargets() {
+            // Create source elements
+            EClass sourceClass = createEClass("SourceClass");
+
+            registry.register(CrossRuleLookupTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            // Both rules should have executed (tracked by CrossRuleLookupTransformation.executionCount)
+            assertEquals(2, CrossRuleLookupTransformation.executionCount.get(),
+                    "Both BaseTarget and DerivedTarget should have executed");
+            // Cross-rule lookup should have found the target
+            assertTrue(transformedNames.contains("SourceClass"),
+                    "Should have transformed SourceClass via DerivedTarget");
+        }
+
+        @Test
+        @DisplayName("Multiple greedy rules can look up same lazy rule target")
+        void multipleGreedyRulesLookupSameTarget() {
+            // Reset tracking before test
+            transformedNames.clear();
+
+            // Create two source classes
+            EClass sourceA = createEClass("ClassA");
+            EClass sourceB = createEClass("ClassB");
+
+            registry.register(MultiRuleLookupTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            // Both derived rules should have executed and found targets
+            assertTrue(transformedNames.contains("ClassA_Lookup"),
+                    "DerivedA should have found ClassA target");
+            assertTrue(transformedNames.contains("ClassB_Lookup"),
+                    "DerivedB should have found ClassB target");
+        }
+    }
+
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
+    public static class CrossRuleLookupTransformation {
+        // Track execution - must be static to be accessible from transform functions
+        static AtomicInteger executionCount = new AtomicInteger(0);
+
+        @TransformRule(name = "BaseTarget")
+        @Transform(type = EClass.class)
+        @Greedy
+        @Primary
+        @Lazy
+        public TransformFunction<EClass, EPackage> baseTarget() {
+            return (source, ctx) -> {
+                executionCount.incrementAndGet();
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setName(source.getName());
+                return pkg;
+            };
+        }
+
+        @TransformRule(name = "DerivedTarget")
+        @Transform(type = EClass.class)
+        @Greedy
+        public TransformFunction<EClass, EPackage> derivedTarget() {
+            return (source, ctx) -> {
+                // This should find the target created by BaseTarget
+                EPackage basePkg = ctx.equivalent(source, "BaseTarget");
+                if (basePkg != null) {
+                    executionCount.incrementAndGet();
+                    transformedNames.add(source.getName());
+                    // Create derived package that references base
+                    EPackage derivedPkg = ctx.createTarget(EPackage.class);
+                    derivedPkg.setName(source.getName() + "_Lookup");
+                    return derivedPkg;
+                }
+                return null;
+            };
+        }
+    }
+
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EPackage.class)
+    public static class MultiRuleLookupTransformation {
+        @TransformRule(name = "SharedTarget")
+        @Transform(type = EClass.class)
+        @Greedy
+        @Primary
+        @Lazy
+        public TransformFunction<EClass, EPackage> sharedTarget() {
+            return (source, ctx) -> {
+                EPackage pkg = ctx.createTarget(EPackage.class);
+                pkg.setName("Shared_" + source.getName());
+                return pkg;
+            };
+        }
+
+        @TransformRule(name = "DerivedA")
+        @Transform(type = EClass.class)
+        @Greedy
+        public TransformFunction<EClass, EPackage> derivedA() {
+            return (source, ctx) -> {
+                EPackage shared = ctx.equivalent(source, "SharedTarget");
+                if (shared != null) {
+                    transformedNames.add(source.getName() + "_Lookup");
+                    EPackage pkg = ctx.createTarget(EPackage.class);
+                    pkg.setName("DerivedA_" + source.getName());
+                    return pkg;
+                }
+                return null;
+            };
+        }
+
+        @TransformRule(name = "DerivedB")
+        @Transform(type = EClass.class)
+        @Greedy
+        public TransformFunction<EClass, EPackage> derivedB() {
+            return (source, ctx) -> {
+                EPackage shared = ctx.equivalent(source, "SharedTarget");
+                if (shared != null) {
+                    transformedNames.add(source.getName() + "_Lookup");
+                    EPackage pkg = ctx.createTarget(EPackage.class);
+                    pkg.setName("DerivedB_" + source.getName());
+                    return pkg;
+                }
+                return null;
+            };
+        }
+    }
+
     /**
      * Simple ModelProvider implementation for tests.
      */
