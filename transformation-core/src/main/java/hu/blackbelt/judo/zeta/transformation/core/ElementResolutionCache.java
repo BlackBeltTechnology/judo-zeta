@@ -34,88 +34,204 @@ import java.util.function.Supplier;
  *
  * <p>Provides idempotent transformation guarantees by caching results.
  * Multiple calls with the same source and rule return the same cached target.</p>
+ *
+ * <p>Supports both parallel and sequential execution modes. In sequential mode,
+ * locking is skipped entirely for maximum performance.</p>
  */
 public class ElementResolutionCache {
 
+    /**
+     * Sequential mode flag. When true, all locking is bypassed for better performance.
+     */
+    private final boolean sequentialMode;
+
     // Map: source element → rule name → target instance
-    private final Map<EObject, Map<String, EObject>> ruleCache = new ConcurrentHashMap<>();
+    // Uses IdentityHashMap in sequential mode for faster lookups
+    private final Map<EObject, Map<String, EObject>> ruleCache;
 
     // Map: source element → target type name → target instances (for equivalents())
-    private final Map<EObject, Map<String, List<EObject>>> typeCache = new ConcurrentHashMap<>();
+    private final Map<EObject, Map<String, List<EObject>>> typeCache;
 
     // Primary targets tracked separately for efficient equivalent() lookup
-    private final Map<EObject, Map<String, EObject>> primaryCache = new ConcurrentHashMap<>();
+    private final Map<EObject, Map<String, EObject>> primaryCache;
 
     // Discriminated cache: source → rule name → discriminator → instance
-    private final Map<EObject, Map<String, Map<String, EObject>>> discriminatedCache = new ConcurrentHashMap<>();
+    private final Map<EObject, Map<String, Map<String, EObject>>> discriminatedCache;
 
     /**
-     * Per-key locks for atomic getOrCreate operations.
-     *
-     * <p>Uses a ConcurrentHashMap to store locks for each (source, ruleName) pair.
-     * This eliminates "artificial" deadlocks caused by hash collisions in lock striping,
-     * where unrelated keys happen to map to the same lock stripe.</p>
-     *
-     * <p>Memory overhead: Each ReentrantLock is small (~32 bytes). Even with 1 million
-     * unique (source, rule) pairs, the overhead is ~40MB, which is acceptable for
-     * the correctness guarantee.</p>
+     * Per-key locks for atomic getOrCreate operations (parallel mode only).
      */
-    private final Map<CacheKey, ReentrantLock> ruleLocks = new ConcurrentHashMap<>();
-
-    // Track rejected (source, ruleName) pairs to avoid re-evaluating guards
-    private final Set<CacheKey> rejectedKeys = ConcurrentHashMap.newKeySet();
-
-    public ElementResolutionCache() {
-        // No initialization needed for ruleLocks
-    }
+    private final Map<IdentityWrapper, Map<String, ReentrantLock>> ruleLocks;
 
     /**
-     * Get the lock for a given (source, ruleName) pair.
-     *
-     * @param source the source element
-     * @param ruleName the rule name
-     * @return the unique lock for this key
+     * Track rejected (source, ruleName) pairs to avoid re-evaluating guards.
+     * Uses IdentityHashMap in sequential mode.
      */
-    public ReentrantLock getLockFor(EObject source, String ruleName) {
-        CacheKey key = new CacheKey(source, ruleName);
-        return ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
-    }
+    private final Map<EObject, Set<String>> rejectedKeysSequential;
+    private final Map<IdentityWrapper, Set<String>> rejectedKeysParallel;
 
     /**
-     * Key for per-element locking using (source identity, ruleName) pair.
-     *
-     * <p>Uses System.identityHashCode for source to ensure consistency
-     * even if the source element's equals/hashCode are overridden.</p>
+     * Wrapper for EObject that uses identity-based hashCode and equals.
+     * Only used in parallel mode.
      */
-    private static class CacheKey {
-        private final int sourceIdentity;
-        private final String ruleName;
+    private static final class IdentityWrapper {
+        private final EObject object;
+        private final int hash;
 
-        CacheKey(EObject source, String ruleName) {
-            this.sourceIdentity = System.identityHashCode(source);
-            this.ruleName = ruleName;
+        IdentityWrapper(EObject object) {
+            this.object = object;
+            this.hash = System.identityHashCode(object);
         }
 
         @Override
         public boolean equals(Object o) {
             if (this == o) return true;
-            if (o == null || getClass() != o.getClass()) return false;
-            CacheKey cacheKey = (CacheKey) o;
-            return sourceIdentity == cacheKey.sourceIdentity &&
-                    Objects.equals(ruleName, cacheKey.ruleName);
+            if (!(o instanceof IdentityWrapper)) return false;
+            return object == ((IdentityWrapper) o).object;
         }
 
         @Override
         public int hashCode() {
-            return Objects.hash(sourceIdentity, ruleName);
+            return hash;
+        }
+    }
+
+    /**
+     * Create cache for parallel execution (default, backward compatible).
+     */
+    public ElementResolutionCache() {
+        this(false);
+    }
+
+    /**
+     * Create cache with specified execution mode.
+     *
+     * @param sequentialMode true for sequential execution (no locking),
+     *                       false for parallel execution (with locking)
+     */
+    public ElementResolutionCache(boolean sequentialMode) {
+        this.sequentialMode = sequentialMode;
+
+        if (sequentialMode) {
+            // Sequential mode: use IdentityHashMap for O(1) identity lookups, no locking needed
+            this.ruleCache = new IdentityHashMap<>();
+            this.typeCache = new IdentityHashMap<>();
+            this.primaryCache = new IdentityHashMap<>();
+            this.discriminatedCache = new IdentityHashMap<>();
+            this.rejectedKeysSequential = new IdentityHashMap<>();
+            this.rejectedKeysParallel = null;
+            this.ruleLocks = null;
+        } else {
+            // Parallel mode: use ConcurrentHashMap for thread safety
+            this.ruleCache = new ConcurrentHashMap<>();
+            this.typeCache = new ConcurrentHashMap<>();
+            this.primaryCache = new ConcurrentHashMap<>();
+            this.discriminatedCache = new ConcurrentHashMap<>();
+            this.rejectedKeysSequential = null;
+            this.rejectedKeysParallel = new ConcurrentHashMap<>();
+            this.ruleLocks = new ConcurrentHashMap<>();
+        }
+    }
+
+    /**
+     * A no-op lock that always succeeds immediately.
+     * Used in sequential mode to avoid null checks in all lock usages.
+     */
+    private static final ReentrantLock NO_OP_LOCK = new ReentrantLock() {
+        @Override
+        public void lock() {
+            // No-op in sequential mode
+        }
+
+        @Override
+        public void unlock() {
+            // No-op in sequential mode
+        }
+
+        @Override
+        public boolean tryLock() {
+            return true;  // Always succeeds
+        }
+
+        @Override
+        public boolean tryLock(long timeout, java.util.concurrent.TimeUnit unit) {
+            return true;  // Always succeeds
+        }
+
+        @Override
+        public void lockInterruptibly() {
+            // No-op in sequential mode
+        }
+    };
+
+    /**
+     * Check if the cache is in sequential (non-parallel) mode.
+     *
+     * @return true if sequential mode is enabled
+     */
+    public boolean isSequentialMode() {
+        return sequentialMode;
+    }
+
+    /**
+     * Get the lock for a given (source, ruleName) pair.
+     *
+     * <p>In sequential mode, returns a no-op lock that always succeeds immediately,
+     * avoiding the need for null checks in all lock usages.</p>
+     *
+     * @param source the source element
+     * @param ruleName the rule name
+     * @return the unique lock for this key (never null)
+     */
+    public ReentrantLock getLockFor(EObject source, String ruleName) {
+        if (sequentialMode) {
+            return NO_OP_LOCK;  // No-op lock for sequential mode
+        }
+        IdentityWrapper key = new IdentityWrapper(source);
+        Map<String, ReentrantLock> ruleMap = ruleLocks.computeIfAbsent(key, k -> new ConcurrentHashMap<>());
+        return ruleMap.computeIfAbsent(ruleName, k -> new ReentrantLock());
+    }
+
+    /**
+     * Check if a (source, ruleName) pair has been rejected.
+     *
+     * @param source the source element
+     * @param ruleName the rule name
+     * @return true if previously rejected
+     */
+    private boolean isRejected(EObject source, String ruleName) {
+        if (sequentialMode) {
+            Set<String> rejected = rejectedKeysSequential.get(source);
+            return rejected != null && rejected.contains(ruleName);
+        } else {
+            IdentityWrapper key = new IdentityWrapper(source);
+            Set<String> rejected = rejectedKeysParallel.get(key);
+            return rejected != null && rejected.contains(ruleName);
+        }
+    }
+
+    /**
+     * Mark a (source, ruleName) pair as rejected.
+     *
+     * @param source the source element
+     * @param ruleName the rule name
+     */
+    private void markRejected(EObject source, String ruleName) {
+        if (sequentialMode) {
+            rejectedKeysSequential.computeIfAbsent(source, k -> new HashSet<>())
+                    .add(ruleName);
+        } else {
+            IdentityWrapper key = new IdentityWrapper(source);
+            rejectedKeysParallel.computeIfAbsent(key, k -> ConcurrentHashMap.newKeySet())
+                    .add(ruleName);
         }
     }
 
     /**
      * Add a mapping from source to target.
      *
-     * <p>Thread-safe: Uses CopyOnWriteArrayList for the type cache lists to allow
-     * concurrent iteration during parallel transformation while adding new mappings.</p>
+     * <p>In parallel mode, uses thread-safe collections. In sequential mode,
+     * uses simple HashMap/ArrayList for better performance.</p>
      *
      * @param source the source element
      * @param ruleName the transformation rule name
@@ -129,27 +245,37 @@ public class ElementResolutionCache {
             T target,
             boolean isPrimary
     ) {
-        // ConcurrentHashMap doesn't allow null keys or values - skip if any are null
         if (source == null || ruleName == null || target == null) {
             return;
         }
         String targetTypeName = target.eClass().getName();
 
-        // Add to rule cache (for idempotent equivalent() calls)
-        ruleCache.computeIfAbsent(source, k -> new ConcurrentHashMap<>())
-                .put(ruleName, target);
+        if (sequentialMode) {
+            // Sequential mode: use simple HashMap/ArrayList
+            ruleCache.computeIfAbsent(source, k -> new HashMap<>())
+                    .put(ruleName, target);
 
-        // Add to type cache (for equivalents() by type)
-        // Use CopyOnWriteArrayList for thread-safe iteration during parallel transformation
-        typeCache.computeIfAbsent(source, k -> new ConcurrentHashMap<>())
-                .computeIfAbsent(targetTypeName, k -> new CopyOnWriteArrayList<>())
-                .add(target);
+            typeCache.computeIfAbsent(source, k -> new HashMap<>())
+                    .computeIfAbsent(targetTypeName, k -> new ArrayList<>())
+                    .add(target);
 
-        // Add to primary cache if marked
-        // ConcurrentHashMap provides thread safety for single operations
-        if (isPrimary) {
-            primaryCache.computeIfAbsent(source, k -> new ConcurrentHashMap<>())
-                    .put(targetTypeName, target);
+            if (isPrimary) {
+                primaryCache.computeIfAbsent(source, k -> new HashMap<>())
+                        .put(targetTypeName, target);
+            }
+        } else {
+            // Parallel mode: use thread-safe collections
+            ruleCache.computeIfAbsent(source, k -> new ConcurrentHashMap<>())
+                    .put(ruleName, target);
+
+            typeCache.computeIfAbsent(source, k -> new ConcurrentHashMap<>())
+                    .computeIfAbsent(targetTypeName, k -> new CopyOnWriteArrayList<>())
+                    .add(target);
+
+            if (isPrimary) {
+                primaryCache.computeIfAbsent(source, k -> new ConcurrentHashMap<>())
+                        .put(targetTypeName, target);
+            }
         }
     }
 
@@ -175,23 +301,14 @@ public class ElementResolutionCache {
     }
 
     /**
-     * Atomic get-or-create operation with lock striping.
+     * Atomic get-or-create operation.
      *
-     * <p>This method provides atomic check-and-execute semantics for parallel
-     * transformation. The lock covers the full execution: cache lookup, guard
-     * evaluation, and rule execution. This prevents race conditions where
-     * multiple threads could create duplicate target elements for the same source.</p>
-     *
-     * <p>The supplier is only invoked on cache miss. If the supplier returns null
-     * (e.g., guard rejected), no mapping is added.</p>
-     *
-     * <p>Thread-safe: Uses lock striping with 1024 stripes to allow different
-     * sources and rules to execute in parallel without blocking, while using
-     * fixed memory (no per-key lock allocation).</p>
+     * <p>In parallel mode, uses locking for thread safety. In sequential mode,
+     * bypasses all locking for maximum performance.</p>
      *
      * @param source the source element
      * @param ruleName the transformation rule name
-     * @param ruleExecutor supplier that executes the rule (called under lock)
+     * @param ruleExecutor supplier that executes the rule
      * @param isPrimary whether this is a primary transformation
      * @param <T> the target type
      * @return the cached or newly created target, or null if supplier returns null
@@ -207,40 +324,47 @@ public class ElementResolutionCache {
             return null;
         }
 
-        // Fast path: check cache without locking
-        CacheKey key = new CacheKey(source, ruleName);
-
-        // Check if previously rejected (guard returned null)
-        if (rejectedKeys.contains(key)) {
-            return null;
-        }
-
+        // FAST PATH: Check rule cache FIRST
         T cached = getByRule(source, ruleName);
         if (cached != null) {
             return cached;
         }
 
-        // Acquire striped lock for atomic check-and-execute
+        // Check rejection cache
+        if (isRejected(source, ruleName)) {
+            return null;
+        }
+
+        if (sequentialMode) {
+            // SEQUENTIAL MODE: No locking needed, execute directly
+            T target = ruleExecutor.get();
+            if (target != null) {
+                addMapping(source, ruleName, target, isPrimary);
+            } else {
+                markRejected(source, ruleName);
+            }
+            return target;
+        }
+
+        // PARALLEL MODE: Use locking for thread safety
         ReentrantLock lock = getLockFor(source, ruleName);
         lock.lock();
         try {
-            // Double-check after acquiring lock (another thread may have completed)
-            if (rejectedKeys.contains(key)) {
-                return null;
-            }
-
+            // Double-check after acquiring lock
             cached = getByRule(source, ruleName);
             if (cached != null) {
                 return cached;
             }
 
-            // Execute rule under lock (includes guard evaluation)
+            if (isRejected(source, ruleName)) {
+                return null;
+            }
+
             T target = ruleExecutor.get();
             if (target != null) {
                 addMapping(source, ruleName, target, isPrimary);
             } else {
-                // Cache the rejection to prevent redundant guard evaluation
-                rejectedKeys.add(key);
+                markRejected(source, ruleName);
             }
             return target;
         } finally {
@@ -361,14 +485,20 @@ public class ElementResolutionCache {
             String ruleName,
             String discriminator
     ) {
-        // ConcurrentHashMap doesn't allow null keys or values - skip if any are null
         if (source == null || target == null || ruleName == null || discriminator == null) {
             return;
         }
-        discriminatedCache
-                .computeIfAbsent(source, k -> new ConcurrentHashMap<>())
-                .computeIfAbsent(ruleName, k -> new ConcurrentHashMap<>())
-                .put(discriminator, target);
+        if (sequentialMode) {
+            discriminatedCache
+                    .computeIfAbsent(source, k -> new HashMap<>())
+                    .computeIfAbsent(ruleName, k -> new HashMap<>())
+                    .put(discriminator, target);
+        } else {
+            discriminatedCache
+                    .computeIfAbsent(source, k -> new ConcurrentHashMap<>())
+                    .computeIfAbsent(ruleName, k -> new ConcurrentHashMap<>())
+                    .put(discriminator, target);
+        }
     }
 
     /**
@@ -533,8 +663,12 @@ public class ElementResolutionCache {
         typeCache.clear();
         primaryCache.clear();
         discriminatedCache.clear();
-        rejectedKeys.clear();
-        ruleLocks.clear();
+        if (sequentialMode) {
+            rejectedKeysSequential.clear();
+        } else {
+            rejectedKeysParallel.clear();
+            ruleLocks.clear();
+        }
     }
 
     /**
@@ -545,7 +679,11 @@ public class ElementResolutionCache {
      * keep element mappings while clearing rejection tracking.</p>
      */
     public void clearRejections() {
-        rejectedKeys.clear();
+        if (sequentialMode) {
+            rejectedKeysSequential.clear();
+        } else {
+            rejectedKeysParallel.clear();
+        }
     }
 
     /**

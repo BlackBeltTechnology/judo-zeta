@@ -98,26 +98,11 @@ Targets MUST be findable via XMI ID lookup even if their IDs are generated after
 
 ---
 
-## MODIFIED Requirements
+### Requirement: XMI ID Lookup Includes Greedy Rules
 
-### Requirement: XMI ID Lookup for All Rule Types (parallel-transformation spec)
+The `equivalent()` method SHALL check XMI ID lookup for ALL rule types, including greedy rules with @Primary annotation. This extends the existing XMI ID lookup behavior to ensure greedy rule targets are findable.
 
-The `equivalent()` method SHALL check XMI ID lookup for ALL rule types (eager, lazy, and greedy), not just lazy rules. Targets created by any rule type MUST be findable via XMI ID lookup by subsequent `equivalent()` calls.
-
-#### Original Text:
-
-> The `equivalent()` method MUST check XMI ID lookup for ALL rule types (eager and lazy), not just lazy rules.
-
-#### Clarified Text:
-
-The `equivalent()` method SHALL check XMI ID lookup for ALL rule types, including:
-- Lazy rules (as originally specified)
-- Eager rules (explicitly clarified)
-- Greedy rules with @Primary (explicitly clarified)
-
-Targets created by any rule type MUST be findable via XMI ID lookup by subsequent `equivalent()` calls, regardless of whether the creating rule has already completed or is currently executing.
-
-#### Scenario: Eager greedy rule target found via XMI ID (NEW)
+#### Scenario: Eager greedy rule target found via XMI ID
 
 **Given** RuleA with `@Greedy @Primary @Lazy` creates ClassType targets
 **And** RuleB with `@Greedy` calls `ctx.equivalent(source.getTarget(), CLASS_TYPE)`
@@ -125,7 +110,7 @@ Targets created by any rule type MUST be findable via XMI ID lookup by subsequen
 **Then** XMI ID lookup finds the ClassType target
 **And** the target is returned (not null)
 
-#### Scenario: Eager target found before rule completion (NEW)
+#### Scenario: Eager target found before rule completion
 
 **Given** RuleA and RuleB are both @Greedy eager rules
 **And** RuleA creates target for element E1
@@ -133,3 +118,56 @@ Targets created by any rule type MUST be findable via XMI ID lookup by subsequen
 **When** RuleB calls equivalent() after RuleA has started but before RuleA completes
 **Then** once RuleA completes, the target is findable
 **And** RuleB receives the correct target
+
+---
+
+### Requirement: Cross-Source-Type Lazy Rule Invocation (JNG-6349)
+
+When `ctx.equivalent(source, "RuleName")` is called with a source object of type A to invoke a rule declared for source type B, the rule MUST execute if the source is an instance of type B. The rule lookup SHALL be global across all registered transformation classes.
+
+#### Scenario: Cross-source-type equivalent() call succeeds
+
+**Given** TransformationClassA with source type `RelationFeature`
+**And** TransformationClassB with `@Lazy @Greedy` rule "RuleB" for source type `TransferObjectTable`
+**And** Both transformation classes are registered
+**When** A rule in TransformationClassA calls `ctx.equivalent(table, "RuleB")`
+**Where** `table` is a `TransferObjectTable` instance
+**Then** RuleB executes immediately
+**And** The created target is returned (not null)
+**And** The target is cached for subsequent calls
+
+#### Scenario: Cross-source-type lookup is registration order independent
+
+**Given** TransformationClassA registered BEFORE TransformationClassB
+**And** TransformationClassA's rule calls `ctx.equivalent(source, "RuleBFromClassB")`
+**When** The transformation executes
+**Then** The equivalent() call succeeds (not null)
+**And** Same result occurs if registration order is reversed
+
+#### Scenario: Cross-source-type lookup with @Greedy rule
+
+**Given** RuleA in ClassA has `@Greedy` on source type A
+**And** RuleB in ClassB has `@Lazy @Greedy` on source type B
+**And** RuleA calls `ctx.equivalent(instanceOfB, "RuleB")`
+**When** RuleA executes during greedy pass
+**And** ClassB's greedy pass has NOT yet started
+**Then** RuleB executes immediately via `executeLazyRuleImmediately()`
+**And** The target is returned (not null)
+**And** RuleB is NOT re-executed when ClassB's greedy pass runs
+
+#### Scenario: appliesTo() check passes for valid cross-type source
+
+**Given** RuleB declared with source type B
+**And** RuleB has `@Greedy` annotation
+**And** `instanceOfB` is an instance of type B
+**When** `rule.appliesTo(instanceOfB)` is called
+**Then** Returns true (not false)
+**And** `executeLazyRuleImmediately()` proceeds to execute the rule
+
+#### Scenario: Global rule registry lookup
+
+**Given** Multiple transformation classes with different source types
+**And** Each class has rules with unique names
+**When** `ctx.equivalent(source, "SomeRuleName")` is called
+**Then** The rule is found in the global registry (not scoped to current transformation class)
+**And** The rule executes if `appliesTo(source)` returns true

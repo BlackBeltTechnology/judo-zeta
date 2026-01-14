@@ -116,6 +116,12 @@ public class TransformationExecutor {
         this.parallelThreshold = builder.parallelThreshold;
         this.chunkSize = builder.chunkSize;
         this.etlCompatibilityMode = builder.etlCompatibilityMode;
+
+        // Configure cache for sequential mode if parallel is disabled
+        // This provides significant performance improvement by using simpler data structures
+        if (!this.parallel) {
+            this.context.configureSequentialMode(true);
+        }
     }
 
     /**

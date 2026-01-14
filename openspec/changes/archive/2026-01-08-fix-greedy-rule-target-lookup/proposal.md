@@ -137,3 +137,59 @@ if (isEffectivelyActivityBased(rule)) {
 3. All RelationType.target values are correctly set
 4. Both sequential and parallel modes produce identical results
 5. No regression in existing transformation tests
+
+---
+
+## Extended Scope: Cross-Source-Type Lazy Rule Invocation (JNG-6349)
+
+### Problem Statement
+
+After the initial fix (Phases 1-4) was implemented, a related but distinct bug was discovered:
+
+`ctx.equivalent(source, "RuleName")` returns `null` when:
+1. The calling rule has source type A (e.g., `RelationFeature`)
+2. The target rule has source type B (e.g., `TransferObjectTable`) - **different type!**
+3. The target rule has `@Lazy @Greedy` annotations
+4. The target rule's `@Greedy` pass hasn't executed yet
+
+### Difference from Initial Fix
+
+The initial fix (Phases 1-4) addressed the **same-source-type** scenario:
+- `ClassType` rule: `@Greedy @Lazy @Primary` on `EClass`
+- `RelationType` rule: `@Greedy` on `EReference`
+- Both rules are in the **same transformation hierarchy** (Ecore types)
+- Test: `GreedyLazyCrossRuleLookupTest.java` - **PASSES**
+
+The new issue is **cross-source-type**:
+- Rule A: source type `RelationFeature`
+- Rule B: source type `TransferObjectTable` (completely different metamodel type)
+- Rules are in **different transformation classes** with different `@TransformationContext`
+
+### Debug Evidence
+
+```
+18:49:51.083 [main] INFO  RelationFeatureTableAddSelectorTransformations -
+    Looking up ActionDefinition for table=Entity4Table (id=_Q87XXOvxEfCwMo6V1TZ9oA)
+18:49:51.083 [main] INFO  RelationFeatureTableAddSelectorTransformations -
+    ActionDefinition lookup result=null
+
+# LATER - After all RelationFeature processing is complete:
+
+18:50:13.838 [main] INFO  TransferObjectTableTransformations -
+    TransferObjectTableAddSelectorAddActionDefinition: INVOKED for source=Entity2Table
+```
+
+### Hypothesis
+
+The fix `executeLazyRuleImmediately()` is being called but returning `null` because one of:
+
+1. **`appliesTo()` returns false** - EMF type matching issue between packages
+2. **Guard evaluation fails** - Guard rejects cross-type sources
+3. **Cache key mismatch** - Cache lookup fails for cross-type scenario
+
+### Extended Acceptance Criteria
+
+6. `ctx.equivalent(source, "RuleName")` returns non-null for **cross-source-type** lookups
+7. Registration order independence - result is same regardless of transformation class registration order
+8. `Esm2UiBenchmarkTest.benchmarkTransformations()` passes with no null `actionDefinition` values
+9. 40+ `RelationFeatureTableAddSelectorAddAction` elements have valid targets

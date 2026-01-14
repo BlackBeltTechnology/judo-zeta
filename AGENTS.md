@@ -1,3 +1,22 @@
+<!-- OPENSPEC:START -->
+# OpenSpec Instructions
+
+These instructions are for AI assistants working in this project.
+
+Always open `@/openspec/AGENTS.md` when the request:
+- Mentions planning or proposals (words like proposal, spec, change, plan)
+- Introduces new capabilities, breaking changes, architecture shifts, or big performance/security work
+- Sounds ambiguous and you need the authoritative spec before coding
+
+Use `@/openspec/AGENTS.md` to learn:
+- How to create and apply change proposals
+- Spec format and conventions
+- Project structure and guidelines
+
+Keep this managed block so 'openspec update' can refresh the instructions.
+
+<!-- OPENSPEC:END -->
+
 # Judo Zeta Validation Framework Documentation
 
 ## Project Overview
@@ -19,6 +38,19 @@ This is a **lightweight, standalone validation framework for EMF metamodels**. I
 - Extension methods for custom helper functions
 - Pre/post-validation hooks
 - Both OSGi and standalone deployment
+## Coding principles
+
+1. First think through the problem, read the codebase for relevant files.
+2. Before you make any major changes, check in with me and I will verify the plan.
+3. Please every step of the way just give me a high level explanation of what changes you made
+4. Make every task and code change you do as simple as possible. We want to avoid making any massive or complex changes. Every change should impact as little code as possible. Everything is about simplicity.
+5. Maintain a documentation file that describes how the architecture of the app works inside and out.
+6. Never speculate about code you have not opened. If the user references a specific file, you MUST read the file before answering. Make sure to investigate and read relevant files BEFORE answering questions about the codebase. Never make any claims about code before investigating unless you are certain of the correct answer - give grounded and hallucination-free answers.
+7. Use clear and concise variable names
+8. Follow the Java naming conventions
+9. Write modular and reusable code, smaller is better. Avoid to cerate large file, except for the given type of 
+definition it is the best practice.
+10. Use Javadoc comments for public methods and classes
 
 ## Project Structure
 

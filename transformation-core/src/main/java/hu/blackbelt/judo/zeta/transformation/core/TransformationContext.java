@@ -65,7 +65,7 @@ public class TransformationContext {
     private final ResourceSet sourceResourceSet;
     private final ResourceSet targetResourceSet;
     private final ExtensionMethodRegistry extensionRegistry;
-    private final ElementResolutionCache resolutionCache;
+    private ElementResolutionCache resolutionCache;
 
     /**
      * Custom attributes map.
@@ -398,7 +398,7 @@ public class TransformationContext {
         this.sourceResourceSet = sourceResourceSet;
         this.targetResourceSet = targetResourceSet;
         this.extensionRegistry = extensionRegistry;
-        this.resolutionCache = new ElementResolutionCache();
+        this.resolutionCache = new ElementResolutionCache();  // Default to parallel mode
         this.attributes = new ConcurrentHashMap<>();
 
         // Register default aliases
@@ -919,6 +919,28 @@ public class TransformationContext {
      */
     public ElementResolutionCache getElementResolutionCache() {
         return resolutionCache;
+    }
+
+    /**
+     * Configure the cache for sequential (non-parallel) execution.
+     *
+     * <p>In sequential mode, the cache uses simpler data structures (HashMap, ArrayList)
+     * instead of thread-safe collections (ConcurrentHashMap, CopyOnWriteArrayList),
+     * and bypasses all locking. This provides significant performance improvement
+     * when parallel execution is not needed.</p>
+     *
+     * <p>This method should be called before transformation begins. If the cache
+     * already exists with the requested mode, it is preserved to maintain existing
+     * mappings (important when multiple executors share the same context).</p>
+     *
+     * @param sequential true for sequential mode, false for parallel mode
+     */
+    public void configureSequentialMode(boolean sequential) {
+        // Only create a new cache if the mode is different from current mode
+        // This preserves existing mappings when multiple executors share the same context
+        if (this.resolutionCache == null || this.resolutionCache.isSequentialMode() != sequential) {
+            this.resolutionCache = new ElementResolutionCache(sequential);
+        }
     }
 
     /**
