@@ -752,6 +752,287 @@ The cache MUST support optional pre-allocation of inner maps for known source el
 **Then** inner maps are allocated on demand (backward compatible)
 **And** the transformation produces correct results
 
+### Requirement: Automatic Proxy Unwrapping After Commit
+
+After the commit phase completes in parallel transformation, all deferred proxy objects MUST be replaced with their underlying EMF delegates throughout the model.
+
+#### Scenario: Containment reference proxies are unwrapped
+
+**Given** parallel transformation has completed
+**And** elements were added to containment references (e.g., `getEOperations()`)
+**When** the commit phase finishes
+**Then** all containment references contain real EMF objects (e.g., `EOperationImpl`)
+**And** no proxy objects (`$ProxyN`) remain in containment collections
+**And** iterating `getEAllOperations()` returns castable implementation types
+
+#### Scenario: Non-containment reference proxies are unwrapped
+
+**Given** parallel transformation has completed
+**And** proxy objects were set as non-containment references
+**When** the commit phase finishes
+**Then** all non-containment references point to real EMF objects
+**And** no proxy objects remain in reference values
+**And** casting to implementation types succeeds
+
+#### Scenario: Nested containment proxies are unwrapped
+
+**Given** parallel transformation has completed
+**And** proxies exist in deeply nested containment hierarchies
+**When** the commit phase finishes
+**Then** the model is recursively traversed
+**And** all nested proxy references are replaced with delegates
+**And** no proxies remain at any nesting level
+
+#### Scenario: Model is usable by EMF internal operations
+
+**Given** parallel transformation has completed
+**And** the commit phase has finished
+**When** EMF internal operations access the model (e.g., `EClassImpl.getEAllOperations()`)
+**Then** all elements are real EMF objects
+**And** no ClassCastException occurs
+**And** EMF reflection APIs work correctly
+
+---
+
+### Requirement: Proxy Unwrap Metrics
+
+Proxy unwrapping duration MUST be tracked in transformation metrics when metrics are enabled.
+
+#### Scenario: Unwrap duration is measured
+
+**Given** transformation metrics are enabled
+**And** parallel transformation completes
+**When** proxy unwrapping occurs
+**Then** the unwrap duration is recorded in metrics
+**And** the count of unwrapped proxies is available
+
+### Requirement: Source-Level Locking for Eager Rule Execution
+
+When executing eager (non-lazy) rules for a source element in parallel mode, all rules for that source element MUST execute under a single source-level lock to prevent deadlocks.
+
+#### Scenario: Same-source greedy rules execute sequentially
+
+**Given** parallel transformation is in progress
+**And** source element X has multiple matching eager rules (Rule A, Rule B, Rule C)
+**And** Rule B calls `ctx.equivalent(X, TypeA.class)` to look up Rule A's target
+**When** the executor processes source X
+**Then** all rules for source X execute under the same source lock
+**And** Rule A completes before Rule B begins (or vice versa based on order)
+**And** when Rule B calls `equivalent(X, TypeA)`, the target is found in cache
+**And** no deadlock occurs
+
+#### Scenario: Different sources execute in parallel
+
+**Given** parallel transformation is in progress
+**And** source elements X and Y each have multiple matching eager rules
+**When** the executor processes sources X and Y
+**Then** rules for X execute under lock(X)
+**And** rules for Y execute under lock(Y)
+**And** X and Y processing can occur in parallel (different threads)
+**And** source-level locking does not serialize unrelated sources
+
+#### Scenario: ReentrantLock allows same-thread nested access
+
+**Given** Thread T holds the source lock for element X
+**And** Rule A is executing for source X
+**When** Rule A calls `ctx.equivalent(X, TypeB.class)`
+**And** TypeB requires executing Rule B (not yet cached)
+**Then** the same thread can acquire the source lock again (reentrant)
+**And** Rule B executes within the same thread
+**And** Rule B's result is cached
+**And** Rule A receives the result and continues
+
+#### Scenario: Cross-source equivalent calls wait correctly
+
+**Given** Thread T1 holds source lock for X and executes Rule A(X)
+**And** Thread T2 holds source lock for Y and executes Rule B(Y)
+**When** Rule A(X) calls `ctx.equivalent(Y, TypeC.class)`
+**Then** Thread T1 waits for Thread T2 to release lock(Y)
+**And** once Y's rules complete, Thread T1 can access Y's cached results
+**And** this is not a deadlock (unidirectional wait)
+
+#### Scenario: Circular cross-source dependencies detected
+
+**Given** Rule A for source X calls `ctx.equivalent(Y, TypeB.class)`
+**And** Rule B for source Y calls `ctx.equivalent(X, TypeA.class)`
+**When** Thread T1 (processing X) and Thread T2 (processing Y) execute concurrently
+**And** T1 holds lock(X) and waits for lock(Y)
+**And** T2 holds lock(Y) and waits for lock(X)
+**Then** this is a circular dependency deadlock
+**And** it is detected via 30-second lock timeout
+**And** a descriptive error is thrown indicating circular dependency
+
+---
+
+### Requirement: Source Lock Timeout
+
+Source lock acquisition MUST use a timeout to detect potential deadlocks from circular cross-source dependencies.
+
+#### Scenario: Lock acquisition times out after 30 seconds
+
+**Given** Thread T attempts to acquire source lock for element X
+**And** another thread holds the lock and does not release within 30 seconds
+**When** the timeout expires
+**Then** a RuntimeException is thrown
+**And** the message indicates potential circular dependency
+**And** the message includes the source element type for debugging
+
+#### Scenario: Normal lock acquisition succeeds
+
+**Given** source lock for element X is available
+**When** a thread attempts to acquire the lock
+**Then** acquisition succeeds immediately
+**And** no timeout occurs
+
+---
+
+### Requirement: Source Lock Cleanup
+
+Source locks MUST be cleaned up between transformations to prevent memory leaks.
+
+#### Scenario: Source locks cleared on executor reset
+
+**Given** a TransformationExecutor has processed a transformation
+**And** source locks exist for elements X, Y, Z
+**When** a new transformation starts
+**Then** all source locks from the previous transformation are cleared
+**And** new source locks are created as needed for the new transformation
+
+#### Scenario: No memory leak for long-lived executors
+
+**Given** a TransformationExecutor is reused for multiple transformations
+**When** each transformation completes
+**Then** source locks from completed transformations are cleared
+**And** memory usage does not grow unbounded
+
+### Requirement: Proxy Values Unwrapped Before EMF Operations
+
+The deferred writes infrastructure MUST unwrap proxy values at queue time, not at apply time, to ensure EMF's internal mechanisms receive real EObject instances.
+
+#### Scenario: Reference value unwrapped before queueing
+
+**Given** deferred writes mode is enabled
+**And** a transformation rule sets a reference: `target.setRef(proxyValue)`
+**When** the operation is queued via `DeferredEObject.handleSet()`
+**Then** the proxy value is unwrapped to its delegate before storing in `SetReferenceOp`
+**And** the operation contains only real EObject instances
+**And** `pendingValues` may still store the proxy for read-after-write consistency
+
+#### Scenario: List element unwrapped before queueing
+
+**Given** deferred writes mode is enabled
+**And** a transformation rule adds to a list: `target.getList().add(proxyElement)`
+**When** the operation is queued via `DeferredEList.add()`
+**Then** the proxy element is unwrapped before storing in `AddToListOp`
+**And** EMF never sees proxy instances during list modification
+
+#### Scenario: Bidirectional references work correctly
+
+**Given** EMF model with bidirectional references `A.refToB` ↔ `B.refToA`
+**And** deferred writes mode is enabled
+**When** a rule sets `a.refToB = b` (where both may be proxies)
+**And** the deferred operation is committed
+**Then** EMF's inverse handling receives real EObject instances
+**And** `b.refToA` is automatically set to real `a` (not proxy)
+**And** EMF validation passes with no "opposite features do not refer to each other" errors
+
+---
+
+### Requirement: EMF Inverse Handling Compatibility
+
+Deferred operations MUST be compatible with EMF's `eInverseAdd`/`eInverseRemove` mechanism for bidirectional references.
+
+#### Scenario: Inverse set during commit
+
+**Given** a `SetReferenceOp` for a bidirectional reference feature
+**When** `apply()` calls `target.eSet(feature, value)`
+**Then** EMF's generated setter invokes `value.eInverseAdd(target, ...)`
+**And** both `target` and `value` are real EObject instances (not proxies)
+**And** the inverse reference is correctly established
+
+#### Scenario: No EMF validation errors after parallel transformation
+
+**Given** a parallel transformation with bidirectional references
+**When** transformation completes and EMF validation runs
+**Then** no "opposite features do not refer to each other" errors occur
+**And** all bidirectional invariants are satisfied
+
+### Requirement: Deferred Writes for Parallel Execution
+
+The parallel transformation MUST use deferred writes to prevent EMF EList corruption during concurrent containment operations.
+
+#### Scenario: Deferred writes enabled during parallel phase
+
+**Given** a transformation executing with `parallel=true`
+**And** the element count exceeds the parallel threshold
+**When** the parallel transformation phase begins
+**Then** deferred writes mode is automatically enabled
+**And** `createTarget()` returns proxied EObjects
+**And** EList modifications are queued, not executed immediately
+
+#### Scenario: Containment operations are deferred
+
+**Given** parallel transformation is in progress
+**And** deferred writes mode is enabled
+**When** a rule calls `parent.getChildren().add(child)`
+**Then** the add operation is recorded in the OperationQueue
+**And** the operation includes a sequence number for ordering
+**And** the actual EList is NOT modified during parallel phase
+
+#### Scenario: Deferred operations replayed before commit
+
+**Given** parallel transformation phase has completed
+**And** deferred operations are queued
+**When** `applyDeferredOperations()` is called
+**Then** all operations are sorted by sequence number
+**And** operations are applied single-threaded in sequence order
+**And** this happens BEFORE `commitStagedElements()`
+
+### Requirement: High Containment Contention Safety
+
+The transformation framework MUST handle transformations with high containment contention without data corruption.
+
+#### Scenario: Many fields added to few tables
+
+**Given** a transformation similar to ASM2RDBMS
+**And** a flat structure with few parent objects
+**And** many child objects added to each parent's containment
+**When** multiple threads add children to the same parent concurrently
+**Then** no EList internal state corruption occurs
+**And** all children are correctly contained after transformation
+**And** no `NullPointerException` during model iteration
+
+#### Scenario: Resource attachment after deferred writes
+
+**Given** parallel transformation with deferred writes
+**And** deferred operations have been applied
+**When** `commitStagedElements()` adds root elements to Resource
+**Then** `ResourceImpl.attached()` can safely iterate all descendants
+**And** `EcoreUtil.getAllProperContents()` returns valid elements
+**And** no `preparedResult is null` error occurs
+
+### Requirement: Deterministic Operation Ordering
+
+Deferred operations MUST be applied in a deterministic order to ensure reproducible transformation results.
+
+#### Scenario: Operations ordered by sequence number
+
+**Given** multiple threads queueing deferred operations
+**And** each operation has a unique sequence number
+**When** operations are replayed
+**Then** operations are sorted by sequence number ascending
+**And** the order is identical across multiple transformation runs
+**And** sequential and parallel modes produce equivalent results
+
+#### Scenario: Operations from same thread maintain relative order
+
+**Given** Thread A queues operations Op1, Op2, Op3 in that order
+**And** each operation gets a sequence number atomically
+**When** operations are replayed
+**Then** Op1 is applied before Op2
+**And** Op2 is applied before Op3
+**Because** sequence numbers preserve intra-thread ordering
+
 ## Thread-Safety Contracts
 
 ### Contract: Transformation Rule Thread-Safety
