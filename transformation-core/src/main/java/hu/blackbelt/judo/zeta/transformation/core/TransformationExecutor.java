@@ -879,7 +879,13 @@ public class TransformationExecutor {
                         ruleName,
                         () -> {
                             // Guard evaluation inside the lock to prevent race conditions
-                            if (!rule.evaluateGuard(source, context)) {
+                            long guardStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+                            boolean guardPassed = rule.evaluateGuard(source, context);
+                            if (TransformationMetrics.isEnabled()) {
+                                TransformationMetrics.recordGuardEvaluation();
+                                TransformationMetrics.addGuardEvaluationNanos(System.nanoTime() - guardStart);
+                            }
+                            if (!guardPassed) {
                                 return null;  // Guard rejected - don't execute
                             }
                             // Rule execution inside the lock with timing

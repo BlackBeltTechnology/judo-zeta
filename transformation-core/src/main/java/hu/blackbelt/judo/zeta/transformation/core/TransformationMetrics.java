@@ -84,6 +84,19 @@ public class TransformationMetrics {
     private static final AtomicLong parallelWaitNanos = new AtomicLong(0);
     private static final AtomicLong cacheGetOrCreateNanos = new AtomicLong(0);
 
+    // Phase 3: Fine-grained cache operation timing (investigation)
+    private static final AtomicLong cacheLookupNanos = new AtomicLong(0);
+    private static final AtomicLong cacheRejectionCheckNanos = new AtomicLong(0);
+    private static final AtomicLong cacheAddMappingNanos = new AtomicLong(0);
+    private static final AtomicLong cacheMarkRejectedNanos = new AtomicLong(0);
+    private static final AtomicLong cacheLookupCount = new AtomicLong(0);
+    private static final AtomicLong cacheRejectionCheckCount = new AtomicLong(0);
+    private static final AtomicLong cacheHitCount = new AtomicLong(0);
+    private static final AtomicLong cacheRejectionHitCount = new AtomicLong(0);
+    private static final AtomicLong cacheMissCount = new AtomicLong(0);
+    private static final AtomicLong cacheAddMappingCount = new AtomicLong(0);
+    private static final AtomicLong cacheMarkRejectedCount = new AtomicLong(0);
+
     // Per-extension method metrics
     private static final ConcurrentHashMap<String, AtomicLong> extensionMethodCounts = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<String, AtomicLong> extensionMethodNanosMap = new ConcurrentHashMap<>();
@@ -161,6 +174,19 @@ public class TransformationMetrics {
         futureCreationNanos.set(0);
         parallelWaitNanos.set(0);
         cacheGetOrCreateNanos.set(0);
+
+        // Phase 3: Fine-grained cache metrics
+        cacheLookupNanos.set(0);
+        cacheRejectionCheckNanos.set(0);
+        cacheAddMappingNanos.set(0);
+        cacheMarkRejectedNanos.set(0);
+        cacheLookupCount.set(0);
+        cacheRejectionCheckCount.set(0);
+        cacheHitCount.set(0);
+        cacheRejectionHitCount.set(0);
+        cacheMissCount.set(0);
+        cacheAddMappingCount.set(0);
+        cacheMarkRejectedCount.set(0);
 
         // Per-rule and per-method maps
         ruleExecutionCounts.clear();
@@ -389,6 +415,47 @@ public class TransformationMetrics {
         if (enabled) cacheGetOrCreateNanos.addAndGet(nanos);
     }
 
+    // Phase 3: Fine-grained cache timing methods
+    public static void addCacheLookupNanos(long nanos) {
+        if (enabled) {
+            cacheLookupNanos.addAndGet(nanos);
+            cacheLookupCount.incrementAndGet();
+        }
+    }
+
+    public static void recordCacheHit() {
+        if (enabled) cacheHitCount.incrementAndGet();
+    }
+
+    public static void addCacheRejectionCheckNanos(long nanos) {
+        if (enabled) {
+            cacheRejectionCheckNanos.addAndGet(nanos);
+            cacheRejectionCheckCount.incrementAndGet();
+        }
+    }
+
+    public static void recordCacheRejectionHit() {
+        if (enabled) cacheRejectionHitCount.incrementAndGet();
+    }
+
+    public static void recordCacheMiss() {
+        if (enabled) cacheMissCount.incrementAndGet();
+    }
+
+    public static void addCacheAddMappingNanos(long nanos) {
+        if (enabled) {
+            cacheAddMappingNanos.addAndGet(nanos);
+            cacheAddMappingCount.incrementAndGet();
+        }
+    }
+
+    public static void addCacheMarkRejectedNanos(long nanos) {
+        if (enabled) {
+            cacheMarkRejectedNanos.addAndGet(nanos);
+            cacheMarkRejectedCount.incrementAndGet();
+        }
+    }
+
     /**
      * Print a comprehensive performance report.
      */
@@ -458,10 +525,15 @@ public class TransformationMetrics {
                 + ruleMatchMs + ruleLoopExclusiveMs + cacheExclusiveMs + futureCreateMs;
         long unaccountedMs = totalTransformMs > 0 ? totalTransformMs - accountedMs : 0;
 
+        // Guard evaluation timing (shown separately from greedy rule execution)
+        long guardEvalMs = guardEvaluationNanos.get() / 1_000_000;
+
         sb.append("\n=== TIMING BREAKDOWN (ALL COMPONENTS) ===\n");
         if (totalTransformMs > 0) {
             sb.append(String.format("  Greedy rule execution:        %,7d ms (%5.1f%%)\n",
                     greedyMs, 100.0 * greedyMs / totalTransformMs));
+            sb.append(String.format("    (Guard evaluation):         %,7d ms (%5.1f%% of greedy, %,d evals)\n",
+                    guardEvalMs, greedyMs > 0 ? 100.0 * guardEvalMs / greedyMs : 0, guardEvaluations.get()));
             sb.append(String.format("  equivalent() total:           %,7d ms (%5.1f%%)\n",
                     equivalentMs, 100.0 * equivalentMs / totalTransformMs));
             sb.append(String.format("  equivalentDiscriminated():    %,7d ms (%5.1f%%)\n",
@@ -530,6 +602,48 @@ public class TransformationMetrics {
         sb.append(String.format("  Lock wait:                    %,7d ms (%.1f%%)\n",
                 lockWaitNanos.get() / 1_000_000,
                 eqNanos > 0 ? (100.0 * lockWaitNanos.get() / eqNanos) : 0));
+
+        // Fine-grained cache operation breakdown (Phase 3 investigation)
+        long cacheOpsTotal = cacheGetOrCreateNanos.get();
+        long lookupMs = cacheLookupNanos.get() / 1_000_000;
+        long rejCheckMs = cacheRejectionCheckNanos.get() / 1_000_000;
+        long addMapMs = cacheAddMappingNanos.get() / 1_000_000;
+        long markRejMs = cacheMarkRejectedNanos.get() / 1_000_000;
+        long cacheOpsMs = cacheOpsTotal / 1_000_000;
+        long cacheInstrumentedMs = lookupMs + rejCheckMs + addMapMs + markRejMs;
+        long cacheUnaccountedMs = cacheOpsMs - cacheInstrumentedMs - greedyMs;
+
+        sb.append("\n=== FINE-GRAINED CACHE BREAKDOWN (Phase 3) ===\n");
+        sb.append(String.format("  Total getOrCreate ops:        %,d\n", cacheLookupCount.get()));
+        sb.append(String.format("    - Cache hits:               %,d (%.1f%%)\n",
+                cacheHitCount.get(),
+                cacheLookupCount.get() > 0 ? (100.0 * cacheHitCount.get() / cacheLookupCount.get()) : 0));
+        sb.append(String.format("    - Rejection hits:           %,d (%.1f%%)\n",
+                cacheRejectionHitCount.get(),
+                cacheLookupCount.get() > 0 ? (100.0 * cacheRejectionHitCount.get() / cacheLookupCount.get()) : 0));
+        sb.append(String.format("    - Cache misses:             %,d (%.1f%%)\n",
+                cacheMissCount.get(),
+                cacheLookupCount.get() > 0 ? (100.0 * cacheMissCount.get() / cacheLookupCount.get()) : 0));
+        sb.append(String.format("  ----------------------------------------\n"));
+        sb.append(String.format("  Cache lookup (getByRule):     %,7d ms (%,d calls, %.3f μs/call)\n",
+                lookupMs, cacheLookupCount.get(),
+                cacheLookupCount.get() > 0 ? (double) cacheLookupNanos.get() / cacheLookupCount.get() / 1000 : 0));
+        sb.append(String.format("  Rejection check (isRejected): %,7d ms (%,d calls, %.3f μs/call)\n",
+                rejCheckMs, cacheRejectionCheckCount.get(),
+                cacheRejectionCheckCount.get() > 0 ? (double) cacheRejectionCheckNanos.get() / cacheRejectionCheckCount.get() / 1000 : 0));
+        sb.append(String.format("  Add mapping:                  %,7d ms (%,d calls, %.3f μs/call)\n",
+                addMapMs, cacheAddMappingCount.get(),
+                cacheAddMappingCount.get() > 0 ? (double) cacheAddMappingNanos.get() / cacheAddMappingCount.get() / 1000 : 0));
+        sb.append(String.format("  Mark rejected:                %,7d ms (%,d calls, %.3f μs/call)\n",
+                markRejMs, cacheMarkRejectedCount.get(),
+                cacheMarkRejectedCount.get() > 0 ? (double) cacheMarkRejectedNanos.get() / cacheMarkRejectedCount.get() / 1000 : 0));
+        sb.append(String.format("  Greedy rule execution:        %,7d ms (already reported above)\n", greedyMs));
+        sb.append(String.format("  ----------------------------------------\n"));
+        sb.append(String.format("  Cache instrumented total:     %,7d ms\n", cacheInstrumentedMs + greedyMs));
+        sb.append(String.format("  Cache total (getOrCreate):    %,7d ms\n", cacheOpsMs));
+        sb.append(String.format("  Cache UNACCOUNTED:            %,7d ms (%.1f%% of cache ops)\n",
+                cacheUnaccountedMs,
+                cacheOpsMs > 0 ? (100.0 * cacheUnaccountedMs / cacheOpsMs) : 0));
 
         // Top 10 slowest extension methods
         if (!extensionMethodNanosMap.isEmpty()) {

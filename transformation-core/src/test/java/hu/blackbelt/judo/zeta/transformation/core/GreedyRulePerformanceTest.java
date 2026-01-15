@@ -134,6 +134,37 @@ class GreedyRulePerformanceTest {
         }
 
         @Test
+        @DisplayName("Guard overhead: 10K elements with guards")
+        void testGuardOverhead10KElements() {
+            createSourceElements(10000);
+
+            TransformationRegistry registry = new TransformationRegistry();
+            registry.register(GuardedTestRules.class);
+
+            TransformationContext ctx = createContext();
+            ctx.setTransformationRegistry(registry);
+
+            TransformationMetrics.enable();
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(ctx)
+                    .parallel(false)
+                    .build();
+
+            long startTime = System.currentTimeMillis();
+            executor.transform();
+            long duration = System.currentTimeMillis() - startTime;
+
+            log.info("10K elements with guards: {} ms", duration);
+            log.info(TransformationMetrics.getReport());
+
+            // Verify transformation worked
+            assertFalse(targetResource.getContents().isEmpty(),
+                    "Target resource should not be empty after transformation");
+        }
+
+        @Test
         @DisplayName("Baseline: 10K elements transformation time")
         void testBaseline10KElements() {
             createSourceElements(10000);
@@ -344,6 +375,44 @@ class GreedyRulePerformanceTest {
                 target.setName("Enum_" + source.getName());
                 return target;
             };
+        }
+    }
+
+    /**
+     * Test rules with guards to measure guard evaluation overhead.
+     */
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(
+            source = EClass.class,
+            target = EPackage.class
+    )
+    public static class GuardedTestRules {
+
+        /**
+         * Rule with a simple guard that checks the name.
+         * Guard is executed on every cache miss.
+         */
+        @TransformRule(name = "GuardedEClass2EPackage")
+        @Transform(type = EClass.class)
+        @Guard(method = "guardedEClass2EPackageGuard")
+        public TransformFunction<EClass, EPackage> guardedEClass2EPackage() {
+            return (source, ctx) -> {
+                EPackage target = ctx.createTarget(EPackage.class);
+                target.setName("G_" + source.getName());
+                ctx.addToResource(target);
+                return target;
+            };
+        }
+
+        /**
+         * Guard method - simulates some computation.
+         */
+        public boolean guardedEClass2EPackageGuard(EObject source, TransformationContext ctx) {
+            // Simulate guard computation - check name length
+            if (source instanceof EClass ec) {
+                String name = ec.getName();
+                return name != null && name.length() > 0;
+            }
+            return false;
         }
     }
 }

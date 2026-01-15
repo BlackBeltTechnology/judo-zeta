@@ -63,36 +63,33 @@ The `createTarget()` method MUST be safe for concurrent calls from multiple thre
 
 ### Requirement: Thread-Safe Element Resolution Cache
 
-The ElementResolutionCache MUST support concurrent read and write access from multiple threads with atomic get-or-create semantics.
+The element resolution cache MUST provide fast lookup performance with minimal allocation overhead while maintaining thread safety in parallel mode.
 
-#### Scenario: Cache key includes rule name for isolation
+#### Scenario: Fast-path cache lookup avoids allocation
 
-**Given** a transformation with multiple rules that transform the same source type
-**And** Rule A and Rule B both apply to the same source element
-**When** `equivalent()` is called for Rule A
-**And** `equivalent()` is called for Rule B
-**Then** each rule has an independent cache entry
-**And** cache key is `(source, ruleName)` not `(source, targetType)`
-**And** cross-rule cache pollution is prevented
+**Given** a transformation running in sequential mode
+**And** a source element with cached mappings
+**When** `getOrCreate(source, ruleName, ...)` is called
+**Then** the cache lookup completes without allocating new objects
+**And** the lookup requires at most 2 map operations (outer map + inner map)
+**And** no `computeIfAbsent` is invoked on the fast path
 
-#### Scenario: Atomic get-or-create prevents duplicate creation
+#### Scenario: Cache hit returns immediately
 
-**Given** parallel transformation is in progress
-**And** Thread A and Thread B call `equivalent()` for the same (source, rule) pair simultaneously
-**When** Thread A begins rule execution
-**Then** Thread B waits for Thread A to complete
-**And** Thread B receives the cached result from Thread A
-**And** only one target element is created
-**And** `computeIfAbsent()` is used for atomic cache operations
+**Given** a source element with an existing mapping for rule "RuleA"
+**When** `getOrCreate(source, "RuleA", ...)` is called
+**Then** the cached target is returned immediately
+**And** the `ruleExecutor` supplier is NOT invoked
+**And** no rejection cache lookup is performed
 
-#### Scenario: Per-element locking prevents race conditions
+#### Scenario: Rejection check is inlined with cache lookup (sequential mode)
 
-**Given** parallel transformation with many threads
-**And** multiple threads request equivalent for same source
-**When** the first thread acquires the lock
-**Then** other threads wait on the lock
-**And** lock is per `(source, ruleName)` pair not global
-**And** unrelated sources execute in parallel without blocking
+**Given** a transformation running in sequential mode
+**And** a source element was previously rejected by rule "RuleA"
+**When** `getOrCreate(source, "RuleA", ...)` is called
+**Then** the rejection is detected in a single map lookup
+**And** `null` is returned immediately
+**And** no separate rejection cache is consulted
 
 ---
 
@@ -716,6 +713,44 @@ Parallel transformation MUST produce identical results regardless of thread inte
 **When** comparing element counts between runs
 **Then** all runs produce identical element counts
 **And** 0 failures due to race conditions
+
+### Requirement: Cache Lookup Performance Target
+
+The cache lookup operation MUST achieve sub-millisecond average latency per operation in sequential mode.
+
+#### Scenario: High-throughput cache operations
+
+**Given** a transformation with 40,000+ `equivalent()` calls
+**And** sequential execution mode enabled
+**When** the transformation completes
+**Then** total cache operation time is less than 15% of transformation time
+**And** average lookup time is less than 0.01ms per operation
+
+#### Scenario: Cache hit rate maintained
+
+**Given** a transformation with repeated lookups for same (source, ruleName)
+**When** the transformation completes
+**Then** cache hit rate is at least 90%
+**And** each cache hit avoids rule re-execution
+
+### Requirement: Pre-Allocation Support for Large Models
+
+The cache MUST support optional pre-allocation of inner maps for known source elements to eliminate allocation overhead during transformation.
+
+#### Scenario: Pre-allocation reduces allocation overhead
+
+**Given** a transformation with known source elements
+**And** `preAllocate(sources)` is called before transformation
+**When** the transformation executes
+**Then** no new inner map allocations occur for pre-allocated sources
+**And** cache operations are faster due to pre-sized maps
+
+#### Scenario: Pre-allocation is optional
+
+**Given** a transformation without pre-allocation
+**When** the transformation executes
+**Then** inner maps are allocated on demand (backward compatible)
+**And** the transformation produces correct results
 
 ## Thread-Safety Contracts
 

@@ -218,8 +218,13 @@ public class ElementResolutionCache {
      */
     private void markRejected(EObject source, String ruleName) {
         if (sequentialMode) {
-            rejectedKeysSequential.computeIfAbsent(source, k -> new HashSet<>())
-                    .add(ruleName);
+            // Optimized: get() first, then put() only on miss (avoids computeIfAbsent overhead)
+            Set<String> rejected = rejectedKeysSequential.get(source);
+            if (rejected == null) {
+                rejected = new HashSet<>();
+                rejectedKeysSequential.put(source, rejected);
+            }
+            rejected.add(ruleName);
         } else {
             IdentityWrapper key = new IdentityWrapper(source);
             rejectedKeysParallel.computeIfAbsent(key, k -> ConcurrentHashMap.newKeySet())
@@ -251,20 +256,40 @@ public class ElementResolutionCache {
         String targetTypeName = target.eClass().getName();
 
         if (sequentialMode) {
-            // Sequential mode: use simple HashMap/ArrayList
-            ruleCache.computeIfAbsent(source, k -> new HashMap<>())
-                    .put(ruleName, target);
+            // Sequential mode: Optimized with get-then-put pattern (avoids computeIfAbsent overhead)
 
-            typeCache.computeIfAbsent(source, k -> new HashMap<>())
-                    .computeIfAbsent(targetTypeName, k -> new ArrayList<>())
-                    .add(target);
+            // Rule cache: source -> ruleName -> target
+            Map<String, EObject> ruleMap = ruleCache.get(source);
+            if (ruleMap == null) {
+                ruleMap = new HashMap<>();
+                ruleCache.put(source, ruleMap);
+            }
+            ruleMap.put(ruleName, target);
 
+            // Type cache: source -> targetType -> [targets]
+            Map<String, List<EObject>> typeMap = typeCache.get(source);
+            if (typeMap == null) {
+                typeMap = new HashMap<>();
+                typeCache.put(source, typeMap);
+            }
+            List<EObject> typeList = typeMap.get(targetTypeName);
+            if (typeList == null) {
+                typeList = new ArrayList<>();
+                typeMap.put(targetTypeName, typeList);
+            }
+            typeList.add(target);
+
+            // Primary cache: source -> targetType -> primary target
             if (isPrimary) {
-                primaryCache.computeIfAbsent(source, k -> new HashMap<>())
-                        .put(targetTypeName, target);
+                Map<String, EObject> primaryMap = primaryCache.get(source);
+                if (primaryMap == null) {
+                    primaryMap = new HashMap<>();
+                    primaryCache.put(source, primaryMap);
+                }
+                primaryMap.put(targetTypeName, target);
             }
         } else {
-            // Parallel mode: use thread-safe collections
+            // Parallel mode: use thread-safe collections with computeIfAbsent for atomicity
             ruleCache.computeIfAbsent(source, k -> new ConcurrentHashMap<>())
                     .put(ruleName, target);
 
@@ -324,24 +349,52 @@ public class ElementResolutionCache {
             return null;
         }
 
-        // FAST PATH: Check rule cache FIRST
+        boolean metricsEnabled = TransformationMetrics.isEnabled();
+
+        // FAST PATH: Check rule cache FIRST (with timing)
+        long t0 = metricsEnabled ? System.nanoTime() : 0;
         T cached = getByRule(source, ruleName);
+        if (metricsEnabled) {
+            TransformationMetrics.addCacheLookupNanos(System.nanoTime() - t0);
+        }
         if (cached != null) {
+            if (metricsEnabled) {
+                TransformationMetrics.recordCacheHit();
+            }
             return cached;
         }
 
-        // Check rejection cache
-        if (isRejected(source, ruleName)) {
+        // Check rejection cache (with timing)
+        long t1 = metricsEnabled ? System.nanoTime() : 0;
+        boolean rejected = isRejected(source, ruleName);
+        if (metricsEnabled) {
+            TransformationMetrics.addCacheRejectionCheckNanos(System.nanoTime() - t1);
+        }
+        if (rejected) {
+            if (metricsEnabled) {
+                TransformationMetrics.recordCacheRejectionHit();
+            }
             return null;
         }
 
         if (sequentialMode) {
             // SEQUENTIAL MODE: No locking needed, execute directly
+            if (metricsEnabled) {
+                TransformationMetrics.recordCacheMiss();
+            }
             T target = ruleExecutor.get();
             if (target != null) {
+                long t2 = metricsEnabled ? System.nanoTime() : 0;
                 addMapping(source, ruleName, target, isPrimary);
+                if (metricsEnabled) {
+                    TransformationMetrics.addCacheAddMappingNanos(System.nanoTime() - t2);
+                }
             } else {
+                long t3 = metricsEnabled ? System.nanoTime() : 0;
                 markRejected(source, ruleName);
+                if (metricsEnabled) {
+                    TransformationMetrics.addCacheMarkRejectedNanos(System.nanoTime() - t3);
+                }
             }
             return target;
         }
@@ -350,21 +403,47 @@ public class ElementResolutionCache {
         ReentrantLock lock = getLockFor(source, ruleName);
         lock.lock();
         try {
-            // Double-check after acquiring lock
+            // Double-check after acquiring lock (with timing)
+            long t2 = metricsEnabled ? System.nanoTime() : 0;
             cached = getByRule(source, ruleName);
+            if (metricsEnabled) {
+                TransformationMetrics.addCacheLookupNanos(System.nanoTime() - t2);
+            }
             if (cached != null) {
+                if (metricsEnabled) {
+                    TransformationMetrics.recordCacheHit();
+                }
                 return cached;
             }
 
-            if (isRejected(source, ruleName)) {
+            long t3 = metricsEnabled ? System.nanoTime() : 0;
+            rejected = isRejected(source, ruleName);
+            if (metricsEnabled) {
+                TransformationMetrics.addCacheRejectionCheckNanos(System.nanoTime() - t3);
+            }
+            if (rejected) {
+                if (metricsEnabled) {
+                    TransformationMetrics.recordCacheRejectionHit();
+                }
                 return null;
             }
 
+            if (metricsEnabled) {
+                TransformationMetrics.recordCacheMiss();
+            }
             T target = ruleExecutor.get();
             if (target != null) {
+                long t4 = metricsEnabled ? System.nanoTime() : 0;
                 addMapping(source, ruleName, target, isPrimary);
+                if (metricsEnabled) {
+                    TransformationMetrics.addCacheAddMappingNanos(System.nanoTime() - t4);
+                }
             } else {
+                long t5 = metricsEnabled ? System.nanoTime() : 0;
                 markRejected(source, ruleName);
+                if (metricsEnabled) {
+                    TransformationMetrics.addCacheMarkRejectedNanos(System.nanoTime() - t5);
+                }
             }
             return target;
         } finally {
