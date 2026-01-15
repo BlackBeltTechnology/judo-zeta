@@ -1,7 +1,12 @@
 # guard-propagation Specification
 
 ## Purpose
-TBD - created by archiving change add-guard-scope-control. Update Purpose after archive.
+
+This specification defines how guard conditions are evaluated and cached during transformation rule execution. It covers:
+- Per-rule guard rejection caching for performance optimization
+- Guard propagation through `@Extends` inheritance chains
+- The separation between automatic guard evaluation (via `@Extends`) and manual rule invocation (via `executeParentRule()`)
+- Thread-safety requirements for parallel transformation execution
 ## Requirements
 ### Requirement: Per-Rule Guard Rejection Cache
 
@@ -136,27 +141,45 @@ When a child rule uses `@Extends` to invoke parent rules, each parent's guard MU
 
 ---
 
-### Requirement: Explicit executeParentRule Guard Evaluation
+### Requirement: executeParentRule Does NOT Evaluate Guards
 
-When `ctx.executeParentRule(ruleName, source)` is called explicitly, the parent rule's guard MUST be evaluated before execution.
+When `ctx.executeParentRule(ruleName, source)` is called explicitly, the parent rule's guard SHALL NOT be evaluated. Guard evaluation for `@Extends` inheritance chains is handled separately in `TransformRuleDescriptor.execute()` before `executeParentRule()` is called.
 
-#### Scenario: executeParentRule checks guard
+**Rationale**: This design separates concerns:
+- `@Extends` annotation: automatic guard propagation via `TransformRuleDescriptor.execute()`
+- `executeParentRule()`: direct rule invocation for manual control (caller responsible for guards)
 
-**Given** a parent rule with `@Guard(method = "isSpecial")`
-**And** explicit call to `ctx.executeParentRule("ParentRule", source)`
-**And** source element fails the parent's guard
-**When** executeParentRule is invoked
-**Then** the parent's guard is evaluated
-**And** the method returns `null` (parent guard rejected)
-**And** the parent rule is NOT executed
-
-#### Scenario: executeParentRule executes when guard passes
+#### Scenario: executeParentRule bypasses guards
 
 **Given** a parent rule with `@Guard(method = "isSpecial")`
 **And** explicit call to `ctx.executeParentRule("ParentRule", source)`
-**And** source element passes the parent's guard
+**And** source element that would fail the parent's guard
 **When** executeParentRule is invoked
-**Then** the parent's guard is evaluated
-**And** the parent rule IS executed
-**And** the method returns the target element
+**Then** the parent's guard is NOT evaluated
+**And** the parent rule IS executed regardless
+**And** the method returns the target element (not null)
+
+#### Scenario: Caller responsible for guard checking
+
+**Given** a parent rule with `@Guard(method = "isSpecial")`
+**And** a caller that needs guard-like behavior
+**When** the caller wants to invoke the parent rule with guard checking
+**Then** the caller MUST evaluate the guard manually before calling executeParentRule
+**And** executeParentRule itself will not check guards
+
+#### Scenario: @Extends handles guards automatically
+
+**Given** a child rule with `@Extends("ParentRule")`
+**And** ParentRule has a guard
+**When** the child rule is executed via normal transformation flow
+**Then** `TransformRuleDescriptor.execute()` evaluates all parent guards BEFORE calling executeParentRule
+**And** if any parent guard rejects, the child rule returns null
+**And** executeParentRule is never called for rejected elements
+
+---
+
+## Cross-Reference
+
+- **rule-execution spec**: Defines the authoritative behavior for `executeParentRule()` guard handling
+- **parallel-transformation spec**: Thread-safety requirements for guard rejection caching
 

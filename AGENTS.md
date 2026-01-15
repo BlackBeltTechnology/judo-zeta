@@ -38,6 +38,7 @@ This is a **lightweight, standalone validation framework for EMF metamodels**. I
 - Extension methods for custom helper functions
 - Pre/post-validation hooks
 - Both OSGi and standalone deployment
+
 ## Coding principles
 
 1. First think through the problem, read the codebase for relevant files.
