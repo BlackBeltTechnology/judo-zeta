@@ -86,6 +86,17 @@ public class TransformRuleDescriptor {
      */
     private final Set<EObject> rejected = ConcurrentHashMap.newKeySet();
 
+    /**
+     * Unique integer ordinal assigned at registration time.
+     *
+     * <p>Used for O(1) array-indexed cache lookups instead of String-based map lookups.
+     * The ordinal is assigned sequentially by TransformationRegistry.register() and
+     * is immutable once set (can only be set once, from -1 to a non-negative value).</p>
+     *
+     * <p>Value of -1 indicates the ordinal has not been assigned yet.</p>
+     */
+    private int ordinal = -1;
+
     public TransformRuleDescriptor(
             Object instance,
             Method ruleMethod,
@@ -279,6 +290,46 @@ public class TransformRuleDescriptor {
      */
     public void clearRejected() {
         rejected.clear();
+    }
+
+    /**
+     * Get the rule's ordinal for O(1) array-indexed cache lookups.
+     *
+     * @return the ordinal (0 or greater if assigned, -1 if not yet assigned)
+     */
+    public int getOrdinal() {
+        return ordinal;
+    }
+
+    /**
+     * Set the rule's ordinal. Can only be set once (from -1 to a non-negative value).
+     *
+     * <p>This is called by TransformationRegistry during rule registration.
+     * The ordinal is immutable once set to prevent confusion from re-assignment.</p>
+     *
+     * @param ordinal the ordinal to assign (must be >= 0)
+     * @throws IllegalStateException if the ordinal was already set
+     * @throws IllegalArgumentException if ordinal is negative
+     */
+    public void setOrdinal(int ordinal) {
+        if (ordinal < 0) {
+            throw new IllegalArgumentException("Ordinal must be non-negative: " + ordinal);
+        }
+        if (this.ordinal != -1) {
+            throw new IllegalStateException(
+                    "Ordinal already set for rule '" + name + "': " + this.ordinal +
+                    ". Cannot re-assign to: " + ordinal);
+        }
+        this.ordinal = ordinal;
+    }
+
+    /**
+     * Check if this rule has been assigned an ordinal.
+     *
+     * @return true if ordinal has been assigned (>= 0)
+     */
+    public boolean hasOrdinal() {
+        return ordinal >= 0;
     }
 
     public List<String> getExtendsRules() {

@@ -98,6 +98,22 @@ public class ElementResolutionCache {
     private final Map<IdentityWrapper, Set<String>> rejectedKeysParallel;
 
     /**
+     * In-progress tracking for circular dependency handling.
+     *
+     * <p>When a @Lazy rule starts executing, it marks its target as "in-progress" before
+     * the transformation completes. If another rule calls equivalentDiscriminated() for
+     * the same source during execution, it can find the in-progress target here.</p>
+     *
+     * <p>Array-based storage for O(1) lookup by rule ordinal. Each source element maps
+     * to an array indexed by rule ordinal. Lazy allocation: arrays are only created
+     * when markInProgress is first called for a source.</p>
+     *
+     * <p>Uses IdentityHashMap in sequential mode for faster lookups.</p>
+     */
+    private final Map<EObject, EObject[]> inProgressSequential;
+    private final Map<IdentityWrapper, EObject[]> inProgressParallel;
+
+    /**
      * Wrapper for EObject that uses identity-based hashCode and equals.
      * Only used in parallel mode.
      */
@@ -147,6 +163,8 @@ public class ElementResolutionCache {
             this.discriminatedCache = new IdentityHashMap<>();
             this.rejectedKeysSequential = new IdentityHashMap<>();
             this.rejectedKeysParallel = null;
+            this.inProgressSequential = new IdentityHashMap<>();
+            this.inProgressParallel = null;
             this.ruleLocks = null;
         } else {
             // Parallel mode: use ConcurrentHashMap for thread safety
@@ -156,6 +174,8 @@ public class ElementResolutionCache {
             this.discriminatedCache = new ConcurrentHashMap<>();
             this.rejectedKeysSequential = null;
             this.rejectedKeysParallel = new ConcurrentHashMap<>();
+            this.inProgressSequential = null;
+            this.inProgressParallel = new ConcurrentHashMap<>();
             this.ruleLocks = new ConcurrentHashMap<>();
         }
     }
@@ -257,6 +277,130 @@ public class ElementResolutionCache {
             rejectedKeysParallel.computeIfAbsent(key, k -> ConcurrentHashMap.newKeySet())
                     .add(ruleName);
         }
+    }
+
+    // ==================== In-Progress Tracking (for circular dependency handling) ====================
+
+    /**
+     * Mark a target as in-progress for a source and rule.
+     *
+     * <p>Called when a @Lazy rule starts executing, before the transformation completes.
+     * This allows circular dependency detection: if another rule calls equivalentDiscriminated()
+     * for the same source during execution, it can find this in-progress target.</p>
+     *
+     * <p>Array-based storage: O(1) lookup by rule ordinal. Arrays are lazily allocated
+     * when first needed for a source element.</p>
+     *
+     * @param source the source element being transformed
+     * @param ruleOrdinal the rule's ordinal (from TransformRuleDescriptor.getOrdinal())
+     * @param target the target being created (may be incomplete)
+     * @param ruleCount total number of rules (for array allocation)
+     */
+    public void markInProgress(EObject source, int ruleOrdinal, EObject target, int ruleCount) {
+        if (source == null || target == null || ruleOrdinal < 0 || ruleCount <= 0) {
+            return;
+        }
+        if (sequentialMode) {
+            EObject[] arr = inProgressSequential.get(source);
+            if (arr == null) {
+                arr = new EObject[ruleCount];
+                inProgressSequential.put(source, arr);
+            }
+            arr[ruleOrdinal] = target;
+        } else {
+            IdentityWrapper key = new IdentityWrapper(source);
+            EObject[] arr = inProgressParallel.computeIfAbsent(key, k -> new EObject[ruleCount]);
+            // Note: array write is atomic for single elements (Java memory model)
+            arr[ruleOrdinal] = target;
+        }
+    }
+
+    /**
+     * Get the in-progress target for a source and rule.
+     *
+     * <p>Called during equivalentDiscriminated() to detect circular dependencies.
+     * If a target is found, it means that rule is currently executing for this source.</p>
+     *
+     * @param source the source element
+     * @param ruleOrdinal the rule's ordinal
+     * @param <T> the target type
+     * @return the in-progress target, or null if not in progress
+     */
+    @SuppressWarnings("unchecked")
+    public <T extends EObject> T getInProgress(EObject source, int ruleOrdinal) {
+        if (source == null || ruleOrdinal < 0) {
+            return null;
+        }
+        if (sequentialMode) {
+            EObject[] arr = inProgressSequential.get(source);
+            if (arr != null && ruleOrdinal < arr.length) {
+                return (T) arr[ruleOrdinal];
+            }
+        } else {
+            IdentityWrapper key = new IdentityWrapper(source);
+            EObject[] arr = inProgressParallel.get(key);
+            if (arr != null && ruleOrdinal < arr.length) {
+                return (T) arr[ruleOrdinal];
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Clear the in-progress marker for a source and rule.
+     *
+     * <p>Called when a rule completes execution (either successfully or with error).
+     * This ensures stale in-progress targets are not returned.</p>
+     *
+     * @param source the source element
+     * @param ruleOrdinal the rule's ordinal
+     */
+    public void clearInProgress(EObject source, int ruleOrdinal) {
+        if (source == null || ruleOrdinal < 0) {
+            return;
+        }
+        if (sequentialMode) {
+            EObject[] arr = inProgressSequential.get(source);
+            if (arr != null && ruleOrdinal < arr.length) {
+                arr[ruleOrdinal] = null;
+            }
+        } else {
+            IdentityWrapper key = new IdentityWrapper(source);
+            EObject[] arr = inProgressParallel.get(key);
+            if (arr != null && ruleOrdinal < arr.length) {
+                arr[ruleOrdinal] = null;
+            }
+        }
+    }
+
+    /**
+     * Check if a source has any in-progress transformation.
+     *
+     * <p>Used for debugging and testing.</p>
+     *
+     * @param source the source element
+     * @return true if any rule is in-progress for this source
+     */
+    public boolean hasAnyInProgress(EObject source) {
+        if (source == null) {
+            return false;
+        }
+        EObject[] arr;
+        if (sequentialMode) {
+            arr = inProgressSequential.get(source);
+        } else {
+            IdentityWrapper key = new IdentityWrapper(source);
+            arr = inProgressParallel.get(key);
+        }
+        if (arr == null) {
+            return false;
+        }
+        for (EObject e : arr) {
+            if (e != null) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -762,7 +906,7 @@ public class ElementResolutionCache {
     /**
      * Clear all caches.
      *
-     * <p>Also clears the rule locks to free memory.</p>
+     * <p>Also clears the rule locks and in-progress tracking to free memory.</p>
      */
     public void clear() {
         ruleCache.clear();
@@ -771,8 +915,10 @@ public class ElementResolutionCache {
         discriminatedCache.clear();
         if (sequentialMode) {
             rejectedKeysSequential.clear();
+            inProgressSequential.clear();
         } else {
             rejectedKeysParallel.clear();
+            inProgressParallel.clear();
             ruleLocks.clear();
         }
     }
@@ -789,6 +935,20 @@ public class ElementResolutionCache {
             rejectedKeysSequential.clear();
         } else {
             rejectedKeysParallel.clear();
+        }
+    }
+
+    /**
+     * Clear only the in-progress tracking cache.
+     *
+     * <p>Called at the end of transformation to ensure no stale in-progress
+     * targets leak to subsequent transformations.</p>
+     */
+    public void clearInProgressTracking() {
+        if (sequentialMode) {
+            inProgressSequential.clear();
+        } else {
+            inProgressParallel.clear();
         }
     }
 

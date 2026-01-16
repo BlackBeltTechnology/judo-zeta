@@ -79,6 +79,12 @@ public class TransformationRegistry {
             new ConcurrentHashMap<>();
 
     /**
+     * Counter for assigning sequential ordinals to rules at registration time.
+     * Used for O(1) array-indexed cache lookups instead of String-based map lookups.
+     */
+    private int nextOrdinal = 0;
+
+    /**
      * Register a transformation context class.
      *
      * @param transformationClass the class containing transformation rules
@@ -275,6 +281,9 @@ public class TransformationRegistry {
                 tos
         );
 
+        // Assign sequential ordinal for O(1) array-indexed cache lookups
+        descriptor.setOrdinal(nextOrdinal++);
+
         rulesBySourceType.computeIfAbsent(sourceType, k -> new ArrayList<>()).add(descriptor);
         rulesByName.put(name, descriptor);
 
@@ -431,6 +440,18 @@ public class TransformationRegistry {
         return rulesBySourceType.values().stream()
                 .flatMap(List::stream)
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * Get the total number of registered rules.
+     *
+     * <p>This is used to allocate appropriately-sized arrays for ordinal-indexed
+     * cache structures. The count equals the next ordinal that would be assigned.</p>
+     *
+     * @return the number of registered rules
+     */
+    public int getRuleCount() {
+        return nextOrdinal;
     }
 
     /**

@@ -1114,6 +1114,12 @@ public class TransformationContext {
             //   3. Rule B calls equivalentDiscriminated(..., "d2") for Rule A
             //   4. Instead of returning null, find the in-progress target and clone it
             if (rule != null && source != null && rule.isLazy()) {
+                // Use ordinal-based in-progress tracking (O(1) array lookup) when available
+                if (rule.hasOrdinal() && transformationRegistry != null) {
+                    resolutionCache.markInProgress(source, rule.getOrdinal(), instance,
+                            transformationRegistry.getRuleCount());
+                }
+                // Also update the legacy map for backward compatibility during migration
                 RuleCacheKey key = new RuleCacheKey(source, rule.getName());
                 executingLazyRules.putIfAbsent(key, instance);
             }
@@ -1892,7 +1898,15 @@ public class TransformationContext {
                                 // a discriminated variant of Rule A's output.
                                 if (discriminator != null) {
                                     // Check if the original was early-cached
-                                    EObject earlyCached = executingLazyRules.get(key);
+                                    // First try ordinal-based lookup (O(1) array access)
+                                    EObject earlyCached = null;
+                                    if (rule.hasOrdinal()) {
+                                        earlyCached = resolutionCache.getInProgress(source, rule.getOrdinal());
+                                    }
+                                    // Fall back to legacy map if not found via ordinal
+                                    if (earlyCached == null) {
+                                        earlyCached = executingLazyRules.get(key);
+                                    }
                                     if (earlyCached != null && targetType.isInstance(earlyCached)) {
                                         // Use the early-cached target as the original for cloning
                                         // Skip lock acquisition and rule execution - go straight to cloning
