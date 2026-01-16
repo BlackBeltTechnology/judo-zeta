@@ -332,3 +332,44 @@ The TransformationContext MUST provide an option to include or exclude the eleme
 
 ---
 
+### Requirement: Idempotent Caching (ETL Compound ID Bug - Not Replicated)
+
+The `equivalent()` method MUST be idempotent: calling it multiple times with the same (source, ruleName) pair MUST return the same target, regardless of which rule initiated the call.
+
+**Context**: ETL includes the calling context in its cache key, leading to compound XMI IDs and non-idempotent behavior. This is a **bug** that Zeta intentionally does not replicate.
+
+#### Scenario: Same source same target regardless of caller
+
+**Given** a source element `op` of type EOperation
+**And** two rules A and B both call `ctx.equivalent(op, "TargetRule")`
+**When** the transformation executes
+**Then** TargetRule executes exactly once (first call wins)
+**And** both callers receive the same target instance (identity equality)
+**And** the target has a simple XMI ID like `(source/op)/TargetRule`
+**And** no compound IDs like `((A)/op)_((B)/op)` are generated
+
+#### Scenario: Cache key excludes calling context
+
+**Given** a source element transformed by rule R
+**When** rule A calls `ctx.equivalent(source, "R")`
+**And** rule B also calls `ctx.equivalent(source, "R")`
+**Then** the cache key for both is `(source, "R")` only
+**And** calling rule (A vs B) does NOT affect the cache lookup
+
+#### Scenario: XMI ID format is simple (not compound)
+
+**Given** structured IDs are enabled
+**When** multiple rules call `equivalent()` for the same (source, ruleName)
+**Then** the target XMI ID is simple format: `(source_id)/RuleName`
+**And** the ID does NOT contain compound patterns like `_((`, `)_(`, or nested parentheses beyond one level
+
+#### Scenario: ETL compound ID bug NOT replicated
+
+**Given** ETL produces compound IDs for multi-context equivalent() calls
+**When** Zeta executes the same transformation
+**Then** Zeta produces simple IDs
+**And** XMI comparison will show differences (expected, not a bug)
+**And** the Zeta output is semantically correct (idempotent)
+
+---
+

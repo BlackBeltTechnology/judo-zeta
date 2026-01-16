@@ -168,3 +168,28 @@ When `ctx.equivalent(source, "RuleName")` is called with a source object of type
 **Then** The rule is found in the global registry (not scoped to current transformation class)
 **And** The rule executes if `appliesTo(source)` returns true
 
+---
+
+### Requirement: Idempotent Caching for Greedy Rule Targets
+
+Greedy rule targets MUST follow the same idempotent caching semantics as all other rules. The calling context (which rule invoked equivalent()) does NOT affect cache lookup.
+
+#### Scenario: Multiple callers get same greedy rule target
+
+**Given** RuleA with `@Greedy` creates target T for source S
+**And** RuleB calls `ctx.equivalent(S, "RuleA")`
+**And** RuleC also calls `ctx.equivalent(S, "RuleA")`
+**When** both calls execute
+**Then** both receive the same target instance T (identity check)
+**And** RuleA executes exactly once
+
+#### Scenario: Greedy target cache key excludes calling context
+
+**Given** a greedy rule target is cached
+**When** equivalent() is called from different calling rules
+**Then** the cache key is `(source, ruleName)` only
+**And** the calling rule does NOT affect cache lookup
+**And** compound XMI IDs are NOT generated
+
+**Note**: This is intentional idempotent behavior. ETL's context-dependent caching (which produces compound IDs) is a bug that Zeta does not replicate. See `etl-patterns` spec for details.
+

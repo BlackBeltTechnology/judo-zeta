@@ -513,6 +513,71 @@ public TransformFunction<EntityType, Table> annotatedTransform() {
 
 ---
 
+## Known ETL Bugs - Compound XMI IDs
+
+Zeta intentionally **does not replicate** certain ETL behaviors that are bugs, not features.
+
+### Compound XMI ID Generation Bug
+
+**ETL Behavior (BUG)**: When multiple rules call `equivalent(source, "RuleName")` for the same source element, ETL includes the **calling context** in its cache key. This leads to:
+
+1. **Multiple targets created** for the same (source, rule) pair
+2. **Compound XMI IDs** like `((esm/Operation)_CreateOperationBody)_((esm/Transfer)_CreateOperationBody)`
+3. **Non-idempotent behavior** violating transformation correctness
+
+**Example of ETL Bug**:
+```
+// Rule A calls: equivalent(op, "CreateOperationBody")
+// Rule B calls: equivalent(op, "CreateOperationBody")
+
+// ETL creates TWO targets with compound IDs:
+// ((esm/A_context)/op)_CreateOperationBody
+// ((esm/B_context)/op)_CreateOperationBody
+```
+
+**Zeta Correct Behavior**: The cache key is computed from `(source, ruleName)` only. The calling context is **intentionally excluded**.
+
+```
+// Rule A calls: ctx.equivalent(op, "CreateOperationBody")
+// Rule B calls: ctx.equivalent(op, "CreateOperationBody")
+
+// Zeta creates ONE target with simple ID:
+// (esm/op)/CreateOperationBody
+
+// Both callers receive the SAME target instance
+```
+
+### Why This is Correct
+
+Idempotent caching requires that `equivalent(source, "RuleName")` always returns the same target for a given source, regardless of which rule is asking. This ensures:
+
+| Property | ETL (Bug) | Zeta (Correct) |
+|----------|-----------|----------------|
+| XMI ID format | Compound (context-dependent) | Simple (context-independent) |
+| Cache hits | Depends on caller | Deterministic |
+| Object graph | Varies by execution order | Consistent |
+| Rule execution | May execute multiple times | Exactly once per (source, rule) |
+
+### Expected XMI ID Differences
+
+When comparing Zeta output to ETL, some XMI ID differences are **expected and correct**:
+
+| Pattern | ETL Output | Zeta Output | Explanation |
+|---------|------------|-------------|-------------|
+| Multi-context targets | `((A)/x)_((B)/x)` | `(source)/Rule` | Zeta avoids compound IDs |
+| Nested equivalent() calls | Compound hierarchy | Simple ID | Idempotent caching |
+
+These differences indicate Zeta's **correct** behavior, not bugs.
+
+### Test Coverage
+
+The `IdempotentCachingTest.java` verifies this correct behavior:
+- `testSameSourceSameTargetDifferentCallers`: Multiple callers get same target
+- `testCacheKeyIsContextIndependent`: Cache key excludes calling context
+- `testXmiIdIsSimpleFormat`: No compound IDs generated
+
+---
+
 ## Summary: Unsupported Features Quick Reference
 
 | Feature | Status | Recommended Alternative |

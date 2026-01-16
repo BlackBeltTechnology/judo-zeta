@@ -1570,10 +1570,26 @@ public class TransformationContext {
      *   <li>Caches the result</li>
      * </ul></p>
      *
+     * <h3>Idempotent Caching Behavior</h3>
+     *
+     * <p>The result is cached by {@code (source, ruleName)} only. The calling context
+     * (which rule is invoking this method) is <strong>intentionally NOT</strong> included
+     * in the cache key. This ensures:</p>
+     * <ul>
+     *   <li>Same (source, ruleName) pair always returns the same target instance</li>
+     *   <li>XMI IDs are simple format: {@code (source_id)/RuleName}</li>
+     *   <li>Multiple callers receive identical references (correct idempotent behavior)</li>
+     * </ul>
+     *
+     * <p><strong>Note:</strong> ETL includes calling context in its cache key, producing
+     * compound XMI IDs and non-idempotent behavior. This is a <strong>bug in ETL</strong>
+     * that Zeta intentionally does not replicate.</p>
+     *
      * @param source the source element
      * @param ruleName the rule name to execute
      * @param <T> the target type
      * @return the equivalent target, or null if rule not found, doesn't apply, or guard fails
+     * @see ElementResolutionCache
      */
     @SuppressWarnings("unchecked")
     public <T extends EObject> T equivalent(EObject source, String ruleName) {

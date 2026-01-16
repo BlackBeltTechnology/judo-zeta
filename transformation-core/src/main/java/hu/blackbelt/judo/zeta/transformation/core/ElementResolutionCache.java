@@ -32,11 +32,38 @@ import java.util.function.Supplier;
 /**
  * Cache for transformation trace (source → target mappings).
  *
- * <p>Provides idempotent transformation guarantees by caching results.
- * Multiple calls with the same source and rule return the same cached target.</p>
+ * <h2>Idempotent Caching Design</h2>
+ *
+ * <p>This cache provides <strong>idempotent transformation guarantees</strong> by caching results.
+ * The cache key is computed from {@code (source element, rule name)} only. The calling
+ * context (which rule is invoking equivalent()) is intentionally NOT included in the key.</p>
+ *
+ * <p><strong>Intentional Design:</strong> Multiple rules calling {@code equivalent(source, "RuleName")}
+ * for the same source element will always receive the same cached target instance, regardless
+ * of which rule initiated the call. This ensures:</p>
+ * <ul>
+ *   <li>Transformation rules execute exactly once per (source, ruleName) pair</li>
+ *   <li>XMI IDs are simple format: {@code (source_id)/RuleName}</li>
+ *   <li>Consistent object graph regardless of execution order</li>
+ * </ul>
+ *
+ * <h2>Comparison with ETL</h2>
+ *
+ * <p>ETL includes the calling context in the cache key, which leads to:</p>
+ * <ul>
+ *   <li><strong>BUG:</strong> Compound XMI IDs like {@code ((esm/A)/X)_((esm/B)/Y)}</li>
+ *   <li><strong>BUG:</strong> Multiple targets for the same (source, rule) pair</li>
+ *   <li><strong>BUG:</strong> Non-idempotent behavior violating transformation correctness</li>
+ * </ul>
+ * <p>Zeta's context-independent caching is the <strong>correct behavior</strong>, not a deviation.</p>
+ *
+ * <h2>Execution Modes</h2>
  *
  * <p>Supports both parallel and sequential execution modes. In sequential mode,
  * locking is skipped entirely for maximum performance.</p>
+ *
+ * @see TransformationContext#equivalent(EObject, String)
+ * @see <a href="../../../../../../openspec/specs/parallel-transformation/spec.md">Parallel Transformation Spec</a>
  */
 public class ElementResolutionCache {
 
