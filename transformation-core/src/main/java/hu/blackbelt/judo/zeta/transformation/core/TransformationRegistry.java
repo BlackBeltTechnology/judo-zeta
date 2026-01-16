@@ -178,7 +178,7 @@ public class TransformationRegistry {
         Class<? extends EObject> sourceType;
         Class<? extends EObject> targetType;
 
-        // Priority: @Transform annotations > sourceTypes attribute > default from @TransformationContext
+        // Priority: @Transform annotations > sourceTypes attribute > inferred from generic > default from @TransformationContext
         if (!transforms.isEmpty()) {
             sourceType = transforms.get(0).getType();
         } else if (sourceTypes.length > 0) {
@@ -188,8 +188,17 @@ public class TransformationRegistry {
                 transforms.add(new TransformDefinition("source", st));
             }
         } else {
-            sourceType = defaultSourceType;
-            transforms.add(new TransformDefinition("source", defaultSourceType));
+            // Try to infer source type from method return type (TransformFunction<Source, Target>)
+            Class<? extends EObject> inferredSourceType = extractSourceTypeFromReturnType(ruleMethod);
+            if (inferredSourceType != null) {
+                sourceType = inferredSourceType;
+                transforms.add(new TransformDefinition("source", inferredSourceType));
+                log.debug("Inferred source type from method signature: {} for rule: {}",
+                        inferredSourceType.getSimpleName(), name);
+            } else {
+                sourceType = defaultSourceType;
+                transforms.add(new TransformDefinition("source", defaultSourceType));
+            }
         }
 
         // Priority: @To annotations > targetTypes attribute > method return type > default from @TransformationContext
@@ -492,6 +501,84 @@ public class TransformationRegistry {
                 log.error("Failed to invoke post-transformation hook: {}", hook.getName(), e);
             }
         }
+    }
+
+    /**
+     * Extract the source type from a rule method's return type.
+     *
+     * <p>For methods returning {@code TransformFunction<SourceType, TargetType>},
+     * extracts SourceType as the first generic type argument.</p>
+     *
+     * <p>This enables automatic type-based rule filtering without requiring explicit
+     * {@code @Transform} annotations. The inferred type is used to determine which
+     * elements a rule should be evaluated against.</p>
+     *
+     * <p>Example:</p>
+     * <pre>{@code
+     * public TransformFunction<EntityType, EClass> createEntityClass() {
+     *     // Source type EntityType is inferred - rule only evaluated for EntityType elements
+     * }
+     * }</pre>
+     *
+     * <p>Note: If the inferred type is {@code EObject}, it is ignored (no filtering benefit)
+     * and the default source type from {@code @TransformationContext} is used instead.</p>
+     *
+     * @param ruleMethod the rule method
+     * @return the extracted source type, or null if extraction fails or type is EObject
+     */
+    @SuppressWarnings("unchecked")
+    private Class<? extends EObject> extractSourceTypeFromReturnType(Method ruleMethod) {
+        Type returnType = ruleMethod.getGenericReturnType();
+
+        // Check if return type is parameterized (e.g., TransformFunction<S, T>)
+        if (returnType instanceof ParameterizedType) {
+            ParameterizedType parameterizedType = (ParameterizedType) returnType;
+            Type[] typeArgs = parameterizedType.getActualTypeArguments();
+
+            // TransformFunction has 2 type parameters: <SourceType, TargetType>
+            // We want the first one (index 0)
+            if (typeArgs.length >= 1) {
+                Type sourceTypeArg = typeArgs[0];
+
+                // Handle direct class reference
+                if (sourceTypeArg instanceof Class) {
+                    Class<?> sourceClass = (Class<?>) sourceTypeArg;
+                    if (EObject.class.isAssignableFrom(sourceClass)) {
+                        // Skip if it's exactly EObject (no filtering benefit)
+                        if (sourceClass.equals(EObject.class)) {
+                            return null;
+                        }
+                        return (Class<? extends EObject>) sourceClass;
+                    }
+                }
+
+                // Handle parameterized types (e.g., if source is itself generic)
+                if (sourceTypeArg instanceof ParameterizedType) {
+                    Type rawType = ((ParameterizedType) sourceTypeArg).getRawType();
+                    if (rawType instanceof Class && EObject.class.isAssignableFrom((Class<?>) rawType)) {
+                        Class<?> rawClass = (Class<?>) rawType;
+                        if (rawClass.equals(EObject.class)) {
+                            return null;
+                        }
+                        return (Class<? extends EObject>) rawClass;
+                    }
+                }
+
+                // Handle wildcard types (e.g., ? extends NamedElement)
+                if (sourceTypeArg instanceof java.lang.reflect.WildcardType) {
+                    java.lang.reflect.WildcardType wildcardType = (java.lang.reflect.WildcardType) sourceTypeArg;
+                    Type[] upperBounds = wildcardType.getUpperBounds();
+                    if (upperBounds.length > 0 && upperBounds[0] instanceof Class) {
+                        Class<?> boundClass = (Class<?>) upperBounds[0];
+                        if (EObject.class.isAssignableFrom(boundClass) && !boundClass.equals(EObject.class)) {
+                            return (Class<? extends EObject>) boundClass;
+                        }
+                    }
+                }
+            }
+        }
+
+        return null;
     }
 
     /**
