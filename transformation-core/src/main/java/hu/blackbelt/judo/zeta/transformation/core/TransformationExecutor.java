@@ -107,6 +107,12 @@ public class TransformationExecutor {
         this.parallelThreshold = DEFAULT_PARALLEL_THRESHOLD;
         this.chunkSize = DEFAULT_CHUNK_SIZE;
         this.etlCompatibilityMode = false;
+
+        // CRITICAL: Set the registry on the context so that equivalent() and
+        // equivalentDiscriminated() can trigger @Lazy rules from ANY calling context
+        // (rule bodies, utility methods, etc.). Without this, those methods would
+        // return null when called from outside a transformation rule.
+        this.context.setTransformationRegistry(this.registry);
     }
 
     private TransformationExecutor(Builder builder) {
@@ -116,6 +122,12 @@ public class TransformationExecutor {
         this.parallelThreshold = builder.parallelThreshold;
         this.chunkSize = builder.chunkSize;
         this.etlCompatibilityMode = builder.etlCompatibilityMode;
+
+        // CRITICAL: Set the registry on the context so that equivalent() and
+        // equivalentDiscriminated() can trigger @Lazy rules from ANY calling context
+        // (rule bodies, utility methods, etc.). Without this, those methods would
+        // return null when called from outside a transformation rule.
+        this.context.setTransformationRegistry(this.registry);
 
         // Configure cache for sequential mode if parallel is disabled
         // This provides significant performance improvement by using simpler data structures

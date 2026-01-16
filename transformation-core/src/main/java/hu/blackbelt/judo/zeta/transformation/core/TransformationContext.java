@@ -1103,6 +1103,21 @@ public class TransformationContext {
             String targetId = generateStructuredId(source, ruleName);
             setElementId(instance, targetId);
 
+            // EARLY CACHING for circular discriminated call handling:
+            // Cache the target immediately so that circular calls to equivalentDiscriminated()
+            // with different discriminators can find and clone this (partial) target.
+            // Without this, circular discriminated calls would return null because the
+            // recursion check (inProgressRules.contains(key)) fires before the target is cached.
+            // This enables patterns like:
+            //   1. Rule A (discriminator "d1") starts, creates target
+            //   2. Rule A calls Rule B
+            //   3. Rule B calls equivalentDiscriminated(..., "d2") for Rule A
+            //   4. Instead of returning null, find the in-progress target and clone it
+            if (rule != null && source != null && rule.isLazy()) {
+                RuleCacheKey key = new RuleCacheKey(source, rule.getName());
+                executingLazyRules.putIfAbsent(key, instance);
+            }
+
             // Check if current rule is @Detached - detached rules NEVER add to resource
             // The caller is responsible for adding to the appropriate container
             boolean isDetached = isCurrentRuleDetached();
@@ -1871,10 +1886,30 @@ public class TransformationContext {
                             // Check for recursion
                             Set<RuleCacheKey> inProgress = inProgressRules.get();
                             if (inProgress.contains(key)) {
-                                return null;
+                                // Circular call detected. For discriminated calls, we can still
+                                // proceed if the original target has been early-cached (via createTarget()).
+                                // This enables patterns where Rule A calls Rule B, and Rule B needs
+                                // a discriminated variant of Rule A's output.
+                                if (discriminator != null) {
+                                    // Check if the original was early-cached
+                                    EObject earlyCached = executingLazyRules.get(key);
+                                    if (earlyCached != null && targetType.isInstance(earlyCached)) {
+                                        // Use the early-cached target as the original for cloning
+                                        // Skip lock acquisition and rule execution - go straight to cloning
+                                        original = (T) earlyCached;
+                                    } else {
+                                        // No early-cached target available - return null
+                                        return null;
+                                    }
+                                } else {
+                                    // Non-discriminated circular call - return null to break cycle
+                                    return null;
+                                }
                             }
 
-                            // Acquire per-rule lock for thread-safe execution
+                            // Only acquire lock and execute rule if we don't have the original yet
+                            if (original == null) {
+                                // Acquire per-rule lock for thread-safe execution
                             ReentrantLock lock = resolutionCache.getLockFor(source, ruleName);
                             boolean lockAcquired;
                             try {
@@ -1932,6 +1967,7 @@ public class TransformationContext {
                             } finally {
                                 lock.unlock();
                             }
+                            }  // end if (original == null) for lock/execute
                         }
                     }
                 }
