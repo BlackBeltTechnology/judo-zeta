@@ -206,8 +206,19 @@ public class TransformationContext {
      * Whether to include the source element's name as a prefix in structured IDs.
      * When false (default), IDs are: (alias/sourceId)/RuleName
      * When true, IDs are: ElementName/(alias/sourceId)/RuleName
+     *
+     * <p>Mutually exclusive with {@link #globalIdPrefix}.</p>
      */
     private volatile boolean includeElementNameInStructuredIds = false;
+
+    /**
+     * Global prefix to prepend to ALL generated structured XMI IDs.
+     * When set, IDs have format: GlobalPrefix/(alias/sourceId)/RuleName
+     *
+     * <p>This matches ETL behavior where actorType.name prefixes all IDs uniformly.
+     * Mutually exclusive with {@link #includeElementNameInStructuredIds}.</p>
+     */
+    private volatile String globalIdPrefix = null;
 
     /**
      * Cache for structured ID generation to avoid repeated string building.
@@ -673,8 +684,14 @@ public class TransformationContext {
      * {@code ElementName/(alias/sourceId)/RuleName}</p>
      *
      * @param include true to include element name prefix, false to exclude (default)
+     * @throws IllegalStateException if globalIdPrefix is set and include is true
      */
     public void setIncludeElementNameInStructuredIds(boolean include) {
+        if (include && globalIdPrefix != null) {
+            throw new IllegalStateException(
+                "Cannot enable includeElementNameInStructuredIds when globalIdPrefix is set. " +
+                "These options are mutually exclusive.");
+        }
         this.includeElementNameInStructuredIds = include;
     }
 
@@ -685,6 +702,42 @@ public class TransformationContext {
      */
     public boolean isIncludeElementNameInStructuredIds() {
         return includeElementNameInStructuredIds;
+    }
+
+    /**
+     * Set a global prefix for ALL generated structured XMI IDs.
+     *
+     * <p>When set, all structured IDs have the format:
+     * {@code GlobalPrefix/(alias/sourceId)/RuleName}</p>
+     *
+     * <p>This matches ETL behavior where {@code actorType.name} prefixes all IDs uniformly,
+     * as opposed to {@link #setIncludeElementNameInStructuredIds} which uses each element's
+     * own name (varying per element).</p>
+     *
+     * <p>Must be called before any rules execute (during initialization).</p>
+     *
+     * @param prefix the global prefix to prepend, or null/empty to disable
+     * @throws IllegalStateException if includeElementNameInStructuredIds is enabled
+     */
+    public void setGlobalIdPrefix(String prefix) {
+        // Normalize empty string to null
+        String normalizedPrefix = (prefix == null || prefix.isEmpty()) ? null : prefix;
+
+        if (normalizedPrefix != null && includeElementNameInStructuredIds) {
+            throw new IllegalStateException(
+                "Cannot set globalIdPrefix when includeElementNameInStructuredIds is enabled. " +
+                "These options are mutually exclusive.");
+        }
+        this.globalIdPrefix = normalizedPrefix;
+    }
+
+    /**
+     * Get the global ID prefix.
+     *
+     * @return the global prefix, or null if not set
+     */
+    public String getGlobalIdPrefix() {
+        return globalIdPrefix;
     }
 
     /**
@@ -2795,10 +2848,11 @@ public class TransformationContext {
     /**
      * Get the source element's path for structured ID generation.
      *
-     * <p>Format depends on {@link #includeElementNameInStructuredIds}:</p>
+     * <p>Format depends on configuration (checked in order of precedence):</p>
      * <ul>
-     *   <li>When false (default): {@code (<alias>/<source-id>)}</li>
-     *   <li>When true: {@code <element-name>/(<alias>/<source-id>)}</li>
+     *   <li>When {@link #globalIdPrefix} is set: {@code <global-prefix>/(<alias>/<source-id>)}</li>
+     *   <li>When {@link #includeElementNameInStructuredIds} is true: {@code <element-name>/(<alias>/<source-id>)}</li>
+     *   <li>Otherwise (default): {@code (<alias>/<source-id>)}</li>
      * </ul>
      *
      * @param source the source element
@@ -2815,7 +2869,12 @@ public class TransformationContext {
         // Get the resource alias for the source element
         String alias = getResourceAlias(source);
 
-        // Only include element name if explicitly enabled
+        // Global prefix takes precedence (ETL actorType.name compatibility)
+        if (globalIdPrefix != null) {
+            return globalIdPrefix + "/(" + alias + "/" + sourceId + ")";
+        }
+
+        // Element name prefix if explicitly enabled
         if (includeElementNameInStructuredIds) {
             String elementName = getContainerName(source);
             if (elementName != null && !elementName.isEmpty()) {

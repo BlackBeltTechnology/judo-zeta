@@ -253,6 +253,171 @@ class StructuredIdTest {
         }
     }
 
+    // ==================== Global ID Prefix Tests ====================
+
+    @Nested
+    @DisplayName("Global ID Prefix Tests")
+    class GlobalIdPrefixTests {
+
+        @Test
+        @DisplayName("Global prefix applied to all generated IDs")
+        void globalPrefixAppliedToAllIds() {
+            context.setGlobalIdPrefix("GenericUser");
+            EClass source = createEClass("Customer", "_abc123");
+
+            registry.register(SimpleTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            EPackage target = (EPackage) targetResource.getContents().get(0);
+            String targetId = context.getPendingXmiId(target);
+            if (targetId == null && targetResource instanceof XMIResource) {
+                targetId = ((XMIResource) targetResource).getID(target);
+            }
+
+            assertNotNull(targetId, "Target should have an XMI ID");
+            // Expected: GenericUser/(source/_abc123)/Entity2Package
+            assertEquals("GenericUser/(source/_abc123)/Entity2Package", targetId,
+                    "ID should have global prefix");
+        }
+
+        @Test
+        @DisplayName("Global prefix with preferred source alias")
+        void globalPrefixWithPreferredSourceAlias() {
+            context.registerResource("esm", sourceResourceSet);
+            context.setPreferredSourceAlias("esm");
+            context.setGlobalIdPrefix("GenericUser");
+
+            EClass source = createEClass("XMLType", "_MaJNYeiFEfCKeN0VGO_Tbg");
+
+            registry.register(SimpleTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            EPackage target = (EPackage) targetResource.getContents().get(0);
+            String targetId = context.getPendingXmiId(target);
+            if (targetId == null && targetResource instanceof XMIResource) {
+                targetId = ((XMIResource) targetResource).getID(target);
+            }
+
+            assertNotNull(targetId);
+            // Expected: GenericUser/(esm/_MaJNYeiFEfCKeN0VGO_Tbg)/Entity2Package
+            assertEquals("GenericUser/(esm/_MaJNYeiFEfCKeN0VGO_Tbg)/Entity2Package", targetId,
+                    "ID should have global prefix with custom alias");
+        }
+
+        @Test
+        @DisplayName("Exception when globalIdPrefix set with includeElementNameInStructuredIds enabled")
+        void exceptionWhenGlobalPrefixSetWithElementNameEnabled() {
+            context.setIncludeElementNameInStructuredIds(true);
+
+            IllegalStateException exception = assertThrows(IllegalStateException.class,
+                    () -> context.setGlobalIdPrefix("GenericUser"),
+                    "Should throw exception when setting globalIdPrefix with includeElementName enabled");
+
+            assertTrue(exception.getMessage().contains("mutually exclusive"),
+                    "Exception message should mention mutual exclusivity: " + exception.getMessage());
+        }
+
+        @Test
+        @DisplayName("Exception when includeElementNameInStructuredIds enabled with globalIdPrefix set")
+        void exceptionWhenElementNameEnabledWithGlobalPrefixSet() {
+            context.setGlobalIdPrefix("GenericUser");
+
+            IllegalStateException exception = assertThrows(IllegalStateException.class,
+                    () -> context.setIncludeElementNameInStructuredIds(true),
+                    "Should throw exception when enabling includeElementName with globalIdPrefix set");
+
+            assertTrue(exception.getMessage().contains("mutually exclusive"),
+                    "Exception message should mention mutual exclusivity: " + exception.getMessage());
+        }
+
+        @Test
+        @DisplayName("Null prefix disables the feature")
+        void nullPrefixDisablesFeature() {
+            context.setGlobalIdPrefix("GenericUser");
+            context.setGlobalIdPrefix(null); // Disable
+
+            EClass source = createEClass("Customer", "_abc123");
+
+            registry.register(SimpleTransformation.class);
+            context.setTransformationRegistry(registry);
+
+            TransformationExecutor executor = TransformationExecutor.builder()
+                    .registry(registry)
+                    .context(context)
+                    .parallel(false)
+                    .build();
+
+            executor.transform();
+
+            EPackage target = (EPackage) targetResource.getContents().get(0);
+            String targetId = context.getPendingXmiId(target);
+            if (targetId == null && targetResource instanceof XMIResource) {
+                targetId = ((XMIResource) targetResource).getID(target);
+            }
+
+            assertNotNull(targetId);
+            // Expected: (source/_abc123)/Entity2Package (no prefix)
+            assertEquals("(source/_abc123)/Entity2Package", targetId,
+                    "ID should have no prefix when disabled");
+        }
+
+        @Test
+        @DisplayName("Empty string treated as null")
+        void emptyStringTreatedAsNull() {
+            context.setGlobalIdPrefix("");
+
+            assertNull(context.getGlobalIdPrefix(),
+                    "Empty string should be normalized to null");
+
+            // Should also allow setting includeElementNameInStructuredIds now
+            assertDoesNotThrow(() -> context.setIncludeElementNameInStructuredIds(true),
+                    "Should be able to enable includeElementName after setting empty prefix");
+        }
+
+        @Test
+        @DisplayName("Getter returns current value")
+        void getterReturnsCurrentValue() {
+            // Default is null
+            assertNull(context.getGlobalIdPrefix(), "Default should be null");
+
+            // Set a value
+            context.setGlobalIdPrefix("GenericUser");
+            assertEquals("GenericUser", context.getGlobalIdPrefix(),
+                    "Should return set value");
+
+            // Set back to null
+            context.setGlobalIdPrefix(null);
+            assertNull(context.getGlobalIdPrefix(), "Should return null after clearing");
+        }
+
+        @Test
+        @DisplayName("No conflict when includeElementNameInStructuredIds is false")
+        void noConflictWhenElementNameIsFalse() {
+            context.setIncludeElementNameInStructuredIds(false);
+
+            assertDoesNotThrow(() -> context.setGlobalIdPrefix("GenericUser"),
+                    "Should not throw when includeElementName is false (default)");
+
+            assertEquals("GenericUser", context.getGlobalIdPrefix());
+        }
+    }
+
     // ==================== Structured ID Tests ====================
 
     @Nested
