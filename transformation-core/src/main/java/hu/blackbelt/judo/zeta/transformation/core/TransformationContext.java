@@ -34,6 +34,9 @@ import org.eclipse.emf.ecore.resource.ResourceSet;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.emf.ecore.xmi.XMIResource;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.*;
@@ -41,6 +44,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
@@ -60,6 +64,8 @@ import static java.util.Optional.ofNullable;
  * </ul>
  */
 public class TransformationContext {
+
+    private static final Logger LOG = LoggerFactory.getLogger(TransformationContext.class);
 
     private final ModelProvider modelProvider;
     private final ResourceSet sourceResourceSet;
@@ -102,6 +108,13 @@ public class TransformationContext {
      * Elements are staged here instead of being added directly to the target Resource.
      */
     private final ConcurrentLinkedQueue<StagedElement> stagedElements = new ConcurrentLinkedQueue<>();
+
+    /**
+     * Counter for staged elements to establish memory visibility.
+     * Incrementing after offer() and reading before poll() creates a happens-before
+     * relationship that ensures all staged elements are visible during commit.
+     */
+    private final AtomicInteger stagedElementCount = new AtomicInteger(0);
 
     /**
      * Flag indicating whether element staging is enabled.
@@ -1183,6 +1196,7 @@ public class TransformationContext {
             long sequence = creationSequence.getAndIncrement();
             elementOrder.put(unwrapped, sequence);
             stagedElements.offer(new StagedElement(unwrapped, true, sequence));
+            stagedElementCount.incrementAndGet(); // Memory barrier for visibility
         } else {
             // Sequential mode: add directly to Resource
             if (!targetResourceSet.getResources().isEmpty()) {
@@ -1850,6 +1864,10 @@ public class TransformationContext {
                 if (existing != null) {
                     // Cache it for future lookups and return
                     resolutionCache.addDiscriminatedMapping(source, existing, ruleName, discriminator);
+                    if ("create".equals(discriminator) && LOG.isDebugEnabled()) {
+                        LOG.debug("XMI_LOOKUP found 'create' clone: clone={}, id={}",
+                                System.identityHashCode(existing), discriminatedId);
+                    }
                     return existing;
                 }
             }
@@ -1884,14 +1902,16 @@ public class TransformationContext {
                         // Use RuleCacheKey for locking to share lock with executeParentRule()
                         RuleCacheKey key = new RuleCacheKey(source, ruleName);
 
-                        // Fast path: check if already executed (from cache or concurrent execution)
-                        EObject existingFromLazyRules = executingLazyRules.get(key);
-                        if (existingFromLazyRules != null && targetType.isInstance(existingFromLazyRules)) {
-                            original = (T) existingFromLazyRules;
-                        } else {
-                            // Check for recursion
-                            Set<RuleCacheKey> inProgress = inProgressRules.get();
-                            if (inProgress.contains(key)) {
+                        // NOTE: We intentionally DON'T check executingLazyRules outside the lock here.
+                        // The executingLazyRules map may contain partially-initialized proxies
+                        // (from createTarget's early caching for circular dependency handling).
+                        // Accessing them before the lazy rule completes setting attributes causes
+                        // race conditions where clones have missing attribute values (e.g., null source).
+                        // The lock-based path below handles this correctly.
+
+                        // Check for recursion
+                        Set<RuleCacheKey> inProgress = inProgressRules.get();
+                        if (inProgress.contains(key)) {
                                 // Circular call detected. For discriminated calls, we can still
                                 // proceed if the original target has been early-cached (via createTarget()).
                                 // This enables patterns where Rule A calls Rule B, and Rule B needs
@@ -1942,7 +1962,7 @@ public class TransformationContext {
                                 if (existing != null && targetType.isInstance(existing)) {
                                     original = (T) existing;
                                 } else {
-                                    existingFromLazyRules = executingLazyRules.get(key);
+                                    EObject existingFromLazyRules = executingLazyRules.get(key);
                                     if (existingFromLazyRules != null && targetType.isInstance(existingFromLazyRules)) {
                                         original = (T) existingFromLazyRules;
                                     } else {
@@ -1982,7 +2002,6 @@ public class TransformationContext {
                                 lock.unlock();
                             }
                             }  // end if (original == null) for lock/execute
-                        }
                     }
                 }
             }
@@ -2005,6 +2024,9 @@ public class TransformationContext {
             // This prevents duplicate clones when multiple threads call equivalentDiscriminated()
             // with the same (source, ruleName, discriminator) tuple concurrently.
             DiscriminatedCacheKey discKey = new DiscriminatedCacheKey(source, ruleName, discriminator);
+
+            // DEBUG: Track clone creation for "create" discriminator
+            boolean isCreateDiscriminator = "create".equals(discriminator);
 
             // Acquire per-key lock for thread-safe clone creation
             // IMPORTANT: Use tryLock with timeout to prevent deadlocks from
@@ -2069,7 +2091,12 @@ public class TransformationContext {
                         // Parallel mode: stage for later commit with ordering
                         long sequence = creationSequence.getAndIncrement();
                         elementOrder.put(clone, sequence);
-                        stagedElements.offer(new StagedElement(clone, true, sequence));
+                        boolean staged = stagedElements.offer(new StagedElement(clone, true, sequence));
+                        stagedElementCount.incrementAndGet(); // Memory barrier for visibility
+                        if (isCreateDiscriminator && LOG.isDebugEnabled()) {
+                            LOG.debug("STAGED 'create' clone: staged={}, seq={}, clone={}, id={}",
+                                    staged, sequence, System.identityHashCode(clone), discriminatedId);
+                        }
                     } else {
                         // Sequential mode: add directly to Resource
                         if (!targetResourceSet.getResources().isEmpty()) {
@@ -2534,6 +2561,7 @@ public class TransformationContext {
             elementOrder.put(instance, sequence);
             // Stage as non-root element (won't be added to Resource.contents during commit)
             stagedElements.offer(new StagedElement(instance, false, sequence));
+            stagedElementCount.incrementAndGet(); // Memory barrier for visibility
         }
 
         return (T) instance;
@@ -2640,8 +2668,13 @@ public class TransformationContext {
         XMIResource xmiResource = targetResource instanceof XMIResource
             ? (XMIResource) targetResource : null;
 
+        // MEMORY BARRIER: Reading the counter establishes happens-before with all
+        // incrementAndGet() calls from staging threads. This ensures all staged
+        // elements are visible before we start draining the queue.
+        int expectedCount = stagedElementCount.get();
+
         // Collect all staged elements
-        List<StagedElement> elementsToCommit = new ArrayList<>();
+        List<StagedElement> elementsToCommit = new ArrayList<>(expectedCount);
         StagedElement staged;
         while ((staged = stagedElements.poll()) != null) {
             elementsToCommit.add(staged);
@@ -2649,6 +2682,20 @@ public class TransformationContext {
 
         // Sort by creation sequence for deterministic ordering
         elementsToCommit.sort(Comparator.comparingLong(e -> e.sequence));
+
+        // DEBUG: Count "create" clones in staged elements
+        int createCloneCount = 0;
+        EObject createClone = null;
+        for (StagedElement se : elementsToCommit) {
+            String pid = pendingXmiIds.get(se.element);
+            if (pid != null && pid.contains("/(discriminator/create)")) {
+                createCloneCount++;
+                createClone = se.element;
+            }
+        }
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("COMMIT: total staged={}, 'create' clones found in staged={}", elementsToCommit.size(), createCloneCount);
+        }
 
         // Add to resource in order
         for (StagedElement element : elementsToCommit) {
@@ -2658,6 +2705,12 @@ public class TransformationContext {
             // Only add root elements that are not yet contained
             if (element.isRootElement && obj.eContainer() == null) {
                 targetResource.getContents().add(obj);
+            } else if (element.isRootElement) {
+                String pid = pendingXmiIds.get(element.element);
+                if (pid != null && pid.contains("/(discriminator/create)")) {
+                    LOG.warn("COMMIT: 'create' clone has container! obj={}, container={}, id={}",
+                            System.identityHashCode(obj), obj.eContainer(), pid);
+                }
             }
 
             // Apply pending XMI ID now that element is in resource
@@ -2672,6 +2725,15 @@ public class TransformationContext {
 
             // Also apply pending IDs to contained elements recursively
             applyPendingIdsRecursively(obj, xmiResource);
+        }
+
+        // DEBUG: Verify "create" clone is in resource
+        if (createClone != null && LOG.isDebugEnabled()) {
+            EObject unwrappedCreate = DeferredEObject.unwrap(createClone);
+            boolean inResource = targetResource.getContents().contains(unwrappedCreate);
+            String actualId = xmiResource != null ? xmiResource.getID(unwrappedCreate) : null;
+            LOG.debug("COMMIT_END: 'create' clone in resource={}, actualId={}, container={}",
+                    inResource, actualId, unwrappedCreate.eContainer());
         }
     }
 
@@ -2696,6 +2758,7 @@ public class TransformationContext {
      */
     void clearStagedElements() {
         stagedElements.clear();
+        stagedElementCount.set(0);
     }
 
     /**
