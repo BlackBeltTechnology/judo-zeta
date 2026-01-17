@@ -259,18 +259,48 @@ class EquivalentDiscriminatedRaceTest {
 
             assertDoesNotThrow(() -> executor.transform());
 
+            // DEBUG: Check resource state immediately after transform
+            int totalAnnotations = 0;
+            Set<String> allSources = new HashSet<>();
+            for (EObject obj : targetResource.getContents()) {
+                if (obj instanceof EAnnotation) {
+                    totalAnnotations++;
+                    EAnnotation ann = (EAnnotation) obj;
+                    allSources.add(ann.getSource());
+                }
+            }
+            log.debug("POST-TRANSFORM: total EAnnotations in resource={}, sources={}", totalAnnotations, allSources);
+
             // Count actual EAnnotation elements that came from the shared entity
             // These are clones created by equivalentDiscriminated()
             // Expected: 6 (one per discriminator) - cached and shared by all referrers
             // Race condition would create MORE than 6
             int cloneCount = 0;
+            Set<String> foundDiscriminators = new HashSet<>();
+            org.eclipse.emf.ecore.xmi.XMIResource xmiResource = (org.eclipse.emf.ecore.xmi.XMIResource) targetResource;
             for (EObject obj : targetResource.getContents()) {
                 if (obj instanceof EAnnotation) {
                     EAnnotation ann = (EAnnotation) obj;
                     if (ann.getSource() != null && ann.getSource().startsWith("CrossRef_SharedEntity")) {
                         cloneCount++;
+                        String xmiId = xmiResource.getID(ann);
+                        if (xmiId != null && xmiId.contains("/(discriminator/")) {
+                            int start = xmiId.indexOf("/(discriminator/") + 16;
+                            int end = xmiId.indexOf(")", start);
+                            if (end > start) {
+                                foundDiscriminators.add(xmiId.substring(start, end));
+                            }
+                        }
                     }
                 }
+            }
+
+            // Check which discriminators are missing
+            Set<String> expectedDiscriminators = new HashSet<>(Arrays.asList(MultiCallerEagerRule.DISCRIMINATORS));
+            Set<String> missingDiscriminators = new HashSet<>(expectedDiscriminators);
+            missingDiscriminators.removeAll(foundDiscriminators);
+            if (!missingDiscriminators.isEmpty()) {
+                log.error("MISSING DISCRIMINATORS: {} - Found: {}", missingDiscriminators, foundDiscriminators);
             }
 
             // Also count total invocations (should be 500 * 6 = 3000)

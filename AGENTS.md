@@ -323,6 +323,7 @@ EObject obj = ctx.createTarget(dynamicType, dynamicPackage);
 **Safe Operations:**
 - `ctx.createTarget()` - Creates staged elements
 - `ctx.createTarget(Class, EPackage)` - Creates in specific package
+- `ctx.createTarget(Class, String customId)` - Creates with custom ID (race-condition safe)
 - `ctx.equivalent()` - Thread-safe lazy rule execution with per-element locking
 - `ctx.equivalentDiscriminated()` - Thread-safe discriminated equivalence
 - Setting properties on elements you created
@@ -332,6 +333,178 @@ EObject obj = ctx.createTarget(dynamicType, dynamicPackage);
 - Modifying source elements
 - Modifying target elements created by other rules
 - Shared mutable state between rules
+
+### Rule Invocation Stack (Context-Aware Resolution)
+
+The framework maintains a thread-local stack of rule invocations, enabling context-aware discriminator resolution. This is particularly useful for achieving ETL compatibility where different calling contexts require different discriminators.
+
+**Key Classes:**
+- `RuleInvocation` - Record capturing rule name, source, and discriminator
+- `DiscriminatorResolver` - Functional interface for context-aware resolution
+- `DiscriminatorResolver.Resolution` - Result containing discriminator and cache mode
+
+**Stack Management:**
+```java
+// Push rule invocation (done automatically by TransformRuleDescriptor.execute())
+ctx.pushRuleInvocation("RuleName", source, discriminator);
+
+// Access the call chain
+List<RuleInvocation> chain = ctx.getRuleInvocationChain();
+
+// Check if in specific rule context
+boolean inButton = ctx.isInRuleContext("ButtonGroupRule");
+
+// Find specific rule in chain
+RuleInvocation buttonInv = ctx.findRuleInChain("ButtonGroupRule");
+
+// Pop when rule completes (automatic in finally block)
+ctx.popRuleInvocation();
+```
+
+**Context-Aware Discriminator Resolution:**
+```java
+ctx.setDiscriminatorResolver(new DiscriminatorResolver() {
+    @Override
+    public Resolution resolve(EObject source, String ruleName, List<RuleInvocation> callChain) {
+        if (ruleName.equals("ActionDefinitionRule")) {
+            // Check if called from ButtonGroup context
+            for (RuleInvocation inv : callChain) {
+                if (inv.ruleName().equals("ButtonGroupRule")) {
+                    // Use discriminator-only cache for ETL-compatible sharing
+                    return Resolution.discriminatorOnlyCache(
+                        "buttonContext/" + getId(inv.source()));
+                }
+            }
+            // Default: source-based cache
+            return Resolution.sourceBasedCache("defaultContext");
+        }
+        return null; // Use explicit discriminator
+    }
+
+    @Override
+    @Deprecated
+    public String resolveDiscriminator(EObject source, String ruleName, List<RuleInvocation> callChain) {
+        return null; // Not used when resolve() is overridden
+    }
+});
+```
+
+### Discriminator-Only Cache (ETL-Compatible Caching)
+
+The framework supports two caching modes for `equivalentDiscriminated()`:
+
+| Mode | Cache Key | Use Case |
+|------|-----------|----------|
+| **SOURCE_BASED** (default) | `(source, ruleName, discriminator)` | Different sources create separate targets |
+| **DISCRIMINATOR_ONLY** | `(ruleName, discriminator)` | Different sources share target if same discriminator |
+
+**When to use DISCRIMINATOR_ONLY:**
+- Matching ETL's string-based caching semantics
+- When ActionDefinitions should be shared between Button and Action contexts
+- When the discriminator alone should determine identity
+
+**Resolution factory methods:**
+```java
+// Source-based caching (default ZETA behavior)
+Resolution.sourceBasedCache("my-discriminator");
+
+// Discriminator-only caching (ETL-compatible)
+Resolution.discriminatorOnlyCache("shared-discriminator");
+```
+
+**Example: Sharing ActionDefinitions across contexts:**
+```java
+ctx.setDiscriminatorResolver(new DiscriminatorResolver() {
+    @Override
+    public Resolution resolve(EObject source, String ruleName, List<RuleInvocation> callChain) {
+        if ("OperationFormCallActionDefinition".equals(ruleName)) {
+            // Both Button and Action contexts use same discriminator
+            // for the same TransferObjectForm
+            TransferObjectForm form = findFormInContext(callChain);
+            if (form != null) {
+                String disc = actorType.getName() + "/(esm/" + getId(form) + ")/Form";
+                // DISCRIMINATOR_ONLY enables sharing across different source objects
+                return Resolution.discriminatorOnlyCache(disc);
+            }
+        }
+        return null;
+    }
+    // ...
+});
+```
+
+**Orphan Element Prevention:**
+
+The DISCRIMINATOR_ONLY cache mode prevents orphan elements by using the original element directly instead of cloning:
+
+| Mode | Behavior | Orphans |
+|------|----------|---------|
+| **SOURCE_BASED** | Create original → clone → add clone to Resource | Original may become orphan |
+| **DISCRIMINATOR_ONLY** | Create original → update ID → add to Resource | No orphans (single element) |
+
+This matches ETL semantics where there's only ONE element per discriminator key, not an "original" + "clone" pair.
+
+**How it works internally:**
+1. Rule executes and creates target element via `createTarget()`
+2. Target is added to Resource via `addToResource()` (not skipped)
+3. Target's ID is updated to the discriminated ID
+4. Target is cached in discriminator-only cache
+5. Future calls with same discriminator return the cached target
+
+**Key difference from source-based cache:**
+- Source-based: `inDiscriminatedExecution=true` prevents `addToResource()`, then clones
+- Discriminator-only: `inDiscriminatedExecution=false` allows `addToResource()`, no cloning
+
+### Element ID Race Condition Prevention
+
+**Problem:** When a rule creates a target and later sets a custom ID, other rules that read the ID in between see the wrong (initial) ID.
+
+**Solution:** Use `createTarget(Class, String customId)` to set custom IDs at creation time:
+
+```java
+// WRONG - Race condition! Other rules may see initial ID
+EPackage target = ctx.createTarget(EPackage.class);
+ctx.equivalent(source, OtherRule.class);  // OtherRule reads initial ID
+ctx.setElementId(target, customId);       // THROWS IllegalStateException!
+
+// CORRECT - No race condition
+String customId = "myprefix/" + source.getName();
+EPackage target = ctx.createTarget(EPackage.class, customId);
+ctx.equivalent(source, OtherRule.class);  // OtherRule sees correct ID
+```
+
+**Rules:**
+- `setElementId()` throws `IllegalStateException` if another rule has read the ID
+- Use `createTarget(type, customId)` when you need a custom ID
+- Or call `setElementId()` BEFORE calling any `equivalent()` methods
+
+**Clone Tracking (January 2026 Update):**
+
+External read tracking also applies to **clones** from `equivalentDiscriminated()`:
+
+```java
+// WRONG - Clone's ID was read, then changed
+Action action = ctx.equivalentDiscriminated(source, Action.class, "CreateAction", disc);
+String id = ctx.getElementId(action);  // External read - marks clone
+ctx.setElementId(action, customId);    // THROWS IllegalStateException!
+
+// CORRECT - Accept the framework-generated discriminated ID
+Action action = ctx.equivalentDiscriminated(source, Action.class, "CreateAction", disc);
+// Use action as-is, ID format: (source/<id>)/CreateAction/(discriminator/<disc>)
+
+// OR - Have the lazy rule set custom ID
+@TransformRule(name = "CreateAction") @Lazy
+public TransformFunction<Source, Action> createAction() {
+    return (source, ctx) -> {
+        String customId = buildCustomId(source);
+        return ctx.createTarget(Action.class, customId);  // ID set at creation
+    };
+}
+```
+
+**Important:** `equivalentDiscriminated()` with a lazy rule **never returns null** - it executes the rule.
+
+> **Migration Guide**: See `MIGRATION-ID-RACE-CONDITION-FIX.md` for detailed migration patterns
 
 ### Thread-Safety Implementation Details
 
@@ -368,6 +541,30 @@ try {
     Throwable cause = e.getCause();
     // Handle error with full context
 }
+```
+
+### Diagnostic Logging
+
+The framework provides built-in diagnostics for debugging transformation issues:
+
+**XMI ID Collision Detection (ERROR level):**
+```
+ERROR XMI ID COLLISION DETECTED: ID 'xxx' is being reassigned from Type1 (obj@abc) to Type2 (obj@def)
+```
+Logged when two different elements are assigned the same XMI ID.
+
+**Context Pollution Warning (DEBUG level):**
+```
+DEBUG CONTEXT WARNING: createTarget(Action) called but currentExecutingRule is 'RelationFeatureView'
+```
+Logged when `createTarget()` type doesn't match the current rule's expected target type.
+
+**Stale Index Entry Fix:**
+When `setElementId()` is called to change an element's ID, the old ID is automatically removed from `pendingXmiIdIndex` to prevent incorrect `findByXmiId()` lookups.
+
+Enable diagnostics in `logback.xml`:
+```xml
+<logger name="hu.blackbelt.judo.zeta.transformation.core.TransformationContext" level="DEBUG"/>
 ```
 
 ### Key Classes

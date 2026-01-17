@@ -30,7 +30,6 @@ import org.eclipse.emf.ecore.resource.ResourceSet;
 import org.eclipse.emf.ecore.resource.impl.ResourceSetImpl;
 import org.eclipse.emf.ecore.xmi.impl.XMIResourceFactoryImpl;
 import org.junit.jupiter.api.*;
-import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -165,8 +164,6 @@ class ContainmentRaceConditionTest {
 
     @Nested
     @DisplayName("autoAddRootElements Bug Reproduction")
-    @EnabledIfSystemProperty(named = "runBugReproductionTests", matches = "true",
-            disabledReason = "Bug reproduction tests. Enable with -DrunBugReproductionTests=true")
     class AutoAddRootElementsBugReproduction {
 
         /**
@@ -292,8 +289,6 @@ class ContainmentRaceConditionTest {
 
     @Nested
     @DisplayName("Containment Race Condition Stress Tests")
-    @EnabledIfSystemProperty(named = "runBugReproductionTests", matches = "true",
-            disabledReason = "Bug reproduction tests for race condition. Enable with -DrunBugReproductionTests=true")
     class ContainmentRaceStressTests {
 
         /**

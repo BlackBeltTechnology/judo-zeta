@@ -31,7 +31,6 @@ import org.eclipse.emf.ecore.resource.ResourceSet;
 import org.eclipse.emf.ecore.resource.impl.ResourceSetImpl;
 import org.eclipse.emf.ecore.xmi.impl.XMIResourceFactoryImpl;
 import org.junit.jupiter.api.*;
-import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -114,8 +113,6 @@ class ExtendsGuardBypassTest {
 
     @Nested
     @DisplayName("Guard Bypass Bug Reproduction")
-    @EnabledIfSystemProperty(named = "runBugReproductionTests", matches = "true",
-            disabledReason = "Bug reproduction tests for unfixed issue. Enable with -DrunBugReproductionTests=true")
     class GuardBypassBugReproduction {
 
         /**

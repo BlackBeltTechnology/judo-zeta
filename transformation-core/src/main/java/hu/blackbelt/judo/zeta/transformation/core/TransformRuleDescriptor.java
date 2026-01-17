@@ -643,6 +643,10 @@ public class TransformRuleDescriptor {
         EObject previousSource = context.getCurrentSource();
         context.setCurrentSource(source);
 
+        // Push rule invocation onto the stack for call chain tracking (Path C)
+        // This enables context-aware discriminator resolution and debugging
+        context.pushRuleInvocation(name, source, null);
+
         // CRITICAL: Save inheritance state for nested transformation support
         // When a transform function triggers another transformation (via equivalent()),
         // the nested transformation should start FRESH, not inherit the outer's inheritance
@@ -682,6 +686,9 @@ public class TransformRuleDescriptor {
             // No inheritance - execute normally
             return getFunction().transform(source, context);
         } finally {
+            // Pop rule invocation from stack (Path C)
+            context.popRuleInvocation();
+
             // Restore inheritance state (for nested rule execution)
             context.setInInheritanceExecution(previousInInheritance);
             if (previousPreCreatedTarget != null) {

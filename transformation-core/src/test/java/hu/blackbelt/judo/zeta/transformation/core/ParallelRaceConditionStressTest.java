@@ -31,7 +31,6 @@ import org.eclipse.emf.ecore.resource.ResourceSet;
 import org.eclipse.emf.ecore.resource.impl.ResourceSetImpl;
 import org.eclipse.emf.ecore.xmi.impl.XMIResourceFactoryImpl;
 import org.junit.jupiter.api.*;
-import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -66,19 +65,10 @@ import static org.junit.jupiter.api.Assertions.*;
  *
  * <p>These tests serve as regression tests to ensure parallel execution remains safe.</p>
  *
- * <h2>Running Stress Tests:</h2>
- * <p>All stress tests are disabled by default due to their long runtime and
- * potential for intermittent failures caused by timing-dependent race conditions.
- * Enable with:</p>
- * <pre>mvn test -DrunStressTests=true</pre>
- *
  * <p><b>Note:</b> Intermittent failures in stress tests indicate potential race
- * conditions that may not manifest consistently. Such failures should be investigated
- * and either fixed or documented in the fix-parallel-execution-race-conditions proposal.</p>
+ * conditions that may not manifest consistently. Such failures should be investigated.</p>
  */
 @DisplayName("Parallel Race Condition Stress Tests")
-@EnabledIfSystemProperty(named = "runStressTests", matches = "true",
-        disabledReason = "Stress tests disabled by default. Enable with -DrunStressTests=true")
 class ParallelRaceConditionStressTest {
 
     private static final Logger log = LoggerFactory.getLogger(ParallelRaceConditionStressTest.class);

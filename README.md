@@ -644,7 +644,11 @@ public ValidationRule expensiveRule() {
 Enable debug logging in `logback.xml`:
 
 ```xml
+<!-- Validation framework -->
 <logger name="hu.blackbelt.judo.meta.validation" level="DEBUG"/>
+
+<!-- Transformation framework diagnostics -->
+<logger name="hu.blackbelt.judo.zeta.transformation.core.TransformationContext" level="DEBUG"/>
 ```
 
 Log output shows:
@@ -654,6 +658,25 @@ Log output shows:
 - Parallel execution decisions
 - Cache hit/miss statistics
 - Validation timing
+
+### Transformation Diagnostics
+
+The transformation framework includes built-in diagnostic logging:
+
+**XMI ID Collision Detection:**
+```
+ERROR XMI ID COLLISION DETECTED: ID 'xxx' is being reassigned from Type1 to Type2
+```
+Indicates two elements are receiving the same ID (potential bug in rule or discriminator).
+
+**Context Pollution Warning:**
+```
+DEBUG CONTEXT WARNING: createTarget(Action) called but currentExecutingRule is 'RelationFeatureView'
+```
+Indicates an element is being created with potentially incorrect auto-generated ID.
+
+**Stale Index Entry Prevention:**
+The framework automatically removes old IDs from the lookup index when `setElementId()` changes an element's ID, preventing `findByXmiId()` from returning stale results.
 
 ## Additional Resources
 

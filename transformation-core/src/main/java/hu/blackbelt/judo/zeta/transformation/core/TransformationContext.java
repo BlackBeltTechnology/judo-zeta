@@ -156,6 +156,19 @@ public class TransformationContext {
     private final ConcurrentHashMap<String, EObject> pendingXmiIdIndex = new ConcurrentHashMap<>();
 
     /**
+     * Track which rule created each element.
+     * Used to distinguish same-rule vs external ID reads.
+     */
+    private final ConcurrentHashMap<EObject, TransformRuleDescriptor> elementCreatingRule = new ConcurrentHashMap<>();
+
+    /**
+     * Track elements whose ID was read by a rule OTHER than the creating rule.
+     * Once an element is in this map, its ID becomes immutable (setElementId will throw).
+     * Value is the first rule that read the ID externally (for error messages).
+     */
+    private final ConcurrentHashMap<EObject, TransformRuleDescriptor> idReadByExternalRule = new ConcurrentHashMap<>();
+
+    /**
      * Map for tracking lazy rule executions to prevent concurrent duplicates.
      * Key is (source, ruleName) for cross-rule isolation.
      */
@@ -388,6 +401,59 @@ public class TransformationContext {
      */
     private final ConcurrentHashMap<DiscriminatedCacheKey, ReentrantLock> discriminatedLocks = new ConcurrentHashMap<>();
 
+    /**
+     * Cache key for discriminator-only lookups (ETL-compatible mode).
+     * Uses only (ruleName, discriminator) as key, ignoring source object identity.
+     *
+     * <p>This enables sharing instances across different source objects when they
+     * resolve to the same discriminator value - matching ETL's string-based caching.</p>
+     */
+    private static class DiscriminatorOnlyCacheKey {
+        final String ruleName;
+        final String discriminator;
+
+        DiscriminatorOnlyCacheKey(String ruleName, String discriminator) {
+            this.ruleName = ruleName;
+            this.discriminator = discriminator;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            DiscriminatorOnlyCacheKey that = (DiscriminatorOnlyCacheKey) o;
+            return Objects.equals(ruleName, that.ruleName)
+                    && Objects.equals(discriminator, that.discriminator);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(ruleName, discriminator);
+        }
+
+        @Override
+        public String toString() {
+            return "DiscriminatorOnlyCacheKey{ruleName='" + ruleName +
+                   "', discriminator='" + discriminator + "'}";
+        }
+    }
+
+    /**
+     * Cache for discriminator-only lookups (ETL-compatible mode).
+     * Key: (ruleName, discriminator) -> Value: target EObject
+     *
+     * <p>When {@link DiscriminatorResolver.Resolution#useDiscriminatorOnlyCache()} is true,
+     * this cache is used instead of the source-based discriminated cache.</p>
+     */
+    private final ConcurrentHashMap<DiscriminatorOnlyCacheKey, EObject> discriminatorOnlyCache =
+        new ConcurrentHashMap<>();
+
+    /**
+     * Per-key locks for thread-safe discriminator-only cache operations.
+     */
+    private final ConcurrentHashMap<DiscriminatorOnlyCacheKey, ReentrantLock> discriminatorOnlyLocks =
+        new ConcurrentHashMap<>();
+
     // Thread-local set to track in-progress named rule executions (prevents recursion)
     private final ThreadLocal<Set<NamedRuleKey>> inProgressNamedRules = ThreadLocal.withInitial(HashSet::new);
 
@@ -411,6 +477,65 @@ public class TransformationContext {
      * Used to check if the current rule is @Detached in createTarget().
      */
     private final ThreadLocal<TransformRuleDescriptor> currentExecutingRule = new ThreadLocal<>();
+
+    /**
+     * Thread-local flag indicating whether the current thread is executing a lazy rule
+     * via equivalentDiscriminated(). When true, addToResource() should skip adding
+     * the original element to the resource because only the discriminated clone
+     * should be added.
+     *
+     * <p>This prevents orphan elements caused by both the original and clone being
+     * added to Resource.contents.</p>
+     */
+    private final ThreadLocal<Boolean> inDiscriminatedExecution = ThreadLocal.withInitial(() -> false);
+
+    /**
+     * Thread-local counter for tracking multiple createTarget() calls within the same rule execution.
+     * Key format: "sourceIdentityHash_ruleName_targetTypeName"
+     * Value: instance count (0 = first instance, 1 = second, etc.)
+     *
+     * This is used to generate unique XMI IDs when a single rule creates multiple elements.
+     * Without this, all elements created by createTarget() in the same rule get the same ID.
+     */
+    private final ThreadLocal<Map<String, Integer>> ruleInstanceCounters =
+            ThreadLocal.withInitial(HashMap::new);
+
+    // ==================== Rule Invocation Stack (Path C Implementation) ====================
+
+    /**
+     * Thread-local stack tracking the chain of rule invocations.
+     *
+     * <p>This stack enables:
+     * <ul>
+     *   <li>Debugging and tracing of transformation call chains</li>
+     *   <li>Context-aware discriminator resolution via {@link DiscriminatorResolver}</li>
+     *   <li>Understanding how elements were created (call path)</li>
+     * </ul>
+     *
+     * <p>The stack is pushed when a rule starts execution and popped when it completes.
+     * Most recent invocation is at the top of the stack (index 0 when converted to list).</p>
+     *
+     * @see #pushRuleInvocation(String, EObject, String)
+     * @see #popRuleInvocation()
+     * @see #getRuleInvocationChain()
+     */
+    private final ThreadLocal<Deque<RuleInvocation>> ruleInvocationStack =
+            ThreadLocal.withInitial(ArrayDeque::new);
+
+    /**
+     * Optional discriminator resolver for context-aware discriminator inference.
+     *
+     * <p>When set, {@code equivalentDiscriminated()} with a null discriminator
+     * will call this resolver to determine the appropriate discriminator based
+     * on the current rule invocation chain.</p>
+     *
+     * <p>This enables ETL-compatible discriminator patterns where the discriminator
+     * depends on the calling context (e.g., Button vs Action context for ActionDefinitions).</p>
+     *
+     * @see DiscriminatorResolver
+     * @see #setDiscriminatorResolver(DiscriminatorResolver)
+     */
+    private volatile DiscriminatorResolver discriminatorResolver;
 
     public TransformationContext(
             ModelProvider modelProvider,
@@ -1064,6 +1189,50 @@ public class TransformationContext {
     }
 
     /**
+     * Create a target element with a specific XMI ID.
+     *
+     * <p>Use this method when you need to set a custom ID for the target element.
+     * Setting the ID at creation time prevents race conditions where other rules
+     * might read the ID before it's finalized.</p>
+     *
+     * <p><b>Race Condition Prevention:</b> When using the standard
+     * {@link #createTarget(Class)} followed by {@link #setElementId(EObject, String)},
+     * there's a window where other rules (via {@link #equivalent} calls) may read
+     * the initial auto-generated ID before your custom ID is set. This leads to
+     * cache misses and potential duplicate elements.</p>
+     *
+     * <p><b>Example:</b></p>
+     * <pre>
+     * // Build custom ID first
+     * String customId = "myprefix/" + source.getName() + "/target";
+     *
+     * // Create target with ID already set - no race condition
+     * EPackage target = ctx.createTarget(EPackage.class, customId);
+     *
+     * // Safe to call other rules - they'll see the correct ID
+     * ctx.equivalent(source, OtherRule.class);
+     * </pre>
+     *
+     * @param targetType the type of element to create
+     * @param customId the XMI ID to assign, or null for auto-generated structured ID
+     * @param <T> the target type
+     * @return the created element with ID already set
+     * @see #createTarget(Class)
+     * @see #setElementId(EObject, String)
+     */
+    public <T extends EObject> T createTarget(Class<T> targetType, String customId) {
+        // Create target with auto-generated ID first
+        T instance = createTarget(targetType);
+
+        // If custom ID is provided, override the auto-generated one
+        if (customId != null) {
+            setElementIdInternal(instance, customId);
+        }
+
+        return instance;
+    }
+
+    /**
      * Internal method to create a target element in a specific package.
      *
      * <p>ETL semantics (default): Elements are NOT added to resource root automatically.
@@ -1113,8 +1282,17 @@ public class TransformationContext {
             EObject source = currentSource.get();
             TransformRuleDescriptor rule = currentExecutingRule.get();
             String ruleName = rule != null ? rule.getName() : null;
-            String targetId = generateStructuredId(source, ruleName);
-            setElementId(instance, targetId);
+
+            // FIX for Bug #2: Generate unique IDs for multiple createTarget() calls
+            // Track instance count per (source, ruleName, targetType) to avoid collisions
+            String targetId = generateUniqueTargetId(source, rule, ruleName, targetType);
+
+            setElementIdInternal(instance, targetId);
+
+            // Track which rule created this element (for external read detection)
+            if (rule != null) {
+                elementCreatingRule.put(instance, rule);
+            }
 
             // EARLY CACHING for circular discriminated call handling:
             // Cache the target immediately so that circular calls to equivalentDiscriminated()
@@ -1183,6 +1361,18 @@ public class TransformationContext {
      */
     public void addToResource(EObject element) {
         if (element == null) {
+            return;
+        }
+
+        // Skip adding original to resource during discriminated execution.
+        // When a lazy rule is called via equivalentDiscriminated(), only the
+        // discriminated clone should be added to the resource, not the original.
+        // This prevents orphan elements.
+        if (inDiscriminatedExecution.get()) {
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Skipping addToResource during discriminated execution for element: {}",
+                        element.eClass().getName());
+            }
             return;
         }
 
@@ -1853,18 +2043,58 @@ public class TransformationContext {
         long startNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
         TransformationMetrics.recordEquivalentDiscriminatedCall();
 
+        // Use local variable for potentially resolved discriminator
+        String effectiveDiscriminator = discriminator;
+        boolean useDiscriminatorOnlyCache = false;  // Option B.1: flag for cache mode
+
+        // If no explicit discriminator provided, try to resolve via configured resolver
+        // This enables context-aware discriminator inference based on call chain (Path C)
+        // Enhanced with Option B.1: Resolution now includes cache mode
+        if (effectiveDiscriminator == null && discriminatorResolver != null) {
+            DiscriminatorResolver.Resolution resolution = discriminatorResolver.resolve(source, ruleName, getRuleInvocationChain());
+            if (resolution != null) {
+                effectiveDiscriminator = resolution.discriminator();
+                useDiscriminatorOnlyCache = resolution.useDiscriminatorOnlyCache();
+
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Resolved discriminator for {}: {} (cacheMode={})",
+                        ruleName, effectiveDiscriminator,
+                        useDiscriminatorOnlyCache ? "DISCRIMINATOR_ONLY" : "SOURCE_BASED");
+                }
+            }
+        }
+
         try {
+            // Option B.1: Check discriminator-only cache FIRST when enabled
+            // This enables sharing instances across different source objects with same discriminator
+            if (useDiscriminatorOnlyCache && effectiveDiscriminator != null) {
+                DiscriminatorOnlyCacheKey discOnlyKey = new DiscriminatorOnlyCacheKey(ruleName, effectiveDiscriminator);
+                EObject cachedDiscOnly = discriminatorOnlyCache.get(discOnlyKey);
+                if (cachedDiscOnly != null && targetType.isInstance(cachedDiscOnly)) {
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("DISCRIMINATOR_ONLY cache HIT: {} discriminator={} -> {}",
+                            ruleName, effectiveDiscriminator, System.identityHashCode(cachedDiscOnly));
+                    }
+                    return (T) cachedDiscOnly;
+                }
+            }
+
             // When structured IDs are enabled, use XMI ID-based lookup first (ETL semantics)
-            if (useStructuredIds && discriminator != null) {
+            if (useStructuredIds && effectiveDiscriminator != null) {
                 String baseId = generateStructuredId(source, ruleName);
-                String discriminatedId = generateDiscriminatedId(baseId, discriminator);
+                String discriminatedId = generateDiscriminatedId(baseId, effectiveDiscriminator);
 
                 // Look up by XMI ID in target resource
                 T existing = findByXmiId(discriminatedId, targetType);
                 if (existing != null) {
                     // Cache it for future lookups and return
-                    resolutionCache.addDiscriminatedMapping(source, existing, ruleName, discriminator);
-                    if ("create".equals(discriminator) && LOG.isDebugEnabled()) {
+                    resolutionCache.addDiscriminatedMapping(source, existing, ruleName, effectiveDiscriminator);
+                    // Also cache in discriminator-only cache if mode is enabled
+                    if (useDiscriminatorOnlyCache) {
+                        DiscriminatorOnlyCacheKey discOnlyKey = new DiscriminatorOnlyCacheKey(ruleName, effectiveDiscriminator);
+                        discriminatorOnlyCache.put(discOnlyKey, existing);
+                    }
+                    if ("create".equals(effectiveDiscriminator) && LOG.isDebugEnabled()) {
                         LOG.debug("XMI_LOOKUP found 'create' clone: clone={}, id={}",
                                 System.identityHashCode(existing), discriminatedId);
                     }
@@ -1873,7 +2103,7 @@ public class TransformationContext {
             }
 
             // Check discriminated cache (object-reference based)
-            T cached = resolutionCache.getEquivalentDiscriminated(source, targetType, ruleName, discriminator);
+            T cached = resolutionCache.getEquivalentDiscriminated(source, targetType, ruleName, effectiveDiscriminator);
             if (cached != null) {
                 return cached;
             }
@@ -1916,7 +2146,7 @@ public class TransformationContext {
                                 // proceed if the original target has been early-cached (via createTarget()).
                                 // This enables patterns where Rule A calls Rule B, and Rule B needs
                                 // a discriminated variant of Rule A's output.
-                                if (discriminator != null) {
+                                if (effectiveDiscriminator != null) {
                                     // Check if the original was early-cached
                                     // First try ordinal-based lookup (O(1) array access)
                                     EObject earlyCached = null;
@@ -1976,14 +2206,33 @@ public class TransformationContext {
                                             clearPreCreatedTarget();
 
                                             try {
-                                                // Execute the specific rule
-                                                EObject result = rule.execute(source, this);
-                                                if (result != null) {
-                                                    resolutionCache.addMapping(source, ruleName, result, rule.isPrimary());
-                                                    executingLazyRules.put(key, result);
-                                                    if (targetType.isInstance(result)) {
-                                                        original = (T) result;
+                                                // When discriminator is set, mark this as discriminated execution.
+                                                // This causes addToResource() to skip adding the original,
+                                                // preventing orphan elements (only the clone should be added).
+                                                //
+                                                // EXCEPTION: For DISCRIMINATOR_ONLY cache mode, we DON'T set this flag
+                                                // because we want the original to be added to Resource directly
+                                                // (no cloning - the original becomes THE element with discriminated ID).
+                                                // This matches ETL semantics where there's only one element per discriminator.
+                                                boolean wasInDiscriminated = inDiscriminatedExecution.get();
+                                                if (effectiveDiscriminator != null && !useDiscriminatorOnlyCache) {
+                                                    // Only skip addToResource for source-based cache (clone path)
+                                                    // For discriminator-only cache, let addToResource work normally
+                                                    inDiscriminatedExecution.set(true);
+                                                }
+                                                try {
+                                                    // Execute the specific rule
+                                                    EObject result = rule.execute(source, this);
+                                                    if (result != null) {
+                                                        resolutionCache.addMapping(source, ruleName, result, rule.isPrimary());
+                                                        executingLazyRules.put(key, result);
+                                                        if (targetType.isInstance(result)) {
+                                                            original = (T) result;
+                                                        }
                                                     }
+                                                } finally {
+                                                    // Restore previous discriminated execution state
+                                                    inDiscriminatedExecution.set(wasInDiscriminated);
                                                 }
                                             } finally {
                                                 setInInheritanceExecution(wasInInheritance);
@@ -2016,35 +2265,83 @@ public class TransformationContext {
             }
 
             // If no discriminator, return the original without cloning (ETL semantics)
-            if (discriminator == null) {
+            if (effectiveDiscriminator == null) {
+                return original;
+            }
+
+            // DISCRIMINATOR_ONLY cache mode: Use original directly without cloning.
+            // This matches ETL semantics where there's only ONE element per discriminator key,
+            // not an "original" + "clone" pair. The original's ID is updated to the discriminated ID.
+            // This prevents orphan elements - no unused "original" left behind.
+            if (useDiscriminatorOnlyCache) {
+                // Generate discriminated ID for the original
+                String discriminatedId;
+                if (useStructuredIds) {
+                    String baseId = generateStructuredId(source, ruleName);
+                    discriminatedId = generateDiscriminatedId(baseId, effectiveDiscriminator);
+                } else {
+                    String baseId = getElementId(original);
+                    discriminatedId = baseId + "/(discriminator/" + effectiveDiscriminator + ")";
+                }
+
+                // Update the original's ID to the discriminated ID
+                // This is safe because the original was just created by the rule - no external
+                // rule has read its ID yet (we're still in the same rule execution context)
+                setElementId(original, discriminatedId);
+
+                // Cache in discriminator-only cache for future lookups from any source
+                DiscriminatorOnlyCacheKey discOnlyKey = new DiscriminatorOnlyCacheKey(ruleName, effectiveDiscriminator);
+                discriminatorOnlyCache.put(discOnlyKey, original);
+
+                // Also cache in regular discriminated cache for consistent lookups
+                resolutionCache.addDiscriminatedMapping(source, original, ruleName, effectiveDiscriminator);
+
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("DISCRIMINATOR_ONLY mode: Using original directly (no clone). {} discriminator={} element={}",
+                        ruleName, effectiveDiscriminator, System.identityHashCode(original));
+                }
+
                 return original;
             }
 
             // Thread-safe clone creation using double-checked locking.
             // This prevents duplicate clones when multiple threads call equivalentDiscriminated()
             // with the same (source, ruleName, discriminator) tuple concurrently.
-            DiscriminatedCacheKey discKey = new DiscriminatedCacheKey(source, ruleName, discriminator);
+            //
+            // Option B.1: When useDiscriminatorOnlyCache is enabled, use discriminator-only key
+            // for both locking and caching to enable sharing across different source objects.
+            DiscriminatedCacheKey discKey = new DiscriminatedCacheKey(source, ruleName, effectiveDiscriminator);
+            DiscriminatorOnlyCacheKey discOnlyKey = useDiscriminatorOnlyCache
+                ? new DiscriminatorOnlyCacheKey(ruleName, effectiveDiscriminator) : null;
 
             // DEBUG: Track clone creation for "create" discriminator
-            boolean isCreateDiscriminator = "create".equals(discriminator);
+            boolean isCreateDiscriminator = "create".equals(effectiveDiscriminator);
 
             // Acquire per-key lock for thread-safe clone creation
             // IMPORTANT: Use tryLock with timeout to prevent deadlocks from
             // circular dependencies (e.g., RuleA clones B while RuleB clones A)
+            //
+            // Option B.1: Use discriminator-only lock when enabled for proper sharing
             long lockStartNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
-            ReentrantLock lock = discriminatedLocks.computeIfAbsent(discKey, k -> new ReentrantLock());
+            ReentrantLock lock;
+            if (useDiscriminatorOnlyCache) {
+                lock = discriminatorOnlyLocks.computeIfAbsent(discOnlyKey, k -> new ReentrantLock());
+            } else {
+                lock = discriminatedLocks.computeIfAbsent(discKey, k -> new ReentrantLock());
+            }
             boolean lockAcquired;
             try {
                 // 30 second timeout to detect deadlocks
                 lockAcquired = lock.tryLock(30, java.util.concurrent.TimeUnit.SECONDS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                throw new RuntimeException("Interrupted while waiting for discriminated lock on " + discKey, e);
+                throw new RuntimeException("Interrupted while waiting for discriminated lock on " +
+                    (useDiscriminatorOnlyCache ? discOnlyKey : discKey), e);
             }
             if (!lockAcquired) {
                 throw new RuntimeException(
                     "Potential deadlock detected: timeout waiting for lock on equivalentDiscriminated(" +
-                    source.eClass().getName() + ", " + ruleName + ", discriminator=" + discriminator + "). " +
+                    source.eClass().getName() + ", " + ruleName + ", discriminator=" + effectiveDiscriminator + "). " +
                     "This may indicate circular rule dependencies.");
             }
             if (TransformationMetrics.isEnabled()) {
@@ -2053,7 +2350,18 @@ public class TransformationContext {
             TransformationMetrics.recordLockAcquisition();
             try {
                 // Double-check after acquiring lock (another thread may have completed)
-                T cachedAfterLock = resolutionCache.getEquivalentDiscriminated(source, targetType, ruleName, discriminator);
+                // Option B.1: Check discriminator-only cache first when enabled
+                if (useDiscriminatorOnlyCache) {
+                    EObject cachedDiscOnly = discriminatorOnlyCache.get(discOnlyKey);
+                    if (cachedDiscOnly != null && targetType.isInstance(cachedDiscOnly)) {
+                        if (LOG.isDebugEnabled()) {
+                            LOG.debug("DISCRIMINATOR_ONLY cache HIT (after lock): {} discriminator={} -> {}",
+                                ruleName, effectiveDiscriminator, System.identityHashCode(cachedDiscOnly));
+                        }
+                        return (T) cachedDiscOnly;
+                    }
+                }
+                T cachedAfterLock = resolutionCache.getEquivalentDiscriminated(source, targetType, ruleName, effectiveDiscriminator);
                 if (cachedAfterLock != null) {
                     return cachedAfterLock;
                 }
@@ -2065,16 +2373,24 @@ public class TransformationContext {
                 EObject unwrappedOriginal = DeferredEObject.unwrapWithPendingValues(original);
                 T clone = (T) EcoreUtil.copy(unwrappedOriginal);
 
+                // Track the clone's creating rule (same as original's creating rule)
+                // This enables external read detection for clones - if a different rule reads
+                // the clone's ID and then tries to change it via setElementId(), it will fail
+                TransformRuleDescriptor originalCreatingRule = elementCreatingRule.get(original);
+                if (originalCreatingRule != null) {
+                    elementCreatingRule.put(clone, originalCreatingRule);
+                }
+
                 // Generate discriminated ID following ETL semantics
                 // Format: <source-path>/<rule-name>/(discriminator/<discriminator-value>)
                 String discriminatedId;
                 if (useStructuredIds) {
                     String baseId = generateStructuredId(source, ruleName);
-                    discriminatedId = generateDiscriminatedId(baseId, discriminator);
+                    discriminatedId = generateDiscriminatedId(baseId, effectiveDiscriminator);
                 } else {
                     // Legacy: append discriminator to whatever ID the original has
                     String baseId = getElementId(original);
-                    discriminatedId = baseId + "/(discriminator/" + discriminator + ")";
+                    discriminatedId = baseId + "/(discriminator/" + effectiveDiscriminator + ")";
                 }
                 setElementId(clone, discriminatedId);
 
@@ -2114,7 +2430,17 @@ public class TransformationContext {
                 // e.g., page.getActions().add(clone)
 
                 // Cache discriminated result
-                resolutionCache.addDiscriminatedMapping(source, clone, ruleName, discriminator);
+                resolutionCache.addDiscriminatedMapping(source, clone, ruleName, effectiveDiscriminator);
+
+                // Option B.1: Also store in discriminator-only cache when enabled
+                // This enables future lookups from different source objects to find this clone
+                if (useDiscriminatorOnlyCache) {
+                    discriminatorOnlyCache.put(discOnlyKey, clone);
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("DISCRIMINATOR_ONLY cache STORE: {} discriminator={} clone={}",
+                            ruleName, effectiveDiscriminator, System.identityHashCode(clone));
+                    }
+                }
 
                 return clone;
             } finally {
@@ -2410,6 +2736,30 @@ public class TransformationContext {
     }
 
     /**
+     * Debug helper: Get the name of the rule that created an element.
+     * For testing/debugging only.
+     *
+     * @param element the element
+     * @return the creating rule name, or "null" if not tracked
+     */
+    public String getElementCreatingRuleDebug(EObject element) {
+        TransformRuleDescriptor rule = elementCreatingRule.get(element);
+        return rule != null ? rule.getName() : "null";
+    }
+
+    /**
+     * Debug helper: Get the name of the rule that first read an element's ID externally.
+     * For testing/debugging only.
+     *
+     * @param element the element
+     * @return the reading rule name, or "null" if not read externally
+     */
+    public String getIdReadByExternalRuleDebug(EObject element) {
+        TransformRuleDescriptor rule = idReadByExternalRule.get(element);
+        return rule != null ? rule.getName() : "null";
+    }
+
+    /**
      * Check if the currently executing rule is marked as @Detached.
      *
      * @return true if the current rule is detached
@@ -2428,6 +2778,197 @@ public class TransformationContext {
      */
     public <T extends EObject> Collection<T> getAllSource(Class<T> sourceType) {
         return all("source", sourceType);
+    }
+
+    // ==================== Rule Invocation Stack (Path C) ====================
+
+    /**
+     * Push a rule invocation onto the stack.
+     *
+     * <p>Called by the rule execution framework when a rule starts execution.
+     * The invocation captures the rule name, source element, and optional discriminator.</p>
+     *
+     * @param ruleName the name of the rule being invoked
+     * @param source the source element being transformed
+     * @param discriminator the discriminator value (null if not discriminated)
+     */
+    void pushRuleInvocation(String ruleName, EObject source, String discriminator) {
+        ruleInvocationStack.get().push(RuleInvocation.of(ruleName, source, discriminator));
+        if (LOG.isTraceEnabled()) {
+            LOG.trace("PUSH rule invocation: {} (stack depth={})",
+                    ruleName, ruleInvocationStack.get().size());
+        }
+    }
+
+    /**
+     * Pop the most recent rule invocation from the stack.
+     *
+     * <p>Called by the rule execution framework when a rule completes execution.</p>
+     *
+     * @return the popped invocation, or null if stack was empty
+     */
+    RuleInvocation popRuleInvocation() {
+        Deque<RuleInvocation> stack = ruleInvocationStack.get();
+        if (stack.isEmpty()) {
+            LOG.warn("Attempted to pop from empty rule invocation stack");
+            return null;
+        }
+        RuleInvocation invocation = stack.pop();
+        if (LOG.isTraceEnabled()) {
+            LOG.trace("POP rule invocation: {} (stack depth={})",
+                    invocation.ruleName(), stack.size());
+        }
+        return invocation;
+    }
+
+    /**
+     * Get the current rule invocation chain as an unmodifiable list.
+     *
+     * <p>The list is ordered with the most recent invocation first (index 0).
+     * This represents the call stack from the current rule back to the root.</p>
+     *
+     * <p>Example usage for debugging:</p>
+     * <pre>{@code
+     * List<RuleInvocation> chain = ctx.getRuleInvocationChain();
+     * for (int i = 0; i < chain.size(); i++) {
+     *     System.out.println("[" + i + "] " + chain.get(i));
+     * }
+     * }</pre>
+     *
+     * @return unmodifiable list of rule invocations (most recent first)
+     */
+    public List<RuleInvocation> getRuleInvocationChain() {
+        return Collections.unmodifiableList(new ArrayList<>(ruleInvocationStack.get()));
+    }
+
+    /**
+     * Get the current stack depth (number of nested rule invocations).
+     *
+     * @return the stack depth
+     */
+    public int getRuleInvocationDepth() {
+        return ruleInvocationStack.get().size();
+    }
+
+    /**
+     * Check if currently inside a specific rule (by name).
+     *
+     * <p>This checks the entire call stack, not just the current rule.
+     * Useful for determining if a certain context is present in the call chain.</p>
+     *
+     * @param ruleName the rule name to search for
+     * @return true if the rule is in the current call chain
+     */
+    public boolean isInRuleContext(String ruleName) {
+        for (RuleInvocation inv : ruleInvocationStack.get()) {
+            if (inv.ruleName().equals(ruleName)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Find a specific rule invocation in the call chain by name.
+     *
+     * <p>Returns the first (most recent) matching invocation.</p>
+     *
+     * @param ruleName the rule name to find
+     * @return the matching invocation, or null if not found
+     */
+    public RuleInvocation findRuleInChain(String ruleName) {
+        for (RuleInvocation inv : ruleInvocationStack.get()) {
+            if (inv.ruleName().equals(ruleName)) {
+                return inv;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Get a formatted string representation of the current call chain.
+     * Useful for debugging and logging.
+     *
+     * @return formatted call chain string
+     */
+    public String formatRuleInvocationChain() {
+        Deque<RuleInvocation> stack = ruleInvocationStack.get();
+        if (stack.isEmpty()) {
+            return "<empty stack>";
+        }
+        StringBuilder sb = new StringBuilder();
+        int depth = 0;
+        for (RuleInvocation inv : stack) {
+            if (depth > 0) {
+                sb.append("\n");
+            }
+            sb.append("[").append(depth).append("] ").append(inv);
+            depth++;
+        }
+        return sb.toString();
+    }
+
+    // ==================== Discriminator Resolver (Path C) ====================
+
+    /**
+     * Set the discriminator resolver for context-aware discriminator inference.
+     *
+     * <p>When set, {@code equivalentDiscriminated()} with a null discriminator
+     * will call this resolver to determine the appropriate discriminator based
+     * on the current rule invocation chain.</p>
+     *
+     * <p>Example:</p>
+     * <pre>{@code
+     * ctx.setDiscriminatorResolver((source, ruleName, callChain) -> {
+     *     if (ruleName.equals("OperationFormCallActionDefinition")) {
+     *         for (RuleInvocation inv : callChain) {
+     *             if (inv.ruleName().equals("TransferObjectFormButtonGroup")) {
+     *                 TransferObjectForm form = (TransferObjectForm) inv.source();
+     *                 return actorType.getName() + "/(esm/" + getId(form) + ")/TransferObjectForm";
+     *             }
+     *         }
+     *     }
+     *     return null; // Use default behavior
+     * });
+     * }</pre>
+     *
+     * @param resolver the discriminator resolver, or null to disable
+     * @see DiscriminatorResolver
+     */
+    public void setDiscriminatorResolver(DiscriminatorResolver resolver) {
+        this.discriminatorResolver = resolver;
+    }
+
+    /**
+     * Get the current discriminator resolver.
+     *
+     * @return the resolver, or null if not set
+     */
+    public DiscriminatorResolver getDiscriminatorResolver() {
+        return discriminatorResolver;
+    }
+
+    /**
+     * Resolve a discriminator using the configured resolver.
+     *
+     * <p>This method is called internally by {@code equivalentDiscriminated()}
+     * when no explicit discriminator is provided.</p>
+     *
+     * @param source the source element
+     * @param ruleName the rule name
+     * @return the resolved discriminator, or null if no resolver or resolver returns null
+     */
+    String resolveDiscriminator(EObject source, String ruleName) {
+        if (discriminatorResolver == null) {
+            return null;
+        }
+        List<RuleInvocation> callChain = getRuleInvocationChain();
+        String resolved = discriminatorResolver.resolveDiscriminator(source, ruleName, callChain);
+        if (resolved != null && LOG.isDebugEnabled()) {
+            LOG.debug("Resolved discriminator for {}: {} (chain depth={})",
+                    ruleName, resolved, callChain.size());
+        }
+        return resolved;
     }
 
     // ==================== Resource Alias Support ====================
@@ -2806,11 +3347,13 @@ public class TransformationContext {
     }
 
     /**
-     * Clear pending XMI IDs and reverse index (called on reset).
+     * Clear pending XMI IDs, reverse index, and external read tracking (called on reset).
      */
     void clearPendingXmiIds() {
         pendingXmiIds.clear();
         pendingXmiIdIndex.clear();
+        elementCreatingRule.clear();
+        idReadByExternalRule.clear();
     }
 
     /**
@@ -2919,12 +3462,41 @@ public class TransformationContext {
     // ==================== ID Handling ====================
 
     /**
-     * Get the XMI ID of an element (from resource or generate one).
+     * Get the XMI ID of an element, checking pending IDs first.
      *
-     * @param element the element
-     * @return the element's XMI ID
+     * <p>This method resolves element IDs in the following order of precedence:</p>
+     * <ol>
+     *   <li><b>Pending IDs</b>: Check {@code pendingXmiIds} map first (deferred elements)</li>
+     *   <li><b>Resource URI Fragment</b>: Check {@code resource.getURIFragment(element)} for committed elements</li>
+     *   <li><b>Structural Feature</b>: Check for "id" structural feature on the element's EClass</li>
+     *   <li><b>Generated UUID</b>: Generate and cache a new UUID starting with underscore</li>
+     * </ol>
+     *
+     * <p><b>Use Case:</b> This method should be used when building discriminators or IDs that
+     * include target element IDs, as target elements may have deferred IDs that haven't been
+     * committed to the XMI resource yet. Using {@code XMIResource.getID()} directly would
+     * return {@code null} for such elements.</p>
+     *
+     * <p><b>Thread Safety:</b> This method is thread-safe. The underlying {@code pendingXmiIds}
+     * is a {@code ConcurrentHashMap}, and UUID generation is atomic per element.</p>
+     *
+     * @param element the element to get the ID for
+     * @return the element's XMI ID, never null (generates one if needed when staging is enabled)
+     * @see #getPendingXmiId(EObject)
+     * @see #setElementId(EObject, String)
      */
-    private String getElementId(EObject element) {
+    public String getElementId(EObject element) {
+        // Track external reads: if a different rule reads this element's ID,
+        // mark it as "read externally" so setElementId() will fail later
+        TransformRuleDescriptor currentRule = currentExecutingRule.get();
+        TransformRuleDescriptor creatingRule = elementCreatingRule.get(element);
+
+        if (currentRule != null && creatingRule != null && currentRule != creatingRule) {
+            // Different rule is reading the ID - mark as externally read
+            // Using putIfAbsent to track only the FIRST external read
+            idReadByExternalRule.putIfAbsent(element, currentRule);
+        }
+
         // First check pending IDs for staged elements
         String pendingId = pendingXmiIds.get(element);
         if (pendingId != null) {
@@ -3225,6 +3797,77 @@ public class TransformationContext {
     }
 
     /**
+     * Generate a unique XMI ID for a target element, handling multiple createTarget() calls
+     * within the same rule execution (Bug #2 fix).
+     *
+     * <p>When a rule creates multiple elements via createTarget(), each element must have a
+     * unique ID. This method tracks instance counts and appends distinguishing suffixes only
+     * when necessary to maintain backward compatibility.</p>
+     *
+     * <p>ID format patterns:</p>
+     * <ul>
+     *   <li>First (and only) element in rule: {@code (source)/RuleName} (unchanged for backward compat)</li>
+     *   <li>Second+ element, different type: {@code (source)/RuleName/TypeName}</li>
+     *   <li>Second+ element, same type with index: {@code (source)/RuleName/TypeName#1}, etc.</li>
+     * </ul>
+     *
+     * @param source the source element (can be null)
+     * @param rule the current executing rule descriptor (can be null)
+     * @param ruleName the rule name (can be null)
+     * @param targetType the target element type being created
+     * @return a unique XMI ID for this target element
+     */
+    private <T extends EObject> String generateUniqueTargetId(EObject source, TransformRuleDescriptor rule,
+            String ruleName, Class<T> targetType) {
+        // If no rule context or structured IDs disabled, use basic generation
+        if (ruleName == null || !useStructuredIds) {
+            return generateStructuredId(source, ruleName);
+        }
+
+        String typeName = targetType.getSimpleName();
+
+        // Build keys for tracking: one for all calls in this (source, rule), one per type
+        String ruleKey = String.format("%d_%s",
+                source != null ? System.identityHashCode(source) : 0,
+                ruleName);
+        String typeKey = ruleKey + "_" + typeName;
+
+        Map<String, Integer> counters = ruleInstanceCounters.get();
+
+        // Track total calls for this (source, rule) - to know if this is the first call
+        int totalCallsForRule = counters.getOrDefault(ruleKey, 0);
+        counters.put(ruleKey, totalCallsForRule + 1);
+
+        // Track calls per type for this (source, rule, type) - to know the index
+        int typeIndex = counters.getOrDefault(typeKey, 0);
+        counters.put(typeKey, typeIndex + 1);
+
+        // Build base ID
+        String baseId = generateStructuredId(source, ruleName);
+
+        // First call for this (source, rule): return baseId for backward compatibility
+        if (totalCallsForRule == 0) {
+            return baseId;
+        }
+
+        // Second+ call: append type suffix (and index if multiple of same type)
+        // Format: baseId/TypeName or baseId/TypeName#index
+        if (typeIndex == 0) {
+            return baseId + "/" + typeName;
+        } else {
+            return baseId + "/" + typeName + "#" + typeIndex;
+        }
+    }
+
+    /**
+     * Clear the rule instance counters. Called when a rule execution completes to reset
+     * the counters for the next execution.
+     */
+    void clearRuleInstanceCounters() {
+        ruleInstanceCounters.get().clear();
+    }
+
+    /**
      * Generate a discriminated structured XMI ID following ETL semantics.
      *
      * <p>Format: {@code <base-id>/(discriminator/<discriminator-value>)}</p>
@@ -3248,14 +3891,77 @@ public class TransformationContext {
      * (via multiple createTarget calls within the same rule). This is necessary because
      * generateStructuredId creates the same ID for all elements from the same source/rule.</p>
      *
+     * <p><b>ID Immutability After External Read:</b> If another rule has already read this
+     * element's ID via {@link #getElementId(EObject)}, this method will throw an
+     * {@link IllegalStateException}. This prevents race conditions where one rule builds
+     * discriminators using the initial ID, and another rule later changes it.</p>
+     *
+     * <p><b>Solution:</b> Use {@link #createTarget(Class, String)} to set custom IDs at
+     * creation time, before any other rule can read them.</p>
+     *
+     * @param element the element to set the ID on
+     * @param id the XMI ID to set
+     * @throws IllegalStateException if the ID was already read by another rule
+     * @see #createTarget(Class, String)
+     */
+    public void setElementId(EObject element, String id) {
+        // Check if ID was read by an external rule - if so, throw to prevent race condition
+        TransformRuleDescriptor readingRule = idReadByExternalRule.get(element);
+        if (readingRule != null) {
+            TransformRuleDescriptor creatingRule = elementCreatingRule.get(element);
+            String creatingRuleName = creatingRule != null ? creatingRule.getName() : "unknown";
+            throw new IllegalStateException(
+                    "Cannot change ID of element after it was read by another rule.\n" +
+                    "Element type: " + element.eClass().getName() + "\n" +
+                    "Element was created by rule: " + creatingRuleName + "\n" +
+                    "ID was read by rule: " + readingRule.getName() + "\n" +
+                    "Solution: Use createTarget(type, customId) to set ID at creation time.\n" +
+                    "Example: ctx.createTarget(" + element.eClass().getName() + ".class, \"" + id + "\")");
+        }
+
+        setElementIdInternal(element, id);
+    }
+
+    /**
+     * Internal method to set XMI ID without checking for external reads.
+     *
+     * <p>This is used by framework methods (like createTargetInPackage) that set IDs
+     * as part of element creation, before any external rule could read them.</p>
+     *
      * @param element the element to set the ID on
      * @param id the XMI ID to set
      */
-    public void setElementId(EObject element, String id) {
+    private void setElementIdInternal(EObject element, String id) {
         // Set "id" structural feature if available
         EStructuralFeature idFeature = element.eClass().getEStructuralFeature("id");
         if (idFeature != null && idFeature.isChangeable()) {
             element.eSet(idFeature, id);
+        }
+
+        // Remove old index entry if ID is changing to prevent stale entries
+        // This is critical for correct findByXmiId() behavior when an element's
+        // auto-generated ID is overwritten with a custom ID
+        String oldId = pendingXmiIds.get(element);
+        if (oldId != null && !oldId.equals(id)) {
+            pendingXmiIdIndex.remove(oldId);
+        }
+
+        // COLLISION DETECTION: Check if this ID is already assigned to a DIFFERENT element
+        // This is a critical diagnostic for type mismatch bugs where two elements get the same ID
+        EObject existingElement = pendingXmiIdIndex.get(id);
+        if (existingElement != null && existingElement != element) {
+            // ID COLLISION DETECTED - This is the root cause of type mismatch bugs!
+            String existingType = existingElement.eClass().getName();
+            String newType = element.eClass().getName();
+            String existingObjId = Integer.toHexString(System.identityHashCode(existingElement));
+            String newObjId = Integer.toHexString(System.identityHashCode(element));
+            LOG.error("XMI ID COLLISION DETECTED: ID '{}' is being reassigned from {} (obj@{}) to {} (obj@{}). " +
+                    "This will cause type mismatch in findByXmiId()!",
+                    id, existingType, existingObjId, newType, newObjId);
+            // Log stack trace to identify the culprit code
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Stack trace for ID collision:", new Exception("ID collision stack trace"));
+            }
         }
 
         // Always store in pendingXmiIds for later retrieval/application

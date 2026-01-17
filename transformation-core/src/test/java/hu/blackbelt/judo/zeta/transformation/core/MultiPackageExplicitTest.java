@@ -125,12 +125,12 @@ class MultiPackageExplicitTest {
         }
 
         @Test
-        @DisplayName("createTarget(Class, null) throws IllegalArgumentException")
+        @DisplayName("createTarget(Class, null EPackage) throws IllegalArgumentException")
         void createTargetWithNullPackageThrowsException() {
             context.setTargetPackage(EcorePackage.eINSTANCE);
 
             IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
-                    () -> context.createTarget(EClass.class, null));
+                    () -> context.createTarget(EClass.class, (EPackage) null));
 
             assertTrue(ex.getMessage().toLowerCase().contains("null") ||
                             ex.getMessage().toLowerCase().contains("package"),

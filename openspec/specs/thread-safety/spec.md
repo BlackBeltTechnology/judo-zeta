@@ -5,33 +5,30 @@ TBD - created by archiving change unify-rule-execution-locking. Update Purpose a
 ## Requirements
 ### Requirement: Rule execution MUST use unified locking across all API methods
 
-All methods that trigger rule execution (`equivalent()`, `executeParentRule()`, etc.) SHALL use the same locking mechanism to prevent race conditions when the same (source, ruleName) pair is accessed concurrently through different API methods.
+All methods that trigger rule execution (`equivalent()`, `executeParentRule()`, etc.) SHALL use the same locking mechanism to prevent race conditions when the same (source, ruleName) pair is accessed concurrently through different API methods. **The implementation SHOULD minimize overhead on the fast path (cache hit) while maintaining thread safety.**
 
-#### Scenario: Mixed equivalent() and executeParentRule() calls are synchronized
+#### Scenario: Fast path avoids object allocation on cache hit
 
-**Given** a transformation running in parallel mode
-**And** Thread A calls `equivalent(source, TargetType.class)` for a rule named "RuleX"
-**And** Thread B calls `executeParentRule("RuleX", source)` for the same source
-**When** both calls happen concurrently
-**Then** only ONE thread executes the rule
-**And** the other thread waits and receives the cached result
-**Because** both methods use the same `ruleLocks` mechanism
+**Given** a transformation calling `executeParentRule()` for a previously executed rule
+**When** the result is already cached in `resolutionCache`
+**Then** the method returns immediately without creating `RuleCacheKey` object
+**And** no lock acquisition occurs
+**Because** cache lookup uses source and ruleName directly
 
-#### Scenario: No duplicate rule executions for same source and rule
+#### Scenario: Unified locking uses consistent lock acquisition
 
-**Given** a transformation with multiple threads
-**And** the same (source, ruleName) pair is accessed through any combination of API methods
-**When** the first thread starts executing the rule
-**Then** subsequent threads MUST wait for completion
-**And** all threads receive the same result object
+**Given** Thread A calls `equivalent(source, TargetType.class)`
+**And** Thread B calls `executeParentRule("RuleName", source)` for the same source
+**When** both methods need to acquire a lock
+**Then** both use `lock.lock()` (not `tryLock(timeout)`)
+**And** both use the same `ruleLocks` ConcurrentHashMap
+**Because** consistent lock semantics prevent subtle timing differences
 
-#### Scenario: Race condition test detects duplicate execution before fix
+#### Scenario: RuleCacheKey uses identity-based comparison
 
-**Given** a test class `DualLockingRaceConditionTest`
-**And** Thread A calls `equivalent(source, TargetType.class)` for rule "TestRule"
-**And** Thread B calls `executeParentRule("TestRule", source)` concurrently
-**And** an AtomicInteger counter tracks rule executions per (source, ruleName)
-**When** the test runs before the fix is applied
-**Then** the counter value SHOULD be greater than 1 (duplicate execution)
-**Because** the dual locking mechanism allows both threads to execute simultaneously
+**Given** two `RuleCacheKey` instances created for the same source EObject
+**When** comparing keys for lock lookup
+**Then** identity comparison (`source == that.source`) is used instead of `equals()`
+**And** `System.identityHashCode(source)` is used instead of `source.hashCode()`
+**Because** EMF identity is based on object reference, not structural equality
 
