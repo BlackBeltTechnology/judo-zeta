@@ -282,6 +282,87 @@ class GuardRejectionCacheTest {
                 "Guard should be called again after executor reset (rejected sets cleared)");
     }
 
+    // ========== Functional-Interface Guard Tests ==========
+
+    @Test
+    void testFunctionalGuardIsResolvedAndCached() {
+        EClass sourceClass = EcoreFactory.eINSTANCE.createEClass();
+        sourceClass.setName("Rejected");
+        sourceResource.getContents().add(sourceClass);
+
+        TransformationRegistry registry = new TransformationRegistry();
+        registry.register(FunctionalGuardTransformation.class);
+
+        FunctionalGuardTransformation.guardCallCount.set(0);
+
+        TransformRuleDescriptor rule = registry.getRuleByName("FunctionalGuardRule");
+        assertNotNull(rule);
+
+        TransformationContext ctx = createContext(registry);
+
+        // First call - guard evaluates and rejects
+        boolean result1 = rule.evaluateGuard(sourceClass, ctx);
+        assertFalse(result1, "Functional guard should reject element");
+        assertEquals(1, FunctionalGuardTransformation.guardCallCount.get(), "Guard lambda should be called once");
+
+        // Second call - should use rejection cache, not re-evaluate guard
+        boolean result2 = rule.evaluateGuard(sourceClass, ctx);
+        assertFalse(result2, "Guard should still reject (cached)");
+        assertEquals(1, FunctionalGuardTransformation.guardCallCount.get(), "Guard should NOT be called again (rejection cached)");
+    }
+
+    @Test
+    void testFunctionalGuardAcceptsElements() {
+        EClass sourceClass = EcoreFactory.eINSTANCE.createEClass();
+        sourceClass.setName("Accepted");
+        sourceResource.getContents().add(sourceClass);
+
+        TransformationRegistry registry = new TransformationRegistry();
+        registry.register(FunctionalAcceptGuardTransformation.class);
+
+        FunctionalAcceptGuardTransformation.guardCallCount.set(0);
+
+        TransformRuleDescriptor rule = registry.getRuleByName("FunctionalAcceptRule");
+        TransformationContext ctx = createContext(registry);
+
+        boolean result = rule.evaluateGuard(sourceClass, ctx);
+        assertTrue(result, "Functional guard should accept element");
+        assertEquals(1, FunctionalAcceptGuardTransformation.guardCallCount.get());
+    }
+
+    @Test
+    void testMixedOldAndNewGuardStyles() {
+        EClass sourceClass = EcoreFactory.eINSTANCE.createEClass();
+        sourceClass.setName("Test");
+        sourceResource.getContents().add(sourceClass);
+
+        TransformationRegistry registry = new TransformationRegistry();
+        registry.register(MixedGuardStylesTransformation.class);
+
+        MixedGuardStylesTransformation.oldStyleCallCount.set(0);
+        MixedGuardStylesTransformation.newStyleCallCount.set(0);
+
+        TransformRuleDescriptor oldRule = registry.getRuleByName("OldStyleRule");
+        TransformRuleDescriptor newRule = registry.getRuleByName("NewStyleRule");
+
+        TransformationContext ctx = createContext(registry);
+
+        // Both styles should work
+        boolean oldResult = oldRule.evaluateGuard(sourceClass, ctx);
+        boolean newResult = newRule.evaluateGuard(sourceClass, ctx);
+
+        assertFalse(oldResult, "Old-style guard should reject");
+        assertFalse(newResult, "New-style guard should reject");
+        assertEquals(1, MixedGuardStylesTransformation.oldStyleCallCount.get());
+        assertEquals(1, MixedGuardStylesTransformation.newStyleCallCount.get());
+
+        // Both should cache rejections
+        oldRule.evaluateGuard(sourceClass, ctx);
+        newRule.evaluateGuard(sourceClass, ctx);
+        assertEquals(1, MixedGuardStylesTransformation.oldStyleCallCount.get(), "Old-style cached");
+        assertEquals(1, MixedGuardStylesTransformation.newStyleCallCount.get(), "New-style cached");
+    }
+
     // ========== Test Transformation Classes ==========
 
     @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EClass.class)
@@ -389,6 +470,78 @@ class GuardRejectionCacheTest {
         public boolean executorResetGuard(EObject source, TransformationContext ctx) {
             guardCallCount.incrementAndGet();
             return false;
+        }
+    }
+
+    // ========== Functional-Interface Guard Transformation Classes ==========
+
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EClass.class)
+    public static class FunctionalGuardTransformation {
+        static final AtomicInteger guardCallCount = new AtomicInteger(0);
+
+        @TransformRule(name = "FunctionalGuardRule")
+        @Guard(method = "functionalRejectGuard")
+        public TransformFunction<EClass, EClass> functionalGuardRule() {
+            return (source, ctx) -> ctx.createTarget(EClass.class);
+        }
+
+        // New-style: returns TransformGuard instead of boolean
+        public TransformGuard functionalRejectGuard() {
+            return (source, ctx) -> {
+                guardCallCount.incrementAndGet();
+                return false; // Always reject
+            };
+        }
+    }
+
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EClass.class)
+    public static class FunctionalAcceptGuardTransformation {
+        static final AtomicInteger guardCallCount = new AtomicInteger(0);
+
+        @TransformRule(name = "FunctionalAcceptRule")
+        @Guard(method = "functionalAcceptGuard")
+        public TransformFunction<EClass, EClass> functionalAcceptRule() {
+            return (source, ctx) -> ctx.createTarget(EClass.class);
+        }
+
+        // New-style: returns TransformGuard
+        public TransformGuard functionalAcceptGuard() {
+            return (source, ctx) -> {
+                guardCallCount.incrementAndGet();
+                return true; // Always accept
+            };
+        }
+    }
+
+    @hu.blackbelt.judo.zeta.annotation.TransformationContext(source = EClass.class, target = EClass.class)
+    public static class MixedGuardStylesTransformation {
+        static final AtomicInteger oldStyleCallCount = new AtomicInteger(0);
+        static final AtomicInteger newStyleCallCount = new AtomicInteger(0);
+
+        @TransformRule(name = "OldStyleRule")
+        @Guard(method = "oldStyleGuard")
+        public TransformFunction<EClass, EClass> oldStyleRule() {
+            return (source, ctx) -> ctx.createTarget(EClass.class);
+        }
+
+        @TransformRule(name = "NewStyleRule")
+        @Guard(method = "newStyleGuard")
+        public TransformFunction<EClass, EClass> newStyleRule() {
+            return (source, ctx) -> ctx.createTarget(EClass.class);
+        }
+
+        // Old-style: boolean return, takes (EObject, TransformationContext)
+        public boolean oldStyleGuard(EObject source, TransformationContext ctx) {
+            oldStyleCallCount.incrementAndGet();
+            return false;
+        }
+
+        // New-style: returns TransformGuard, no parameters
+        public TransformGuard newStyleGuard() {
+            return (source, ctx) -> {
+                newStyleCallCount.incrementAndGet();
+                return false;
+            };
         }
     }
 

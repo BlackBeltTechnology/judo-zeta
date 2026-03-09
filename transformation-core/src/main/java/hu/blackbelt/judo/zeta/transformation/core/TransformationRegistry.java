@@ -227,26 +227,42 @@ public class TransformationRegistry {
         // Find guard method if specified
         Guard guardAnnotation = ruleMethod.getAnnotation(Guard.class);
         Method guardMethod = null;
+        boolean guardReturnsFunctionalInterface = false;
         if (guardAnnotation != null) {
-            // Try multi-source guard signature first (EObject[], TransformationContext)
+            // Try no-arg functional-interface guard first (returns TransformGuard or MultiSourceTransformGuard)
             try {
-                guardMethod = instance.getClass().getDeclaredMethod(
-                        guardAnnotation.method(),
-                        EObject[].class,
-                        TransformationContext.class
-                );
+                Method candidate = instance.getClass().getDeclaredMethod(guardAnnotation.method());
+                Class<?> returnType = candidate.getReturnType();
+                if (TransformGuard.class.isAssignableFrom(returnType) ||
+                        MultiSourceTransformGuard.class.isAssignableFrom(returnType)) {
+                    guardMethod = candidate;
+                    guardReturnsFunctionalInterface = true;
+                }
             } catch (NoSuchMethodException e) {
-                // Fall back to single-source guard signature (EObject, TransformationContext)
+                // No no-arg method, try legacy signatures
+            }
+
+            if (guardMethod == null) {
+                // Try multi-source guard signature (EObject[], TransformationContext)
                 try {
                     guardMethod = instance.getClass().getDeclaredMethod(
                             guardAnnotation.method(),
-                            EObject.class,
+                            EObject[].class,
                             TransformationContext.class
                     );
-                } catch (NoSuchMethodException e2) {
-                    throw new RuntimeException(
-                            "Guard method not found: " + guardAnnotation.method() + " for rule: " + name + 
-                            ". Expected signature: (EObject, TransformationContext) or (EObject[], TransformationContext)", e2);
+                } catch (NoSuchMethodException e) {
+                    // Fall back to single-source guard signature (EObject, TransformationContext)
+                    try {
+                        guardMethod = instance.getClass().getDeclaredMethod(
+                                guardAnnotation.method(),
+                                EObject.class,
+                                TransformationContext.class
+                        );
+                    } catch (NoSuchMethodException e2) {
+                        throw new RuntimeException(
+                                "Guard method not found: " + guardAnnotation.method() + " for rule: " + name +
+                                ". Expected signature: () returning TransformGuard, (EObject, TransformationContext), or (EObject[], TransformationContext)", e2);
+                    }
                 }
             }
         }
@@ -285,6 +301,7 @@ public class TransformationRegistry {
                 isGreedy,
                 isDetached,
                 isActivityBased,
+                guardReturnsFunctionalInterface,
                 extendsRules,
                 transforms,
                 tos

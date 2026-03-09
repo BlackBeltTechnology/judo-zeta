@@ -49,6 +49,7 @@ public class TransformRuleDescriptor {
     private final boolean isGreedy;
     private final boolean isDetached;
     private final boolean isActivityBased;
+    private final boolean guardReturnsFunctionalInterface;
     private final List<String> extendsRules;
 
     /**
@@ -112,7 +113,7 @@ public class TransformRuleDescriptor {
             List<String> extendsRules
     ) {
         this(instance, ruleMethod, name, description, sourceType, targetType, guardMethod,
-                isLazy, isAbstract, isPrimary, isGreedy, false, false, extendsRules,
+                isLazy, isAbstract, isPrimary, isGreedy, false, false, false, extendsRules,
                 Collections.emptyList(), Collections.emptyList());
     }
 
@@ -132,7 +133,7 @@ public class TransformRuleDescriptor {
             List<String> extendsRules
     ) {
         this(instance, ruleMethod, name, description, sourceType, targetType, guardMethod,
-                isLazy, isAbstract, isPrimary, isGreedy, isDetached, false, extendsRules,
+                isLazy, isAbstract, isPrimary, isGreedy, isDetached, false, false, extendsRules,
                 Collections.emptyList(), Collections.emptyList());
     }
 
@@ -154,6 +155,30 @@ public class TransformRuleDescriptor {
             List<TransformDefinition> transforms,
             List<ToDefinition> tos
     ) {
+        this(instance, ruleMethod, name, description, sourceType, targetType, guardMethod,
+                isLazy, isAbstract, isPrimary, isGreedy, isDetached, isActivityBased, false, extendsRules,
+                transforms, tos);
+    }
+
+    public TransformRuleDescriptor(
+            Object instance,
+            Method ruleMethod,
+            String name,
+            String description,
+            Class<? extends EObject> sourceType,
+            Class<? extends EObject> targetType,
+            Method guardMethod,
+            boolean isLazy,
+            boolean isAbstract,
+            boolean isPrimary,
+            boolean isGreedy,
+            boolean isDetached,
+            boolean isActivityBased,
+            boolean guardReturnsFunctionalInterface,
+            List<String> extendsRules,
+            List<TransformDefinition> transforms,
+            List<ToDefinition> tos
+    ) {
         this.instance = instance;
         this.ruleMethod = ruleMethod;
         this.name = name;
@@ -167,6 +192,7 @@ public class TransformRuleDescriptor {
         this.isGreedy = isGreedy;
         this.isDetached = isDetached;
         this.isActivityBased = isActivityBased;
+        this.guardReturnsFunctionalInterface = guardReturnsFunctionalInterface;
         this.extendsRules = extendsRules;
         this.transforms = transforms != null ? transforms : Collections.emptyList();
         this.tos = tos != null ? tos : Collections.emptyList();
@@ -509,7 +535,11 @@ public class TransformRuleDescriptor {
         if (isMultiSourceGuard == null) {
             if (guardMethod == null) {
                 isMultiSourceGuard = false;
+            } else if (guardReturnsFunctionalInterface) {
+                // Functional-interface style: check return type
+                isMultiSourceGuard = MultiSourceTransformGuard.class.isAssignableFrom(guardMethod.getReturnType());
             } else {
+                // Legacy style: check parameter types
                 Class<?>[] paramTypes = guardMethod.getParameterTypes();
                 isMultiSourceGuard = paramTypes.length >= 1 && paramTypes[0].isArray();
             }
@@ -567,6 +597,14 @@ public class TransformRuleDescriptor {
 
     /**
      * Get the guard for single-source rules (lazily initialized).
+     *
+     * <p>Supports two guard styles:</p>
+     * <ul>
+     *   <li><b>Functional-interface style</b> (new): Guard method returns {@code TransformGuard}.
+     *       Reflection is used ONCE to obtain the guard lambda, then cached.</li>
+     *   <li><b>Boolean style</b> (legacy): Guard method returns {@code boolean} and takes
+     *       {@code (EObject, TransformationContext)}. Reflection on every invocation.</li>
+     * </ul>
      */
     public TransformGuard getGuard() {
         if (guardMethod == null) {
@@ -574,13 +612,23 @@ public class TransformRuleDescriptor {
         }
 
         if (cachedGuard == null) {
-            cachedGuard = (source, ctx) -> {
+            if (guardReturnsFunctionalInterface) {
+                // New style: invoke ONCE to get the TransformGuard lambda, then cache it
                 try {
-                    return (Boolean) guardMethod.invoke(instance, source, ctx);
+                    cachedGuard = (TransformGuard) guardMethod.invoke(instance);
                 } catch (Exception e) {
-                    throw new RuntimeException("Failed to evaluate guard for: " + name, e);
+                    throw new RuntimeException("Failed to get guard function for: " + name, e);
                 }
-            };
+            } else {
+                // Legacy style: wrap reflection call in lambda
+                cachedGuard = (source, ctx) -> {
+                    try {
+                        return (Boolean) guardMethod.invoke(instance, source, ctx);
+                    } catch (Exception e) {
+                        throw new RuntimeException("Failed to evaluate guard for: " + name, e);
+                    }
+                };
+            }
         }
 
         return cachedGuard;
@@ -599,13 +647,23 @@ public class TransformRuleDescriptor {
         }
 
         if (cachedMultiSourceGuard == null) {
-            cachedMultiSourceGuard = (sources, ctx) -> {
+            if (guardReturnsFunctionalInterface) {
+                // New style: invoke ONCE to get the MultiSourceTransformGuard lambda
                 try {
-                    return (Boolean) guardMethod.invoke(instance, sources, ctx);
+                    cachedMultiSourceGuard = (MultiSourceTransformGuard) guardMethod.invoke(instance);
                 } catch (Exception e) {
-                    throw new RuntimeException("Failed to evaluate multi-source guard for: " + name, e);
+                    throw new RuntimeException("Failed to get multi-source guard function for: " + name, e);
                 }
-            };
+            } else {
+                // Legacy style: wrap reflection call in lambda
+                cachedMultiSourceGuard = (sources, ctx) -> {
+                    try {
+                        return (Boolean) guardMethod.invoke(instance, sources, ctx);
+                    } catch (Exception e) {
+                        throw new RuntimeException("Failed to evaluate multi-source guard for: " + name, e);
+                    }
+                };
+            }
         }
 
         return cachedMultiSourceGuard;
