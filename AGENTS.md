@@ -1,21 +1,3 @@
-<!-- OPENSPEC:START -->
-# OpenSpec Instructions
-
-These instructions are for AI assistants working in this project.
-
-Always open `@/openspec/AGENTS.md` when the request:
-- Mentions planning or proposals (words like proposal, spec, change, plan)
-- Introduces new capabilities, breaking changes, architecture shifts, or big performance/security work
-- Sounds ambiguous and you need the authoritative spec before coding
-
-Use `@/openspec/AGENTS.md` to learn:
-- How to create and apply change proposals
-- Spec format and conventions
-- Project structure and guidelines
-
-Keep this managed block so 'openspec update' can refresh the instructions.
-
-<!-- OPENSPEC:END -->
 
 # Judo Zeta Validation Framework Documentation
 
@@ -254,7 +236,7 @@ The `transformation-core` module provides annotation-based model-to-model transf
 
 ```
 transformation-core/src/main/java/hu/blackbelt/judo/zeta/transformation/core/
-├── TransformationExecutor.java        # Parallel execution engine with staging
+├── TransformationExecutor.java        # Parallel execution engine with staging and execution strategy
 ├── TransformationContext.java         # Execution context with staging infrastructure
 ├── TransformationRegistry.java        # Rule registration and discovery
 ├── TransformationResult.java          # Result wrapper
@@ -263,6 +245,7 @@ transformation-core/src/main/java/hu/blackbelt/judo/zeta/transformation/core/
 ├── TransformRuleDescriptor.java       # Rule metadata
 ├── ElementResolutionCache.java        # Thread-safe source→target cache
 ├── RuleInheritanceGraph.java          # Rule dependency resolution
+├── ExecutionStrategy.java             # ELEMENT_BY_ELEMENT vs RULE_BY_RULE enum
 └── deferred/                          # Deferred EMF writes infrastructure
     ├── EMFOperation.java              # Sealed interface with 10 operation record types
     ├── OperationQueue.java            # Thread-safe queue with sequence ordering
@@ -298,11 +281,60 @@ TransformationExecutor executor = TransformationExecutor.builder()
     .parallel(true)                    // Enable parallel (default: true)
     .parallelThreshold(1000)           // Min elements for parallel (default: 1000)
     .chunkSize(100)                    // Elements per work unit (default: 100)
+    .executionStrategy(ExecutionStrategy.ELEMENT_BY_ELEMENT) // default
     .build();
 
 // Execute - executor is reusable
 TransformationResult result = executor.transform(sourceElements);
 ```
+
+### Execution Strategy (ELEMENT_BY_ELEMENT vs RULE_BY_RULE)
+
+The executor supports two execution strategies for eager rule processing, configured via `executionStrategy()`:
+
+| Strategy | Outer Loop | Inner Loop | Cross-Element Visibility |
+|----------|-----------|------------|--------------------------|
+| `ELEMENT_BY_ELEMENT` (default) | Source elements | Matching rules per element | Only current element's outputs via cache |
+| `RULE_BY_RULE` (ETL-compatible) | Rules in registration order | All matching source elements | ALL outputs from earlier rules |
+
+**RULE_BY_RULE** matches ETL's module import ordering: each rule processes ALL matching source elements before the next rule begins. Registration order in `TransformationRegistry` mirrors ETL's `.etl` import chain.
+
+```java
+// ETL-compatible rule-by-rule execution
+TransformationExecutor executor = TransformationExecutor.builder()
+    .registry(registry)
+    .context(context)
+    .executionStrategy(ExecutionStrategy.RULE_BY_RULE)
+    .parallel(false)    // Sequential rule-by-rule
+    .build();
+executor.transform();
+```
+
+**Parallel Rule-By-Rule:**
+- Outer rule loop remains sequential (rule ordering preserved)
+- Inner source-element loop parallelized via chunking
+- Per-rule barrier: `commitDeferredOperationsIncremental()` called between rules
+- Ensures Rule B sees ALL materialized outputs from Rule A
+
+```java
+// Parallel rule-by-rule with per-rule barriers
+TransformationExecutor executor = TransformationExecutor.builder()
+    .registry(registry)
+    .context(context)
+    .executionStrategy(ExecutionStrategy.RULE_BY_RULE)
+    .parallel(true)
+    .parallelThreshold(1)
+    .build();
+executor.transform();
+```
+
+**Key Methods:**
+- `TransformationRegistry.getOrderedEagerRules()` — returns all eager rules in registration order (filters out lazy, abstract, multi-source, activity-based). Result is cached.
+- `TransformationContext.commitDeferredOperationsIncremental()` — commits pending deferred operations between rules without disabling deferred writes (inter-rule barrier)
+- `TransformationExecutor.executeRuleForSource()` — shared logic for guard evaluation, cache getOrCreate, error handling (used by both strategies)
+
+**Incompatible Configuration:**
+`CLONE_CURRENT_STATE + RULE_BY_RULE + parallel(true)` throws `IllegalStateException`. CLONE_CURRENT_STATE requires deterministic element processing order within each rule, which parallel chunking does not guarantee. Use `parallel(false)` with this combination.
 
 ### Package Resolution
 
@@ -576,6 +608,7 @@ Enable diagnostics in `logback.xml`:
 | `TransformationException` | RuntimeException with element/rule context |
 | `ElementResolutionCache` | Thread-safe ConcurrentHashMap-based cache |
 | `TransformationTrace` | JSON-exportable source→target mapping |
+| `ExecutionStrategy` | Enum: `ELEMENT_BY_ELEMENT` (default) vs `RULE_BY_RULE` (ETL-compatible) |
 
 ### Transformation Annotations
 

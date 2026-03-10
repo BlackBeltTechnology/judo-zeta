@@ -2073,8 +2073,6 @@ public class TransformationContext {
         long startNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
         TransformationMetrics.recordEquivalentDiscriminatedCall();
 
-        System.out.println("DEBUG_ENTRY: equivalentDiscriminated called: rule=" + ruleName + " disc=" + discriminator + " strategy=" + equivalentDiscriminatedStrategy);
-
         // Fail-fast: CLONE_CURRENT_STATE is incompatible with deferred writes (parallel mode)
         if (equivalentDiscriminatedStrategy == EquivalentDiscriminatedStrategy.CLONE_CURRENT_STATE
                 && deferredWritesEnabled) {
@@ -2316,7 +2314,6 @@ public class TransformationContext {
             // CLONE_CURRENT_STATE strategy: ETL-compatible first-call-gets-original semantics.
             // The first caller for a given (source, ruleName) gets the original object directly.
             // Subsequent callers get clones of the original's current (possibly mutated) state.
-            System.out.println("DEBUG_STRATEGY: strategy=" + equivalentDiscriminatedStrategy + " rule=" + ruleName + " disc=" + effectiveDiscriminator);
             if (equivalentDiscriminatedStrategy == EquivalentDiscriminatedStrategy.CLONE_CURRENT_STATE) {
                 // Check discriminated cache first (another caller with same discriminator)
                 T cachedDisc = resolutionCache.getEquivalentDiscriminated(source, targetType, ruleName, effectiveDiscriminator);
@@ -4204,6 +4201,34 @@ public class TransformationContext {
         for (DeferredEObject.ProxyMarker proxy : createdProxies) {
             proxy.clearPendingState();
         }
+
+        return committed;
+    }
+
+    /**
+     * Commit pending deferred operations without disabling deferred writes.
+     *
+     * <p>This is the inter-rule barrier for parallel rule-by-rule execution.
+     * After each rule's parallel phase completes, pending operations are committed
+     * so the next rule sees materialized property values. Unlike {@link #commitDeferredOperations()},
+     * this method keeps deferred writes enabled so subsequent rules continue to
+     * use the deferred mechanism.</p>
+     *
+     * <p>This method should be called from a single thread between rule phases.</p>
+     *
+     * @return the number of operations applied
+     */
+    public int commitDeferredOperationsIncremental() {
+        int committed = operationQueue.commit();
+
+        // Clear pending state on all proxies after commit so reads see committed values
+        for (DeferredEObject.ProxyMarker proxy : createdProxies) {
+            proxy.clearPendingState();
+        }
+
+        // Note: we do NOT disable deferred writes or clear createdProxies.
+        // Deferred mode stays active for the next rule's parallel phase.
+        // Existing proxies remain tracked so future commits can clear their state too.
 
         return committed;
     }

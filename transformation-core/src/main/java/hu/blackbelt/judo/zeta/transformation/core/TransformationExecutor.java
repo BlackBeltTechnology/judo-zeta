@@ -65,6 +65,7 @@ public class TransformationExecutor {
     private final int parallelThreshold;
     private final int chunkSize;
     private final boolean etlCompatibilityMode;
+    private final ExecutionStrategy executionStrategy;
     private volatile ExecutorService executor;
 
     /**
@@ -107,6 +108,7 @@ public class TransformationExecutor {
         this.parallelThreshold = DEFAULT_PARALLEL_THRESHOLD;
         this.chunkSize = DEFAULT_CHUNK_SIZE;
         this.etlCompatibilityMode = false;
+        this.executionStrategy = ExecutionStrategy.ELEMENT_BY_ELEMENT;
 
         // CRITICAL: Set the registry on the context so that equivalent() and
         // equivalentDiscriminated() can trigger @Lazy rules from ANY calling context
@@ -122,6 +124,7 @@ public class TransformationExecutor {
         this.parallelThreshold = builder.parallelThreshold;
         this.chunkSize = builder.chunkSize;
         this.etlCompatibilityMode = builder.etlCompatibilityMode;
+        this.executionStrategy = builder.executionStrategy;
 
         // CRITICAL: Set the registry on the context so that equivalent() and
         // equivalentDiscriminated() can trigger @Lazy rules from ANY calling context
@@ -155,6 +158,7 @@ public class TransformationExecutor {
         private int parallelThreshold = DEFAULT_PARALLEL_THRESHOLD;
         private int chunkSize = DEFAULT_CHUNK_SIZE;
         private boolean etlCompatibilityMode = false;
+        private ExecutionStrategy executionStrategy = ExecutionStrategy.ELEMENT_BY_ELEMENT;
 
         public Builder registry(TransformationRegistry registry) {
             this.registry = registry;
@@ -194,6 +198,23 @@ public class TransformationExecutor {
          */
         public Builder etlCompatibilityMode(boolean enabled) {
             this.etlCompatibilityMode = enabled;
+            return this;
+        }
+
+        /**
+         * Set the execution strategy for eager rule processing.
+         *
+         * <p>{@code ELEMENT_BY_ELEMENT} (default): for each source element, execute all matching
+         * eager rules before moving to the next element.</p>
+         *
+         * <p>{@code RULE_BY_RULE}: for each eager rule, execute it for all matching source
+         * elements before advancing to the next rule. This matches ETL's module import ordering.</p>
+         *
+         * @param strategy the execution strategy
+         * @return this builder
+         */
+        public Builder executionStrategy(ExecutionStrategy strategy) {
+            this.executionStrategy = Objects.requireNonNull(strategy, "executionStrategy is required");
             return this;
         }
 
@@ -404,6 +425,9 @@ public class TransformationExecutor {
      * @throws TransformationException if transformation fails (fail-fast behavior)
      */
     public TransformationResult transform() {
+        // Fail-fast: CLONE_CURRENT_STATE + RULE_BY_RULE + parallel is incompatible
+        validateConfiguration();
+
         // Reset state for reuse
         reset();
         // Initialize element collection cache
@@ -452,22 +476,25 @@ public class TransformationExecutor {
             if (TransformationMetrics.isEnabled()) {
                 TransformationMetrics.addModelIterationNanos(System.nanoTime() - elementCollectionStart);
             }
-            
-            // Process single-source elements
-            boolean useParallel = parallel && singleSourceElements.size() >= parallelThreshold;
-            if (useParallel) {
-                transformWithStaging(singleSourceElements);
-            } else {
-                transformSequential(singleSourceElements);
 
-                // Cleanup contained elements from Resource.contents when autoAddRootElements is enabled.
-                // In sequential mode, createTarget() with autoAddRootElements adds elements directly
-                // to Resource.contents. When elements are later added to containment references,
-                // EMF does NOT automatically remove them from Resource.contents. This cleanup phase
-                // removes any elements that have been added to containment (eContainer != null),
-                // mirroring the parallel mode commit phase check.
-                if (context.isAutoAddRootElements()) {
-                    context.cleanupContainedRootElements();
+            // Process single-source elements based on execution strategy
+            boolean useParallel = parallel && singleSourceElements.size() >= parallelThreshold;
+            if (executionStrategy == ExecutionStrategy.RULE_BY_RULE) {
+                if (useParallel) {
+                    transformRuleByRuleParallel(singleSourceElements);
+                } else {
+                    transformRuleByRule(singleSourceElements);
+                }
+            } else {
+                if (useParallel) {
+                    transformWithStaging(singleSourceElements);
+                } else {
+                    transformSequential(singleSourceElements);
+
+                    // Cleanup contained elements from Resource.contents when autoAddRootElements is enabled.
+                    if (context.isAutoAddRootElements()) {
+                        context.cleanupContainedRootElements();
+                    }
                 }
             }
 
@@ -494,8 +521,8 @@ public class TransformationExecutor {
             }
 
             long duration = System.currentTimeMillis() - startTime;
-            log.info("Transformation completed in {}ms{}",
-                    duration, useParallel ? " (parallel)" : "");
+            log.info("Transformation completed in {}ms (strategy={}){}",
+                    duration, executionStrategy, useParallel ? " (parallel)" : "");
 
             return new TransformationResult(context, duration);
 
@@ -527,6 +554,9 @@ public class TransformationExecutor {
      * @throws TransformationException if transformation fails (fail-fast behavior)
      */
     public TransformationResult transform(Collection<? extends EObject> sourceElements) {
+        // Fail-fast: CLONE_CURRENT_STATE + RULE_BY_RULE + parallel is incompatible
+        validateConfiguration();
+
         // Reset state for reuse
         reset();
 
@@ -539,25 +569,25 @@ public class TransformationExecutor {
             // Use parallel only if requested AND element count exceeds threshold
             boolean useParallel = parallel && sourceElements.size() >= parallelThreshold;
 
-            if (useParallel) {
-                transformWithStaging(sourceElements);
+            if (executionStrategy == ExecutionStrategy.RULE_BY_RULE) {
+                if (useParallel) {
+                    transformRuleByRuleParallel(sourceElements);
+                } else {
+                    transformRuleByRule(sourceElements);
+                }
             } else {
-                transformSequential(sourceElements);
+                if (useParallel) {
+                    transformWithStaging(sourceElements);
+                } else {
+                    transformSequential(sourceElements);
 
-                // Cleanup contained elements from Resource.contents when autoAddRootElements is enabled.
-                // In sequential mode, createTarget() with autoAddRootElements adds elements directly
-                // to Resource.contents. When elements are later added to containment references,
-                // EMF does NOT automatically remove them from Resource.contents. This cleanup phase
-                // removes any elements that have been added to containment (eContainer != null),
-                // mirroring the parallel mode commit phase check.
-                if (context.isAutoAddRootElements()) {
-                    context.cleanupContainedRootElements();
+                    if (context.isAutoAddRootElements()) {
+                        context.cleanupContainedRootElements();
+                    }
                 }
             }
 
             // Phase 2: Execute activity-based rules for activated elements only
-            // This matches ETL semantics where @greedy @lazy rules only process
-            // elements referenced via equivalent() during Phase 1
             executeActivityBasedRules();
 
             // Check for errors (fail-fast)
@@ -570,8 +600,9 @@ public class TransformationExecutor {
             }
 
             long duration = System.currentTimeMillis() - startTime;
-            log.info("Transformation completed in {}ms, processed {} elements{}",
-                    duration, sourceElements.size(), useParallel ? " (parallel)" : "");
+            log.info("Transformation completed in {}ms, processed {} elements (strategy={}){}",
+                    duration, sourceElements.size(), executionStrategy,
+                    useParallel ? " (parallel)" : "");
 
             return new TransformationResult(context, duration);
 
@@ -847,6 +878,198 @@ public class TransformationExecutor {
         return result;
     }
 
+    /**
+     * Validate executor configuration for incompatible combinations.
+     *
+     * @throws IllegalStateException if CLONE_CURRENT_STATE + RULE_BY_RULE + parallel
+     */
+    private void validateConfiguration() {
+        if (executionStrategy == ExecutionStrategy.RULE_BY_RULE
+                && parallel
+                && context.getEquivalentDiscriminatedStrategy()
+                        == EquivalentDiscriminatedStrategy.CLONE_CURRENT_STATE) {
+            throw new IllegalStateException(
+                    "CLONE_CURRENT_STATE + RULE_BY_RULE + parallel is not supported. "
+                    + "CLONE_CURRENT_STATE requires deterministic element processing order "
+                    + "within each rule, which parallel chunking does not guarantee. "
+                    + "Use parallel(false) with CLONE_CURRENT_STATE + RULE_BY_RULE.");
+        }
+    }
+
+    /**
+     * Execute a single rule for a single source element using the atomic getOrCreate pattern.
+     *
+     * <p>This is the shared logic for guard evaluation, cache getOrCreate, error handling,
+     * and metrics. Used by both {@code executeEagerRulesFor()} (element-by-element)
+     * and {@code transformRuleByRule()} (rule-by-rule).</p>
+     *
+     * @param rule the rule to execute
+     * @param source the source element
+     */
+    private void executeRuleForSource(TransformRuleDescriptor rule, EObject source) {
+        try {
+            final String ruleName = rule.getName();
+            long cacheStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+            context.getElementResolutionCache().getOrCreate(
+                    source,
+                    ruleName,
+                    () -> {
+                        long guardStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+                        boolean guardPassed = rule.evaluateGuard(source, context);
+                        if (TransformationMetrics.isEnabled()) {
+                            TransformationMetrics.recordGuardEvaluation();
+                            TransformationMetrics.addGuardEvaluationNanos(System.nanoTime() - guardStart);
+                        }
+                        if (!guardPassed) {
+                            return null;
+                        }
+                        long startNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
+                        EObject result = rule.execute(source, context);
+                        if (TransformationMetrics.isEnabled()) {
+                            TransformationMetrics.recordGreedyRuleExecution(ruleName, System.nanoTime() - startNanos);
+                        }
+                        return result;
+                    },
+                    rule.isPrimary()
+            );
+            if (TransformationMetrics.isEnabled()) {
+                TransformationMetrics.addCacheGetOrCreateNanos(System.nanoTime() - cacheStart);
+            }
+        } catch (Exception e) {
+            log.error("Error executing rule '{}' on {}: {}",
+                    rule.getName(), source, e.getMessage(), e);
+            TransformationException transformException = new TransformationException(
+                    "Error executing rule '" + rule.getName() + "': " + e.getMessage(),
+                    e, source, rule.getName());
+            firstError.compareAndSet(null, transformException);
+        }
+    }
+
+    /**
+     * Rule-by-rule sequential execution: outer loop over rules, inner loop over elements.
+     *
+     * <p>Matches ETL's execution model where each rule processes ALL matching source
+     * elements before the next rule begins. Rules are iterated in registration order,
+     * which mirrors ETL's module import ordering.</p>
+     */
+    private void transformRuleByRule(Collection<? extends EObject> sourceElements) {
+        List<TransformRuleDescriptor> orderedRules = registry.getOrderedEagerRules();
+
+        for (TransformRuleDescriptor rule : orderedRules) {
+            if (firstError.get() != null) {
+                return;
+            }
+
+            // Skip activity-based rules - they execute in Phase 2
+            if (isEffectivelyActivityBased(rule)) continue;
+
+            for (EObject source : sourceElements) {
+                if (firstError.get() != null) {
+                    return;
+                }
+
+                // Type match check
+                if (!rule.appliesTo(source)) continue;
+
+                // Check resource alias
+                if (!isFromExpectedAlias(source, rule)) continue;
+
+                try {
+                    context.setCurrentSource(source);
+                    executeRuleForSource(rule, source);
+                } finally {
+                    context.clearCurrentSource();
+                }
+            }
+        }
+
+        // Cleanup contained elements when autoAddRootElements is enabled
+        if (context.isAutoAddRootElements()) {
+            context.cleanupContainedRootElements();
+        }
+    }
+
+    /**
+     * Rule-by-rule parallel execution: outer loop over rules (sequential),
+     * inner loop parallelized via chunks with staging/deferred writes.
+     *
+     * <p>Between each rule, a barrier ensures all parallel chunks complete
+     * and deferred operations are committed before the next rule starts.
+     * This guarantees that Rule B sees ALL outputs from Rule A.</p>
+     */
+    private void transformRuleByRuleParallel(Collection<? extends EObject> sourceElements) {
+        List<TransformRuleDescriptor> orderedRules = registry.getOrderedEagerRules();
+        List<EObject> elementList = new ArrayList<>(sourceElements);
+
+        int numProcessors = Runtime.getRuntime().availableProcessors();
+        int effectiveChunkSize = Math.max(chunkSize, (elementList.size() + numProcessors - 1) / numProcessors);
+
+        try {
+            // Enable staging and deferred writes for the entire rule-by-rule phase
+            context.enableStaging();
+            context.enableDeferredWrites();
+
+            ExecutorService exec = getOrCreateExecutor();
+
+            for (TransformRuleDescriptor rule : orderedRules) {
+                if (firstError.get() != null) {
+                    return;
+                }
+
+                // Skip activity-based rules - they execute in Phase 2
+                if (isEffectivelyActivityBased(rule)) continue;
+
+                // Parallelize the inner source-element loop for this rule
+                List<List<EObject>> chunks = partitionList(elementList, effectiveChunkSize);
+
+                List<CompletableFuture<Void>> futures = chunks.stream()
+                        .map(chunk -> CompletableFuture.runAsync(() -> {
+                            for (EObject source : chunk) {
+                                if (firstError.get() != null) {
+                                    break;
+                                }
+                                if (!rule.appliesTo(source)) continue;
+                                if (!isFromExpectedAlias(source, rule)) continue;
+
+                                try {
+                                    context.setCurrentSource(source);
+                                    executeRuleForSource(rule, source);
+                                } finally {
+                                    context.clearCurrentSource();
+                                }
+                            }
+                        }, exec))
+                        .collect(Collectors.toList());
+
+                // Barrier: wait for all chunks of this rule to complete
+                CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+
+                // Commit deferred operations from this rule before next rule starts
+                // This ensures Rule B sees Rule A's materialized property values
+                if (firstError.get() == null) {
+                    context.commitDeferredOperationsIncremental();
+                }
+            }
+
+            // Check for errors before final commit
+            if (firstError.get() != null) {
+                return;
+            }
+
+            // Final commit: staged elements to Resource
+            context.commitStagedElements();
+
+            // Unwrap all proxies in the model
+            context.unwrapAllProxiesInModel();
+
+        } finally {
+            context.disableDeferredWrites();
+            context.disableStaging();
+            context.clearDeferredOperations();
+            context.clearStagedElements();
+        }
+    }
+
     private void executeEagerRulesFor(EObject source) {
         // Time rule lookup - uses pre-filtered index for O(1) lookup
         long rulesStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
@@ -872,56 +1095,17 @@ public class TransformationExecutor {
             // 1. Type match check (requires actual EObject for EMF semantics)
             if (!rule.appliesTo(source)) continue;
 
-            // 2. Skip activity-based rules - they execute only for activated elements in Phase 2
-            // This matches ETL semantics where @greedy @lazy rules only process
-            // elements that were referenced via equivalent()
+            // 2. Skip activity-based rules
             if (isEffectivelyActivityBased(rule)) continue;
 
             // 3. Check if element comes from the correct resource alias
             if (!isFromExpectedAlias(source, rule)) continue;
 
-            // Atomic get-or-create: lock covers cache check + guard evaluation + rule execution
-            // This prevents race conditions where multiple threads could create duplicate targets
-            try {
-                final String ruleName = rule.getName();
-                // Time cache operation separately
-                long cacheStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
-                context.getElementResolutionCache().getOrCreate(
-                        source,
-                        ruleName,
-                        () -> {
-                            // Guard evaluation inside the lock to prevent race conditions
-                            long guardStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
-                            boolean guardPassed = rule.evaluateGuard(source, context);
-                            if (TransformationMetrics.isEnabled()) {
-                                TransformationMetrics.recordGuardEvaluation();
-                                TransformationMetrics.addGuardEvaluationNanos(System.nanoTime() - guardStart);
-                            }
-                            if (!guardPassed) {
-                                return null;  // Guard rejected - don't execute
-                            }
-                            // Rule execution inside the lock with timing
-                            long startNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
-                            EObject result = rule.execute(source, context);
-                            if (TransformationMetrics.isEnabled()) {
-                                TransformationMetrics.recordGreedyRuleExecution(ruleName, System.nanoTime() - startNanos);
-                            }
-                            return result;
-                        },
-                        rule.isPrimary()
-                );
-                if (TransformationMetrics.isEnabled()) {
-                    TransformationMetrics.addCacheGetOrCreateNanos(System.nanoTime() - cacheStart);
-                }
-            } catch (Exception e) {
-                log.error("Error executing rule '{}' on {}: {}",
-                        rule.getName(), source, e.getMessage(), e);
-                // Set first error for fail-fast (only first error is captured)
-                TransformationException transformException = new TransformationException(
-                        "Error executing rule '" + rule.getName() + "': " + e.getMessage(),
-                        e, source, rule.getName());
-                firstError.compareAndSet(null, transformException);
-                break; // Stop processing this element
+            executeRuleForSource(rule, source);
+
+            // Stop processing this element on error
+            if (firstError.get() != null) {
+                break;
             }
         }
 

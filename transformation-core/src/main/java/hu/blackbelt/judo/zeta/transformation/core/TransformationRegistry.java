@@ -78,6 +78,9 @@ public class TransformationRegistry {
     private final ConcurrentHashMap<Class<?>, TransformRuleDescriptor> primaryRuleByTargetTypeCache =
             new ConcurrentHashMap<>();
 
+    // Cached ordered list of all eager rules in registration order (for rule-by-rule execution)
+    private volatile List<TransformRuleDescriptor> orderedEagerRulesCache;
+
     /**
      * Counter for assigning sequential ordinals to rules at registration time.
      * Used for O(1) array-indexed cache lookups instead of String-based map lookups.
@@ -145,6 +148,7 @@ public class TransformationRegistry {
         rulesBySourceTypeCache.clear();
         eagerRulesByTypeCache.clear();
         lazyRulesByTypeCache.clear();
+        orderedEagerRulesCache = null;
     }
 
     private void registerRule(
@@ -466,6 +470,30 @@ public class TransformationRegistry {
         return rulesBySourceType.values().stream()
                 .flatMap(List::stream)
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * Get all eager rules in registration order, suitable for rule-by-rule execution.
+     *
+     * <p>Returns rules in the exact order they were registered (class registration order,
+     * then within-class declaration order). Filters out lazy, abstract, and multi-source rules.
+     * This mirrors ETL's module import ordering where each rule processes all matching
+     * elements before the next rule begins.</p>
+     *
+     * @return unmodifiable list of eager rules in registration order
+     */
+    public List<TransformRuleDescriptor> getOrderedEagerRules() {
+        List<TransformRuleDescriptor> cached = orderedEagerRulesCache;
+        if (cached != null) {
+            return cached;
+        }
+        List<TransformRuleDescriptor> result = rulesBySourceType.values().stream()
+                .flatMap(List::stream)
+                .filter(r -> !r.isLazy() && !r.isAbstract() && !r.isMultiSource())
+                .collect(Collectors.toList());
+        result = Collections.unmodifiableList(result);
+        orderedEagerRulesCache = result;
+        return result;
     }
 
     /**
