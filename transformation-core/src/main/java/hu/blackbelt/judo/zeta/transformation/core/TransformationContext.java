@@ -270,6 +270,18 @@ public class TransformationContext {
     private volatile boolean deferredWritesEnabled = false;
 
     /**
+     * Strategy for equivalentDiscriminated cloning behavior.
+     * Default: CLONE_PRISTINE (existing behavior).
+     */
+    private EquivalentDiscriminatedStrategy equivalentDiscriminatedStrategy =
+            EquivalentDiscriminatedStrategy.CLONE_PRISTINE;
+
+    /**
+     * Tracks first-call semantics for CLONE_CURRENT_STATE strategy.
+     */
+    private final OriginalTracker originalTracker = new OriginalTracker();
+
+    /**
      * Queue for storing deferred EMF operations during parallel phase.
      * Operations are replayed in sequence order during commit.
      */
@@ -898,6 +910,24 @@ public class TransformationContext {
      */
     public boolean isEtlCompatibilityMode() {
         return etlCompatibilityMode;
+    }
+
+    /**
+     * Set the cloning strategy for equivalentDiscriminated().
+     *
+     * @param strategy the strategy to use
+     */
+    public void setEquivalentDiscriminatedStrategy(EquivalentDiscriminatedStrategy strategy) {
+        this.equivalentDiscriminatedStrategy = strategy;
+    }
+
+    /**
+     * Get the current cloning strategy for equivalentDiscriminated().
+     *
+     * @return the current strategy
+     */
+    public EquivalentDiscriminatedStrategy getEquivalentDiscriminatedStrategy() {
+        return equivalentDiscriminatedStrategy;
     }
 
     /**
@@ -2043,6 +2073,17 @@ public class TransformationContext {
         long startNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
         TransformationMetrics.recordEquivalentDiscriminatedCall();
 
+        System.out.println("DEBUG_ENTRY: equivalentDiscriminated called: rule=" + ruleName + " disc=" + discriminator + " strategy=" + equivalentDiscriminatedStrategy);
+
+        // Fail-fast: CLONE_CURRENT_STATE is incompatible with deferred writes (parallel mode)
+        if (equivalentDiscriminatedStrategy == EquivalentDiscriminatedStrategy.CLONE_CURRENT_STATE
+                && deferredWritesEnabled) {
+            throw new IllegalStateException(
+                    "CLONE_CURRENT_STATE strategy is incompatible with deferred writes (parallel mode). " +
+                    "ETL's equivalentDiscriminated depends on mutation ordering which is non-deterministic " +
+                    "in parallel mode. Use sequential execution (parallel=false) with CLONE_CURRENT_STATE.");
+        }
+
         // Use local variable for potentially resolved discriminator
         String effectiveDiscriminator = discriminator;
         boolean useDiscriminatorOnlyCache = false;  // Option B.1: flag for cache mode
@@ -2215,9 +2256,12 @@ public class TransformationContext {
                                                 // (no cloning - the original becomes THE element with discriminated ID).
                                                 // This matches ETL semantics where there's only one element per discriminator.
                                                 boolean wasInDiscriminated = inDiscriminatedExecution.get();
-                                                if (effectiveDiscriminator != null && !useDiscriminatorOnlyCache) {
+                                                if (effectiveDiscriminator != null && !useDiscriminatorOnlyCache
+                                                        && equivalentDiscriminatedStrategy != EquivalentDiscriminatedStrategy.CLONE_CURRENT_STATE) {
                                                     // Only skip addToResource for source-based cache (clone path)
                                                     // For discriminator-only cache, let addToResource work normally
+                                                    // For CLONE_CURRENT_STATE, the first caller gets the original directly,
+                                                    // so it must be added to the resource (like discriminator-only mode)
                                                     inDiscriminatedExecution.set(true);
                                                 }
                                                 try {
@@ -2267,6 +2311,103 @@ public class TransformationContext {
             // If no discriminator, return the original without cloning (ETL semantics)
             if (effectiveDiscriminator == null) {
                 return original;
+            }
+
+            // CLONE_CURRENT_STATE strategy: ETL-compatible first-call-gets-original semantics.
+            // The first caller for a given (source, ruleName) gets the original object directly.
+            // Subsequent callers get clones of the original's current (possibly mutated) state.
+            System.out.println("DEBUG_STRATEGY: strategy=" + equivalentDiscriminatedStrategy + " rule=" + ruleName + " disc=" + effectiveDiscriminator);
+            if (equivalentDiscriminatedStrategy == EquivalentDiscriminatedStrategy.CLONE_CURRENT_STATE) {
+                // Check discriminated cache first (another caller with same discriminator)
+                T cachedDisc = resolutionCache.getEquivalentDiscriminated(source, targetType, ruleName, effectiveDiscriminator);
+                if (cachedDisc != null) {
+                    return cachedDisc;
+                }
+
+                OriginalTracker.FirstCallResult firstCallResult =
+                        originalTracker.checkAndRegisterFirstCall(source, ruleName, effectiveDiscriminator);
+
+                if (firstCallResult.isFirstCall()) {
+                    // FIRST CALLER: Return the original directly (no cloning)
+                    // Store the base ID before we modify it with the discriminator suffix
+                    String baseId;
+                    if (useStructuredIds) {
+                        baseId = generateStructuredId(source, ruleName);
+                    } else {
+                        baseId = getElementId(original);
+                    }
+                    originalTracker.registerBaseId(source, ruleName, baseId);
+
+                    String discriminatedId = generateDiscriminatedId(baseId, effectiveDiscriminator);
+                    setElementId(original, discriminatedId);
+
+                    // Add original to resource if not @Detached and not already contained
+                    // In CLONE_CURRENT_STATE mode, inDiscriminatedExecution is NOT set, so
+                    // addToResource() in the rule may or may not have been called.
+                    // We ensure the original is in the resource here (matching ETL behavior).
+                    TransformRuleDescriptor rule = transformationRegistry != null
+                            ? transformationRegistry.getRuleByName(ruleName) : null;
+                    boolean isDetached = rule != null && rule.isDetached();
+
+                    if (!isDetached && original.eContainer() == null && original.eResource() == null) {
+                        if (!targetResourceSet.getResources().isEmpty()) {
+                            Resource targetResource = targetResourceSet.getResources().get(0);
+                            targetResource.getContents().add(original);
+                            if (targetResource instanceof XMIResource) {
+                                setSynchronizedXmiId((XMIResource) targetResource, original, discriminatedId);
+                            }
+                        }
+                    }
+
+                    // Cache the mapping
+                    resolutionCache.addDiscriminatedMapping(source, original, ruleName, effectiveDiscriminator);
+
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("CLONE_CURRENT_STATE: First caller gets original. {} discriminator={} element={}",
+                                ruleName, effectiveDiscriminator, System.identityHashCode(original));
+                    }
+
+                    return original;
+                } else {
+                    // SUBSEQUENT CALLER: Clone from CURRENT state of original
+                    T clone = (T) EcoreUtil.copy(original);
+
+                    // Track the clone's creating rule (same as original's creating rule)
+                    TransformRuleDescriptor originalCreatingRule = elementCreatingRule.get(original);
+                    if (originalCreatingRule != null) {
+                        elementCreatingRule.put(clone, originalCreatingRule);
+                    }
+
+                    // Generate discriminated ID for the clone using stored base ID
+                    String baseId = originalTracker.getBaseId(source, ruleName);
+                    String discriminatedId = generateDiscriminatedId(baseId, effectiveDiscriminator);
+                    setElementId(clone, discriminatedId);
+
+                    // Add clone to resource (check @Detached)
+                    TransformRuleDescriptor rule = transformationRegistry != null
+                            ? transformationRegistry.getRuleByName(ruleName) : null;
+                    boolean isDetached = rule != null && rule.isDetached();
+
+                    if (!isDetached) {
+                        if (!targetResourceSet.getResources().isEmpty()) {
+                            Resource targetResource = targetResourceSet.getResources().get(0);
+                            targetResource.getContents().add(clone);
+                            if (targetResource instanceof XMIResource) {
+                                setSynchronizedXmiId((XMIResource) targetResource, clone, discriminatedId);
+                            }
+                        }
+                    }
+
+                    // Cache discriminated result
+                    resolutionCache.addDiscriminatedMapping(source, clone, ruleName, effectiveDiscriminator);
+
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("CLONE_CURRENT_STATE: Subsequent caller gets clone of current state. {} discriminator={} clone={}",
+                                ruleName, effectiveDiscriminator, System.identityHashCode(clone));
+                    }
+
+                    return clone;
+                }
             }
 
             // DISCRIMINATOR_ONLY cache mode: Use original directly without cloning.
@@ -3437,6 +3578,7 @@ public class TransformationContext {
         executingLazyRules.clear();
         ruleLocks.clear();
         discriminatedLocks.clear();
+        originalTracker.clear();
     }
 
     /**

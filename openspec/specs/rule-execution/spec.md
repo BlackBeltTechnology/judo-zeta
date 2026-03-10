@@ -285,10 +285,13 @@ In-progress targets used for circular dependency handling SHALL be cleared when 
 
 When a `@Lazy` rule is executed via `equivalentDiscriminated()`, the framework SHALL NOT add the original target element to `Resource.contents`. Only the discriminated clone SHALL be added to the resource.
 
+**Exception**: When `EquivalentDiscriminatedStrategy` is `CLONE_CURRENT_STATE`, the `inDiscriminatedExecution` flag SHALL NOT be set during rule execution. The original SHALL be added to the resource normally because the first caller receives the original directly (no clone is created for the first call).
+
 #### Scenario: Lazy rule via equivalentDiscriminated does not add original
 
 **Given** a @Lazy rule "CreateActionDefinition" that calls `ctx.addToResource(target)`
 **And** the rule is called via `equivalentDiscriminated(source, EDataType.class, "CreateActionDefinition", "button/form1")`
+**And** the strategy is `CLONE_PRISTINE`
 **When** the rule executes
 **Then** the original target SHALL NOT be added to Resource.contents
 **And** the discriminated clone SHALL be added to Resource.contents
@@ -305,6 +308,7 @@ When a `@Lazy` rule is executed via `equivalentDiscriminated()`, the framework S
 #### Scenario: Multiple discriminators create one clone each
 
 **Given** a @Lazy rule "CreateActionDefinition"
+**And** the strategy is `CLONE_PRISTINE`
 **And** Button calls `equivalentDiscriminated(source, ..., "button/form1")`
 **And** Action calls `equivalentDiscriminated(source, ..., "action/form1")`
 **When** both calls complete
@@ -320,6 +324,17 @@ When a `@Lazy` rule is executed via `equivalentDiscriminated()`, the framework S
 **When** both calls complete
 **Then** Resource.contents SHALL contain exactly 1 ActionDefinition
 **And** both Button and Action SHALL reference the same clone instance
+
+#### Scenario: CLONE_CURRENT_STATE allows original to be added to resource
+
+**Given** a @Lazy rule "CreateActionDefinition" that calls `ctx.addToResource(target)`
+**And** the strategy is `CLONE_CURRENT_STATE`
+**And** the rule is called via `equivalentDiscriminated(source, EDataType.class, "CreateActionDefinition", "discA")`
+**When** the rule executes
+**Then** `inDiscriminatedExecution` flag SHALL NOT be set to true
+**And** the original target SHALL be added to Resource.contents via `addToResource()`
+**And** the first caller SHALL receive the original with discriminated XMI ID
+**Because** CLONE_CURRENT_STATE returns the original directly to the first caller — suppressing addToResource would orphan it
 
 ### Requirement: No Orphan Original Elements from Discriminated Calls
 
@@ -376,9 +391,12 @@ When transformation code uses **different discriminators** for the same logical 
 
 The `TransformationContext.addToResource(element)` method SHALL check whether the current execution context is a discriminated lazy rule invocation. If the context is discriminated, the method SHALL skip adding the element to `Resource.contents` and return silently.
 
+**Exception**: When `EquivalentDiscriminatedStrategy` is `CLONE_CURRENT_STATE`, the `inDiscriminatedExecution` flag is NOT set, so `addToResource()` SHALL work normally regardless of whether the call originated from `equivalentDiscriminated()`.
+
 #### Scenario: addToResource is no-op during discriminated execution
 
 **Given** the current thread is executing a lazy rule via `equivalentDiscriminated()`
+**And** the strategy is `CLONE_PRISTINE`
 **When** the rule calls `ctx.addToResource(element)`
 **Then** the element SHALL NOT be added to any resource
 **And** the method SHALL return without error
@@ -391,6 +409,14 @@ The `TransformationContext.addToResource(element)` method SHALL check whether th
 **When** the rule calls `ctx.addToResource(element)`
 **Then** the element SHALL be added to the target resource
 **And** normal addToResource behavior applies
+
+#### Scenario: addToResource works normally with CLONE_CURRENT_STATE strategy
+
+**Given** the current thread is executing a lazy rule via `equivalentDiscriminated()`
+**And** the strategy is `CLONE_CURRENT_STATE`
+**When** the rule calls `ctx.addToResource(element)`
+**Then** the element SHALL be added to the target resource
+**Because** `inDiscriminatedExecution` is not set when CLONE_CURRENT_STATE is active
 
 ### Requirement: createTarget with Explicit ID Parameter
 
@@ -642,4 +668,81 @@ When `equivalentDiscriminated()` is called with discriminator-only cache mode en
 **Then** element1 SHALL be returned (same instance)
 **And** no second element SHALL be created
 **And** no orphans SHALL exist
+
+### Requirement: Public Element ID Resolution API
+
+The `TransformationContext` SHALL expose a public `getElementId(EObject)` method that returns the element's XMI ID, checking pending (deferred) IDs before committed IDs. This enables transformation code to build discriminators using target element IDs reliably.
+
+#### Scenario: Pending ID takes precedence over committed ID
+
+**Given** an element with a committed XMI ID "committed-id" in the resource
+**And** the element has a pending ID "pending-id" in `pendingXmiIds`
+**When** `ctx.getElementId(element)` is called
+**Then** the result SHALL be "pending-id"
+**Because** pending IDs represent the current transformation state
+
+#### Scenario: Committed ID returned when no pending ID exists
+
+**Given** an element with a committed XMI ID "committed-id" in the resource
+**And** the element has no pending ID in `pendingXmiIds`
+**When** `ctx.getElementId(element)` is called
+**Then** the result SHALL be "committed-id"
+
+#### Scenario: UUID generated for elements without ID
+
+**Given** an element without any XMI ID
+**And** staging is enabled via `ctx.enableStaging()`
+**When** `ctx.getElementId(element)` is called
+**Then** a UUID SHALL be generated starting with underscore (e.g., "_abc123...")
+**And** the UUID SHALL be cached in `pendingXmiIds` for consistency
+**And** subsequent calls SHALL return the same UUID
+
+### Requirement: ID Resolution Order
+
+The `getElementId(EObject)` method SHALL resolve IDs in the following order of precedence:
+
+1. **Pending IDs**: Check `pendingXmiIds` map first (highest priority)
+2. **Resource URI Fragment**: Check `resource.getURIFragment(element)` excluding path-based fragments
+3. **Structural Feature**: Check for "id" structural feature on the element's EClass
+4. **Generated UUID**: Generate and cache a new UUID (lowest priority)
+
+#### Scenario: ID resolution follows defined order
+
+**Given** an element with ID sources at multiple levels
+**When** `ctx.getElementId(element)` is called
+**Then** the method SHALL return the ID from the highest-priority available source
+**And** the order of priority SHALL be: pending > resource > feature > generated
+
+### Requirement: Thread-Safe ID Resolution
+
+The `getElementId(EObject)` method SHALL be thread-safe for concurrent access. Multiple threads calling `getElementId()` for the same element SHALL always receive the same result.
+
+#### Scenario: Concurrent getElementId calls return consistent ID
+
+**Given** multiple threads calling `ctx.getElementId(element)` concurrently
+**And** the element has no existing ID
+**When** all threads complete
+**Then** all threads SHALL have received the same generated UUID
+**And** no race conditions SHALL cause duplicate or inconsistent IDs
+
+### Requirement: Discriminator Construction with Target Element IDs
+
+Transformation code SHALL be able to use `ctx.getElementId(targetElement)` to build discriminators that include target element IDs, even when those IDs are deferred (not yet committed to XMI resource).
+
+#### Scenario: Building discriminator with deferred target element ID
+
+**Given** a target element created during transformation
+**And** the element's ID is stored in `pendingXmiIds` (deferred)
+**When** transformation code calls `ctx.getElementId(targetElement)`
+**Then** the pending ID SHALL be returned (not null)
+**And** the ID can be used to build a discriminator string
+**And** `ctx.equivalentDiscriminated(source, type, rule, discriminator)` SHALL work correctly
+
+#### Scenario: Standard XMIResource.getID fails for deferred elements
+
+**Given** a target element with a deferred ID in `pendingXmiIds`
+**When** `XMIResource.getID(element)` is called directly
+**Then** the result SHALL be null
+**Because** deferred IDs are not yet committed to the XMI resource
+**Therefore** transformation code MUST use `ctx.getElementId()` instead
 
