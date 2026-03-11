@@ -491,6 +491,16 @@ public class TransformationContext {
     private final ThreadLocal<TransformRuleDescriptor> currentExecutingRule = new ThreadLocal<>();
 
     /**
+     * Name of the greedy rule currently being iterated in the rule-by-rule greedy pass.
+     * Set by TransformationExecutor during the greedy pass inner loop.
+     * Used by equivalent() to detect same-rule lookups during the greedy pass:
+     * if the requested rule name matches the current greedy rule, and the element
+     * is not yet cached or rejected, return null (ETL semantics: equivalent() for
+     * non-lazy greedy rules only returns previously-cached results).
+     */
+    private volatile String currentGreedyPassRuleName;
+
+    /**
      * Thread-local flag indicating whether the current thread is executing a lazy rule
      * via equivalentDiscriminated(). When true, addToResource() should skip adding
      * the original element to the resource because only the discriminated clone
@@ -1511,6 +1521,11 @@ public class TransformationContext {
                         activate(rule.getName(), source);
                     }
 
+                    // ETL semantics: check rejection cache before re-evaluating guard
+                    if (resolutionCache.isRejected(source, rule.getName())) {
+                        continue;
+                    }
+
                     // Evaluate guard
                     long guardStartNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
                     boolean guardResult = rule.evaluateGuard(source, this);
@@ -1915,6 +1930,17 @@ public class TransformationContext {
                 TransformationMetrics.recordEquivalentCacheHit();
                 return (T) cached;
             }
+
+            // ETL semantics: check rejection cache before re-evaluating guard.
+            // When a greedy rule's guard fails during the greedy pass, ETL permanently
+            // marks the (source, rule) pair as "rejected" and never re-evaluates the guard.
+            // Without this check, Zeta would re-evaluate the guard which may now pass
+            // (due to different timing/state), producing output where ETL returns null.
+            if (resolutionCache.isRejected(source, ruleName)) {
+                TransformationMetrics.recordEquivalentCacheMiss();
+                return null;
+            }
+
             TransformationMetrics.recordEquivalentCacheMiss();
 
             // Find the specific rule
@@ -2047,6 +2073,45 @@ public class TransformationContext {
     }
 
     /**
+     * Cache-only equivalent lookup — returns cached results WITHOUT triggering rule execution.
+     *
+     * <p>This matches ETL semantics for non-lazy greedy rules: in ETL, {@code equivalent("RuleName")}
+     * only returns results from the greedy pass that have already been cached. It never lazily
+     * triggers execution of a non-lazy greedy rule. Use this method when looking up results of
+     * a non-lazy greedy rule from within a context where lazy triggering would diverge from ETL.</p>
+     *
+     * @param source the source element
+     * @param ruleName the rule name to look up
+     * @param <T> the target type
+     * @return the cached target, or null if not yet processed
+     */
+    @SuppressWarnings("unchecked")
+    public <T extends EObject> T equivalentCached(EObject source, String ruleName) {
+        if (source == null || ruleName == null) {
+            return null;
+        }
+        // Check object-identity cache first
+        T cached = resolutionCache.getByRule(source, ruleName);
+        if (cached != null) {
+            return cached;
+        }
+        // Also check XMI ID-based lookup (different source objects may map to the same structured ID)
+        if (useStructuredIds && transformationRegistry != null) {
+            TransformRuleDescriptor rule = transformationRegistry.getRuleByName(ruleName);
+            if (rule != null && rule.appliesTo(source)) {
+                String structuredId = generateStructuredId(source, ruleName);
+                T existingByXmiId = findByXmiId(structuredId, (Class<T>) rule.getTargetType());
+                if (existingByXmiId != null) {
+                    // Cache for future lookups
+                    resolutionCache.addMapping(source, ruleName, existingByXmiId, rule.isPrimary());
+                    return existingByXmiId;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
      * Get a discriminated equivalent (for multiple transformations of the same source).
      *
      * <p>When ruleName is provided, this method finds and executes that SPECIFIC @Lazy rule
@@ -2158,8 +2223,10 @@ public class TransformationContext {
                         activate(rule.getName(), source);
                     }
                 }
-                // ETL semantics: guards ARE evaluated at invocation time for @lazy rules
-                if (rule != null && rule.appliesTo(source) && rule.evaluateGuard(source, this)) {
+                // ETL semantics: check rejection cache before re-evaluating guard
+                if (rule != null && rule.appliesTo(source)
+                        && !resolutionCache.isRejected(source, ruleName)
+                        && rule.evaluateGuard(source, this)) {
                     // When a named rule is explicitly given, use that rule name for the lock key
                     // (No @Primary normalization - the caller explicitly requested this specific rule)
 
@@ -2871,6 +2938,33 @@ public class TransformationContext {
      */
     void clearCurrentExecutingRule() {
         currentExecutingRule.remove();
+    }
+
+    /**
+     * Set the name of the greedy rule currently being iterated in the rule-by-rule greedy pass.
+     */
+    void setCurrentGreedyPassRuleName(String ruleName) {
+        this.currentGreedyPassRuleName = ruleName;
+    }
+
+    /**
+     * Get the name of the greedy rule currently being iterated.
+     * Returns null if no greedy pass is in progress.
+     *
+     * <p>This is useful for ETL-compatible transformations to detect when
+     * {@code equivalent()} is being called for the same rule that is currently
+     * executing its greedy pass. In ETL, such calls only return cached results
+     * and never trigger lazy execution.</p>
+     */
+    public String getCurrentGreedyPassRuleName() {
+        return currentGreedyPassRuleName;
+    }
+
+    /**
+     * Clear the current greedy pass rule name.
+     */
+    void clearCurrentGreedyPassRuleName() {
+        this.currentGreedyPassRuleName = null;
     }
 
     /**

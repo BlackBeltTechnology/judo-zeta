@@ -963,23 +963,30 @@ public class TransformationExecutor {
             // Skip activity-based rules - they execute in Phase 2
             if (isEffectivelyActivityBased(rule)) continue;
 
-            for (EObject source : sourceElements) {
-                if (firstError.get() != null) {
-                    return;
+            // Track the current greedy pass rule so that equivalent() can detect
+            // same-rule lookups (ETL semantics: don't lazily execute non-lazy greedy rules)
+            context.setCurrentGreedyPassRuleName(rule.getName());
+            try {
+                for (EObject source : sourceElements) {
+                    if (firstError.get() != null) {
+                        return;
+                    }
+
+                    // Type match check
+                    if (!rule.appliesTo(source)) continue;
+
+                    // Check resource alias
+                    if (!isFromExpectedAlias(source, rule)) continue;
+
+                    try {
+                        context.setCurrentSource(source);
+                        executeRuleForSource(rule, source);
+                    } finally {
+                        context.clearCurrentSource();
+                    }
                 }
-
-                // Type match check
-                if (!rule.appliesTo(source)) continue;
-
-                // Check resource alias
-                if (!isFromExpectedAlias(source, rule)) continue;
-
-                try {
-                    context.setCurrentSource(source);
-                    executeRuleForSource(rule, source);
-                } finally {
-                    context.clearCurrentSource();
-                }
+            } finally {
+                context.clearCurrentGreedyPassRuleName();
             }
         }
 

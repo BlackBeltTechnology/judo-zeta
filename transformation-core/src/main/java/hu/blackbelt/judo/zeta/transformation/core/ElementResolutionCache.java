@@ -246,7 +246,7 @@ public class ElementResolutionCache {
      * @param ruleName the rule name
      * @return true if previously rejected
      */
-    private boolean isRejected(EObject source, String ruleName) {
+    boolean isRejected(EObject source, String ruleName) {
         if (sequentialMode) {
             Set<String> rejected = rejectedKeysSequential.get(source);
             return rejected != null && rejected.contains(ruleName);
