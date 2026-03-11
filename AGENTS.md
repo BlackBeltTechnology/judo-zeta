@@ -1,3 +1,4 @@
+
 # Judo Zeta Validation Framework Documentation
 
 ## Project Overview
@@ -19,6 +20,20 @@ This is a **lightweight, standalone validation framework for EMF metamodels**. I
 - Extension methods for custom helper functions
 - Pre/post-validation hooks
 - Both OSGi and standalone deployment
+
+## Coding principles
+
+1. First think through the problem, read the codebase for relevant files.
+2. Before you make any major changes, check in with me and I will verify the plan.
+3. Please every step of the way just give me a high level explanation of what changes you made
+4. Make every task and code change you do as simple as possible. We want to avoid making any massive or complex changes. Every change should impact as little code as possible. Everything is about simplicity.
+5. Maintain a documentation file that describes how the architecture of the app works inside and out.
+6. Never speculate about code you have not opened. If the user references a specific file, you MUST read the file before answering. Make sure to investigate and read relevant files BEFORE answering questions about the codebase. Never make any claims about code before investigating unless you are certain of the correct answer - give grounded and hallucination-free answers.
+7. Use clear and concise variable names
+8. Follow the Java naming conventions
+9. Write modular and reusable code, smaller is better. Avoid to cerate large file, except for the given type of 
+definition it is the best practice.
+10. Use Javadoc comments for public methods and classes
 
 ## Project Structure
 
@@ -212,6 +227,409 @@ ValidationExecutor executor = ValidationExecutor.builder()
 
 List<ValidationResult> results = executor.validate(modelElements);
 ```
+
+## Transformation Framework
+
+### Transformation Core Architecture
+
+The `transformation-core` module provides annotation-based model-to-model transformations:
+
+```
+transformation-core/src/main/java/hu/blackbelt/judo/zeta/transformation/core/
+├── TransformationExecutor.java        # Parallel execution engine with staging and execution strategy
+├── TransformationContext.java         # Execution context with staging infrastructure
+├── TransformationRegistry.java        # Rule registration and discovery
+├── TransformationResult.java          # Result wrapper
+├── TransformationTrace.java           # Source-to-target mapping export
+├── TransformationException.java       # Fail-fast error handling
+├── TransformRuleDescriptor.java       # Rule metadata
+├── ElementResolutionCache.java        # Thread-safe source→target cache
+├── RuleInheritanceGraph.java          # Rule dependency resolution
+├── ExecutionStrategy.java             # ELEMENT_BY_ELEMENT vs RULE_BY_RULE enum
+└── deferred/                          # Deferred EMF writes infrastructure
+    ├── EMFOperation.java              # Sealed interface with 10 operation record types
+    ├── OperationQueue.java            # Thread-safe queue with sequence ordering
+    ├── DeferredEObject.java           # Dynamic proxy for operation interception
+    └── DeferredEList.java             # EList wrapper for deferred list operations
+```
+
+### Parallel Transformation Execution
+
+The transformation framework uses a **two-phase staging approach** for thread-safe parallel execution:
+
+**Phase 1 (Parallel):**
+- Elements are created in parallel threads
+- Created elements are staged in `ConcurrentLinkedQueue`
+- Element ordering tracked via `AtomicLong` sequence numbers
+- XMI IDs stored in `ConcurrentHashMap` for deferred assignment
+
+**Phase 2 (Sequential):**
+- Staged elements sorted by creation sequence
+- Elements committed to target Resource (single-threaded)
+- XMI IDs applied after elements added to Resource
+
+**Post-Transformation XMI ID Application:**
+- Elements added through containment references (not via `addToResource()`) may have pending XMI IDs
+- Call `applyAllPendingXmiIds()` after transformation completes to ensure all elements have their XMI IDs properly set
+- This method iterates through the target resource and applies any pending IDs that weren't applied during the commit phase
+
+```java
+// Configure parallel transformation
+TransformationExecutor executor = TransformationExecutor.builder()
+    .registry(registry)
+    .context(context)
+    .parallel(true)                    // Enable parallel (default: true)
+    .parallelThreshold(1000)           // Min elements for parallel (default: 1000)
+    .chunkSize(100)                    // Elements per work unit (default: 100)
+    .executionStrategy(ExecutionStrategy.ELEMENT_BY_ELEMENT) // default
+    .build();
+
+// Execute - executor is reusable
+TransformationResult result = executor.transform(sourceElements);
+```
+
+### Execution Strategy (ELEMENT_BY_ELEMENT vs RULE_BY_RULE)
+
+The executor supports two execution strategies for eager rule processing, configured via `executionStrategy()`:
+
+| Strategy | Outer Loop | Inner Loop | Cross-Element Visibility |
+|----------|-----------|------------|--------------------------|
+| `ELEMENT_BY_ELEMENT` (default) | Source elements | Matching rules per element | Only current element's outputs via cache |
+| `RULE_BY_RULE` (ETL-compatible) | Rules in registration order | All matching source elements | ALL outputs from earlier rules |
+
+**RULE_BY_RULE** matches ETL's module import ordering: each rule processes ALL matching source elements before the next rule begins. Registration order in `TransformationRegistry` mirrors ETL's `.etl` import chain.
+
+```java
+// ETL-compatible rule-by-rule execution
+TransformationExecutor executor = TransformationExecutor.builder()
+    .registry(registry)
+    .context(context)
+    .executionStrategy(ExecutionStrategy.RULE_BY_RULE)
+    .parallel(false)    // Sequential rule-by-rule
+    .build();
+executor.transform();
+```
+
+**Parallel Rule-By-Rule:**
+- Outer rule loop remains sequential (rule ordering preserved)
+- Inner source-element loop parallelized via chunking
+- Per-rule barrier: `commitDeferredOperationsIncremental()` called between rules
+- Ensures Rule B sees ALL materialized outputs from Rule A
+
+```java
+// Parallel rule-by-rule with per-rule barriers
+TransformationExecutor executor = TransformationExecutor.builder()
+    .registry(registry)
+    .context(context)
+    .executionStrategy(ExecutionStrategy.RULE_BY_RULE)
+    .parallel(true)
+    .parallelThreshold(1)
+    .build();
+executor.transform();
+```
+
+**Key Methods:**
+- `TransformationRegistry.getOrderedEagerRules()` — returns all eager rules in registration order (filters out lazy, abstract, multi-source, activity-based). Result is cached.
+- `TransformationContext.commitDeferredOperationsIncremental()` — commits pending deferred operations between rules without disabling deferred writes (inter-rule barrier)
+- `TransformationExecutor.executeRuleForSource()` — shared logic for guard evaluation, cache getOrCreate, error handling (used by both strategies)
+
+**Incompatible Configuration:**
+`CLONE_CURRENT_STATE + RULE_BY_RULE + parallel(true)` throws `IllegalStateException`. CLONE_CURRENT_STATE requires deterministic element processing order within each rule, which parallel chunking does not guarantee. Use `parallel(false)` with this combination.
+
+### Package Resolution
+
+**Generated Metamodels** - No registration needed, EPackage is auto-discovered:
+```java
+Table table = ctx.createTarget(Table.class);  // Auto-discovers SchemaPackage
+Column col = ctx.create(Column.class);        // Auto-discovers SchemaPackage
+```
+
+**Dynamic EMF** - Register packages explicitly:
+```java
+ctx.registerTargetPackage(dynamicPackage);
+EObject obj = ctx.createTarget(dynamicType, dynamicPackage);
+```
+
+### Thread-Safety in Transformation Rules
+
+**Safe Operations:**
+- `ctx.createTarget()` - Creates staged elements
+- `ctx.createTarget(Class, EPackage)` - Creates in specific package
+- `ctx.createTarget(Class, String customId)` - Creates with custom ID (race-condition safe)
+- `ctx.equivalent()` - Thread-safe lazy rule execution with per-element locking
+- `ctx.equivalentDiscriminated()` - Thread-safe discriminated equivalence
+- Setting properties on elements you created
+- Reading from source elements
+
+**Unsafe Operations (avoid):**
+- Modifying source elements
+- Modifying target elements created by other rules
+- Shared mutable state between rules
+
+### Rule Invocation Stack (Context-Aware Resolution)
+
+The framework maintains a thread-local stack of rule invocations, enabling context-aware discriminator resolution. This is particularly useful for achieving ETL compatibility where different calling contexts require different discriminators.
+
+**Key Classes:**
+- `RuleInvocation` - Record capturing rule name, source, and discriminator
+- `DiscriminatorResolver` - Functional interface for context-aware resolution
+- `DiscriminatorResolver.Resolution` - Result containing discriminator and cache mode
+
+**Stack Management:**
+```java
+// Push rule invocation (done automatically by TransformRuleDescriptor.execute())
+ctx.pushRuleInvocation("RuleName", source, discriminator);
+
+// Access the call chain
+List<RuleInvocation> chain = ctx.getRuleInvocationChain();
+
+// Check if in specific rule context
+boolean inButton = ctx.isInRuleContext("ButtonGroupRule");
+
+// Find specific rule in chain
+RuleInvocation buttonInv = ctx.findRuleInChain("ButtonGroupRule");
+
+// Pop when rule completes (automatic in finally block)
+ctx.popRuleInvocation();
+```
+
+**Context-Aware Discriminator Resolution:**
+```java
+ctx.setDiscriminatorResolver(new DiscriminatorResolver() {
+    @Override
+    public Resolution resolve(EObject source, String ruleName, List<RuleInvocation> callChain) {
+        if (ruleName.equals("ActionDefinitionRule")) {
+            // Check if called from ButtonGroup context
+            for (RuleInvocation inv : callChain) {
+                if (inv.ruleName().equals("ButtonGroupRule")) {
+                    // Use discriminator-only cache for ETL-compatible sharing
+                    return Resolution.discriminatorOnlyCache(
+                        "buttonContext/" + getId(inv.source()));
+                }
+            }
+            // Default: source-based cache
+            return Resolution.sourceBasedCache("defaultContext");
+        }
+        return null; // Use explicit discriminator
+    }
+
+    @Override
+    @Deprecated
+    public String resolveDiscriminator(EObject source, String ruleName, List<RuleInvocation> callChain) {
+        return null; // Not used when resolve() is overridden
+    }
+});
+```
+
+### Discriminator-Only Cache (ETL-Compatible Caching)
+
+The framework supports two caching modes for `equivalentDiscriminated()`:
+
+| Mode | Cache Key | Use Case |
+|------|-----------|----------|
+| **SOURCE_BASED** (default) | `(source, ruleName, discriminator)` | Different sources create separate targets |
+| **DISCRIMINATOR_ONLY** | `(ruleName, discriminator)` | Different sources share target if same discriminator |
+
+**When to use DISCRIMINATOR_ONLY:**
+- Matching ETL's string-based caching semantics
+- When ActionDefinitions should be shared between Button and Action contexts
+- When the discriminator alone should determine identity
+
+**Resolution factory methods:**
+```java
+// Source-based caching (default ZETA behavior)
+Resolution.sourceBasedCache("my-discriminator");
+
+// Discriminator-only caching (ETL-compatible)
+Resolution.discriminatorOnlyCache("shared-discriminator");
+```
+
+**Example: Sharing ActionDefinitions across contexts:**
+```java
+ctx.setDiscriminatorResolver(new DiscriminatorResolver() {
+    @Override
+    public Resolution resolve(EObject source, String ruleName, List<RuleInvocation> callChain) {
+        if ("OperationFormCallActionDefinition".equals(ruleName)) {
+            // Both Button and Action contexts use same discriminator
+            // for the same TransferObjectForm
+            TransferObjectForm form = findFormInContext(callChain);
+            if (form != null) {
+                String disc = actorType.getName() + "/(esm/" + getId(form) + ")/Form";
+                // DISCRIMINATOR_ONLY enables sharing across different source objects
+                return Resolution.discriminatorOnlyCache(disc);
+            }
+        }
+        return null;
+    }
+    // ...
+});
+```
+
+**Orphan Element Prevention:**
+
+The DISCRIMINATOR_ONLY cache mode prevents orphan elements by using the original element directly instead of cloning:
+
+| Mode | Behavior | Orphans |
+|------|----------|---------|
+| **SOURCE_BASED** | Create original → clone → add clone to Resource | Original may become orphan |
+| **DISCRIMINATOR_ONLY** | Create original → update ID → add to Resource | No orphans (single element) |
+
+This matches ETL semantics where there's only ONE element per discriminator key, not an "original" + "clone" pair.
+
+**How it works internally:**
+1. Rule executes and creates target element via `createTarget()`
+2. Target is added to Resource via `addToResource()` (not skipped)
+3. Target's ID is updated to the discriminated ID
+4. Target is cached in discriminator-only cache
+5. Future calls with same discriminator return the cached target
+
+**Key difference from source-based cache:**
+- Source-based: `inDiscriminatedExecution=true` prevents `addToResource()`, then clones
+- Discriminator-only: `inDiscriminatedExecution=false` allows `addToResource()`, no cloning
+
+### Element ID Race Condition Prevention
+
+**Problem:** When a rule creates a target and later sets a custom ID, other rules that read the ID in between see the wrong (initial) ID.
+
+**Solution:** Use `createTarget(Class, String customId)` to set custom IDs at creation time:
+
+```java
+// WRONG - Race condition! Other rules may see initial ID
+EPackage target = ctx.createTarget(EPackage.class);
+ctx.equivalent(source, OtherRule.class);  // OtherRule reads initial ID
+ctx.setElementId(target, customId);       // THROWS IllegalStateException!
+
+// CORRECT - No race condition
+String customId = "myprefix/" + source.getName();
+EPackage target = ctx.createTarget(EPackage.class, customId);
+ctx.equivalent(source, OtherRule.class);  // OtherRule sees correct ID
+```
+
+**Rules:**
+- `setElementId()` throws `IllegalStateException` if another rule has read the ID
+- Use `createTarget(type, customId)` when you need a custom ID
+- Or call `setElementId()` BEFORE calling any `equivalent()` methods
+
+**Clone Tracking (January 2026 Update):**
+
+External read tracking also applies to **clones** from `equivalentDiscriminated()`:
+
+```java
+// WRONG - Clone's ID was read, then changed
+Action action = ctx.equivalentDiscriminated(source, Action.class, "CreateAction", disc);
+String id = ctx.getElementId(action);  // External read - marks clone
+ctx.setElementId(action, customId);    // THROWS IllegalStateException!
+
+// CORRECT - Accept the framework-generated discriminated ID
+Action action = ctx.equivalentDiscriminated(source, Action.class, "CreateAction", disc);
+// Use action as-is, ID format: (source/<id>)/CreateAction/(discriminator/<disc>)
+
+// OR - Have the lazy rule set custom ID
+@TransformRule(name = "CreateAction") @Lazy
+public TransformFunction<Source, Action> createAction() {
+    return (source, ctx) -> {
+        String customId = buildCustomId(source);
+        return ctx.createTarget(Action.class, customId);  // ID set at creation
+    };
+}
+```
+
+**Important:** `equivalentDiscriminated()` with a lazy rule **never returns null** - it executes the rule.
+
+> **Migration Guide**: See `MIGRATION-ID-RACE-CONDITION-FIX.md` for detailed migration patterns
+
+### Thread-Safety Implementation Details
+
+**Approach 1: Per-Element Locking (Default)**
+- Cache key is `(source, ruleName)` for proper cross-rule isolation
+- Double-check locking pattern in `equivalent()` calls
+- Synchronized XMI ID operations on Resource object
+
+**Approach 2: Deferred EMF Writes (Auto-enabled for parallel)**
+
+When `parallel=true`, deferred writes are automatically enabled to prevent EMF EList corruption.
+
+| Issue | Impact | Details |
+|-------|--------|---------|
+| Read-after-write | `size()`, `contains()` return stale data | See `agent-docs/EXECUTION.md` |
+| eContainer() null | Containment navigation fails | See `agent-docs/EXECUTION.md` |
+| Cross-rule visibility | Rules can't see other rules' additions | See `agent-docs/EXECUTION.md` |
+| Opt-out | `ctx.disableDeferredWrites()` | See `agent-docs/EXECUTION.md` |
+
+> **Full documentation**: `agent-docs/EXECUTION.md` → "Deferred Writes Compatibility Issues"
+
+**Guard Rejection Caching:**
+- Guard rejections cached per `(source, ruleName)` pair
+- Avoids redundant guard evaluation in complex transformation graphs
+
+### Fail-Fast Error Handling
+
+```java
+try {
+    TransformationResult result = executor.transform(sourceElements);
+} catch (TransformationException e) {
+    EObject failedElement = e.getFailedElement();
+    String ruleName = e.getRuleName();
+    Throwable cause = e.getCause();
+    // Handle error with full context
+}
+```
+
+### Diagnostic Logging
+
+The framework provides built-in diagnostics for debugging transformation issues:
+
+**XMI ID Collision Detection (ERROR level):**
+```
+ERROR XMI ID COLLISION DETECTED: ID 'xxx' is being reassigned from Type1 (obj@abc) to Type2 (obj@def)
+```
+Logged when two different elements are assigned the same XMI ID.
+
+**Context Pollution Warning (DEBUG level):**
+```
+DEBUG CONTEXT WARNING: createTarget(Action) called but currentExecutingRule is 'RelationFeatureView'
+```
+Logged when `createTarget()` type doesn't match the current rule's expected target type.
+
+**Stale Index Entry Fix:**
+When `setElementId()` is called to change an element's ID, the old ID is automatically removed from `pendingXmiIdIndex` to prevent incorrect `findByXmiId()` lookups.
+
+Enable diagnostics in `logback.xml`:
+```xml
+<logger name="hu.blackbelt.judo.zeta.transformation.core.TransformationContext" level="DEBUG"/>
+```
+
+### Key Classes
+
+| Class | Purpose |
+|-------|---------|
+| `TransformationExecutor` | Parallel execution engine with Builder pattern |
+| `TransformationContext` | Execution context with staging infrastructure |
+| `TransformationException` | RuntimeException with element/rule context |
+| `ElementResolutionCache` | Thread-safe ConcurrentHashMap-based cache |
+| `TransformationTrace` | JSON-exportable source→target mapping |
+| `ExecutionStrategy` | Enum: `ELEMENT_BY_ELEMENT` (default) vs `RULE_BY_RULE` (ETL-compatible) |
+
+### Transformation Annotations
+
+| Annotation | Description |
+|------------|-------------|
+| `@TransformationContext` | Marks a class as containing transformation rules |
+| `@TransformRule` | Defines a transformation rule method |
+| `@Lazy` | Rule executes on-demand via `equivalent()` calls |
+| `@Abstract` | Rule only executes via parent rule inheritance |
+| `@Primary` | Rule's result takes precedence in `equivalent()` |
+| `@Greedy` | Matches source type AND all subtypes |
+| `@ActivityBased` | Only processes elements activated via `equivalent()` (use with @Greedy @Lazy) |
+| `@Extends` | Inherits from parent rules (automatic execution) |
+| `@Guard` | Conditional execution based on guard method |
+| `@Detached` | Output NOT added to Resource.contents (caller adds to container) |
+| `@Transform` | Specifies source type and resource alias |
+| `@To` | Specifies target type and resource alias |
+| `@PreExecution` | Method runs before transformation starts |
+| `@PostExecution` | Method runs after transformation completes |
+
+> **@Greedy vs @Lazy Semantics**: `@Greedy` controls **type matching only** (kind-of vs type-of) - it matches subtypes, not just exact types. `@Lazy` controls **execution timing** (on-demand vs eager phase). These are orthogonal - a rule can be both `@Greedy` AND `@Lazy`. **Key difference from Epsilon ETL**: Zeta's eager phase processes ALL matching instances regardless of reachability, while Epsilon ETL may skip elements that are never referenced via `equivalent()`. To match ETL behavior, use `@ActivityBased` annotation with `@Greedy @Lazy` rules, or enable `etlCompatibilityMode(true)` on the executor.
 
 ### Dependency Resolution
 
