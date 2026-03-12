@@ -1,1206 +1,131 @@
-
-# Judo Zeta Validation Framework Documentation
+# Judo Zeta Framework
 
 ## Project Overview
 
-**Repository:** BlackBeltTechnology/judo-zeta  
-**License:** Eclipse Public License 2.0 (EPL-2.0)  
-**Java Version:** 21  
-**Build System:** Maven 3.9.4+ with Maven Wrapper  
-**Current Version:** 1.0.0-SNAPSHOT  
-**Main Branch:** develop
+**Repo:** BlackBeltTechnology/judo-zeta | **License:** EPL-2.0 | **Java:** 21 | **Build:** Maven 3.9.4+ (wrapper: `./mvnw`)
 
-This is a **lightweight, standalone validation framework for EMF metamodels**. It provides a modern, annotation-based alternative to Epsilon Validation Language (EVL) with parallel execution, dependency resolution, and comprehensive caching support.
+Lightweight, standalone **validation + transformation framework for EMF metamodels**. Annotation-based alternative to Epsilon EVL/ETL with parallel execution, dependency resolution, and caching.
 
-**Key Features:**
-- Annotation-driven validation rules (no EVL required)
-- Parallel validation with intelligent chunking
-- Rule dependency resolution via `@Satisfies`
-- Caching support for expensive computations
-- Extension methods for custom helper functions
-- Pre/post-validation hooks
-- Both OSGi and standalone deployment
+## Coding Principles
 
-## Coding principles
-
-1. First think through the problem, read the codebase for relevant files.
-2. Before you make any major changes, check in with me and I will verify the plan.
-3. Please every step of the way just give me a high level explanation of what changes you made
-4. Make every task and code change you do as simple as possible. We want to avoid making any massive or complex changes. Every change should impact as little code as possible. Everything is about simplicity.
-5. Maintain a documentation file that describes how the architecture of the app works inside and out.
-6. Never speculate about code you have not opened. If the user references a specific file, you MUST read the file before answering. Make sure to investigate and read relevant files BEFORE answering questions about the codebase. Never make any claims about code before investigating unless you are certain of the correct answer - give grounded and hallucination-free answers.
-7. Use clear and concise variable names
-8. Follow the Java naming conventions
-9. Write modular and reusable code, smaller is better. Avoid to cerate large file, except for the given type of 
-definition it is the best practice.
-10. Use Javadoc comments for public methods and classes
+1. Read the codebase before making changes. Never speculate about code you haven't opened.
+2. Check in before major changes — verify the plan first.
+3. Give high-level explanations of what you changed at each step.
+4. Keep changes simple and minimal. Every change should impact as little code as possible.
+5. Maintain architecture documentation.
+6. Use clear variable names, Java naming conventions, Javadoc on public APIs.
+7. Write modular, reusable code — smaller is better.
 
 ## Project Structure
-
-This project consists of **3 modules**:
 
 ```
 judo-zeta/
 ├── validation-core/          # Core validation framework (OSGi bundle)
-├── p2/                        # Eclipse P2 update site packaging
+├── transformation-core/      # Core transformation framework
+├── p2/                       # Eclipse P2 update site packaging
 ├── osgi-itest/               # Pax Exam integration tests
-├── .github/                  # GitHub Actions CI/CD workflows
-├── .mvn/                     # Maven wrapper and configuration
-└── openspec/                 # OpenSpec change management
+├── agent-docs/               # Detailed docs for coding agents (READ THESE)
+├── .github/                  # CI/CD workflows
+└── .mvn/                     # Maven wrapper config
 ```
 
 ## Core Modules
 
-| Module | Type | Artifact ID | Purpose |
-|--------|------|-------------|---------|
-| **validation-core** | OSGi bundle | `hu.blackbelt.judo.zeta.validation-core` | Reusable Java validation framework for EMF metamodels |
-| **p2** | P2 repository | `hu.blackbelt.judo.zeta.p2` | Eclipse P2 update site packaging |
-| **osgi-itest** | Integration test | `hu.blackbelt.judo.zeta.osgi.itest` | Pax Exam OSGi/Karaf integration tests |
+| Module | Artifact ID | Purpose |
+|--------|-------------|---------|
+| **validation-core** | `hu.blackbelt.judo.zeta.validation-core` | Annotation-based EMF validation engine |
+| **transformation-core** | `hu.blackbelt.judo.zeta.transformation-core` | Annotation-based EMF model-to-model transformation |
+| **p2** | `hu.blackbelt.judo.zeta.p2` | Eclipse P2 update site |
+| **osgi-itest** | `hu.blackbelt.judo.zeta.osgi.itest` | Pax Exam OSGi/Karaf integration tests |
 
-## Validation Core Architecture
+## Detailed Documentation (agent-docs/)
 
-### Package Structure
+**Start with `agent-docs/INDEX.md`** — it has a decision tree for which file to read.
 
-```
-validation-core/src/main/java/hu/blackbelt/judo/meta/validation/
-├── ModelProvider.java                    # Metamodel integration interface
-├── annotation/                           # Validation annotations
-│   ├── Constraint.java                  # Error-level validation rule
-│   ├── Critique.java                    # Warning-level validation rule
-│   ├── Guard.java                       # Conditional execution guard
-│   ├── Satisfies.java                   # Rule dependency declaration
-│   ├── Cached.java                      # Result caching annotation
-│   ├── ExtensionMethod.java             # Helper method annotation
-│   ├── PreValidation.java               # Pre-validation hook
-│   ├── PostValidation.java              # Post-validation hook
-│   └── ValidationContext.java           # Element type context
-├── core/                                 # Core validation engine
-│   ├── ValidationRegistry.java          # Rule registration and discovery
-│   ├── ValidationExecutor.java          # Parallel execution engine
-│   ├── ValidationContext.java           # Execution context
-│   ├── ValidationResult.java            # Result wrapper
-│   ├── ValidationRule.java              # Functional interface for rules
-│   ├── ValidationRuleBuilder.java       # Fluent builder API
-│   ├── ValidatorDescriptor.java         # Rule metadata
-│   ├── ExtensionMethodRegistry.java     # Extension method management
-│   ├── ExtensionMethodDescriptor.java   # Extension method metadata
-│   ├── CacheKey.java                    # Cache key implementation
-│   ├── CacheKeyBuilder.java             # Cache key builder
-│   ├── Guard.java                       # Guard function interface
-│   └── Severity.java                    # ERROR/WARNING severity enum
-└── util/
-    └── EolStyleCollections.java         # Epsilon-like collection utilities
-```
+| File | When to Read |
+|------|--------------|
+| `agent-docs/QUICK-REF.md` | **Always start here** — covers 90% of transformation tasks |
+| `agent-docs/ANNOTATIONS.md` | Need annotation details for transformation rules |
+| `agent-docs/CONTEXT-API.md` | Working with `TransformationContext` methods |
+| `agent-docs/EXECUTION.md` | Execution flow, parallel mode, staging, deferred writes |
+| `agent-docs/PATTERNS.md` | Complex patterns: inheritance, multi-source, lazy, thread-safety |
+| `agent-docs/MIGRATION.md` | Migrating ETL → Zeta transformations |
+| `agent-docs/MIGRATION-EVL.md` | Migrating EVL → Zeta validations |
+| `agent-docs/TROUBLESHOOTING.md` | Debugging transformation/validation issues |
 
-### Annotation System
+## Validation Framework Summary
 
-The validation framework provides 8 core annotations:
+**Annotations:** `@ValidationContext`, `@Constraint` (error), `@Critique` (warning), `@Guard`, `@Satisfies` (dependencies), `@Cached`, `@ExtensionMethod`, `@PreValidation`/`@PostValidation`
 
-#### 1. `@ValidationContext`
-Marks a class as containing validation rules for a specific EMF element type.
+**Engine:** `ValidationExecutor` auto-parallelizes when elements ≥ 5000 (configurable), chunk size 100, ForkJoinPool with work-stealing.
 
-```java
-@ValidationContext(EntityType.class)
-public class EntityTypeValidations {
-    // Validation rules for EntityType elements
-}
-```
+**Key classes:** `ValidationRegistry`, `ValidationExecutor`, `ValidationContext`, `ValidationResult`, `ValidationRule` (functional interface)
 
-#### 2. `@Constraint`
-Defines an error-level validation rule.
+→ See `agent-docs/MIGRATION-EVL.md` for validation patterns and examples.
 
-```java
-@Constraint(name = "EntityMustHaveName", message = "Entity {element.name} must have a name")
-public ValidationRule entityMustHaveName() {
-    return (element, ctx) -> {
-        EntityType entity = (EntityType) element;
-        return entity.getName() != null && !entity.getName().isEmpty() 
-            ? ValidationResult.pass() 
-            : ValidationResult.fail("Entity must have a name");
-    };
-}
-```
+## Transformation Framework Summary
 
-#### 3. `@Critique`
-Defines a warning-level validation rule.
+**Annotations:** `@TransformationContext`, `@TransformRule`, `@Transform`/`@To`, `@Lazy`, `@Abstract`, `@Primary`, `@Greedy`, `@ActivityBased`, `@Extends`, `@Guard`, `@Detached`, `@PreExecution`/`@PostExecution`
 
-```java
-@Critique(name = "EntityShouldHaveDescription", 
-          message = "Entity {element.name} should have a description")
-public ValidationRule entityShouldHaveDescription() {
-    return (element, ctx) -> {
-        EntityType entity = (EntityType) element;
-        return entity.getDescription() != null 
-            ? ValidationResult.pass() 
-            : ValidationResult.warn("Consider adding a description");
-    };
-}
-```
+**Execution strategies:** `ELEMENT_BY_ELEMENT` (default) vs `RULE_BY_RULE` (ETL-compatible)
 
-#### 4. `@Guard`
-Conditionally enables a validation rule based on a guard method.
+**Key classes:** `TransformationExecutor`, `TransformationContext`, `TransformationRegistry`, `ElementResolutionCache`, `TransformationTrace`, `ExecutionStrategy`
 
-```java
-@Guard(method = "isNotAbstract")
-@Constraint(name = "EntityMustHaveTable", message = "Concrete entity must have table")
-public ValidationRule entityMustHaveTable() {
-    return (element, ctx) -> { /* ... */ };
-}
+**Thread-safety:** Two-phase staging (parallel create → sequential commit). Safe: `ctx.createTarget()`, `ctx.equivalent()`, reading source. Unsafe: modifying source, modifying other rules' targets, shared mutable state.
 
-private boolean isNotAbstract(EObject element) {
-    return !((EntityType) element).isAbstract();
-}
-```
-
-#### 5. `@Satisfies`
-Declares dependencies on other validation rules. The annotated rule only runs after its dependencies pass.
-
-```java
-@Satisfies(constraints = {"EntityMustHaveName"})
-@Constraint(name = "EntityNameMustBeUnique", message = "Entity name must be unique")
-public ValidationRule entityNameMustBeUnique() {
-    return (element, ctx) -> { /* ... */ };
-}
-```
-
-#### 6. `@Cached`
-Caches the result of expensive validation computations.
-
-```java
-@Cached
-@Constraint(name = "NoCyclicReferences", message = "Cyclic references detected")
-public ValidationRule noCyclicReferences() {
-    return (element, ctx) -> {
-        // Expensive graph traversal cached per element
-    };
-}
-```
-
-#### 7. `@ExtensionMethod`
-Registers a helper method accessible from validation rules via context.
-
-```java
-@ExtensionMethod(elementType = EntityType.class)
-public List<Attribute> getAllAttributes(EntityType entity) {
-    // Helper method implementation
-}
-
-// Usage in validation rule:
-return (element, ctx) -> {
-    List<Attribute> attrs = ctx.callExtension("getAllAttributes", element);
-    // ...
-};
-```
-
-#### 8. `@PreValidation` / `@PostValidation`
-Lifecycle hooks executed before/after validation.
-
-```java
-@PreValidation
-public void setUp(ValidationContext ctx) {
-    // Initialize caches, prepare data
-}
-
-@PostValidation
-public void tearDown(ValidationContext ctx) {
-    // Cleanup, logging
-}
-```
-
-### Parallel Validation Engine
-
-The `ValidationExecutor` automatically parallelizes validation when:
-- **Element count ≥ 5000** (configurable threshold)
-- **Chunk size ≥ 100 elements** per work unit
-- Uses **ForkJoinPool** with work-stealing
-
-```java
-// Automatic parallel execution for large models
-ValidationRegistry registry = new ValidationRegistry();
-registry.register(EntityTypeValidations.class);
-
-ValidationExecutor executor = ValidationExecutor.builder()
-    .registry(registry)
-    .parallelThreshold(5000)  // Optional, defaults to 5000
-    .chunkSize(100)           // Optional, defaults to 100
-    .build();
-
-List<ValidationResult> results = executor.validate(modelElements);
-```
-
-## Transformation Framework
-
-### Transformation Core Architecture
-
-The `transformation-core` module provides annotation-based model-to-model transformations:
-
-```
-transformation-core/src/main/java/hu/blackbelt/judo/zeta/transformation/core/
-├── TransformationExecutor.java        # Parallel execution engine with staging and execution strategy
-├── TransformationContext.java         # Execution context with staging infrastructure
-├── TransformationRegistry.java        # Rule registration and discovery
-├── TransformationResult.java          # Result wrapper
-├── TransformationTrace.java           # Source-to-target mapping export
-├── TransformationException.java       # Fail-fast error handling
-├── TransformRuleDescriptor.java       # Rule metadata
-├── ElementResolutionCache.java        # Thread-safe source→target cache
-├── RuleInheritanceGraph.java          # Rule dependency resolution
-├── ExecutionStrategy.java             # ELEMENT_BY_ELEMENT vs RULE_BY_RULE enum
-└── deferred/                          # Deferred EMF writes infrastructure
-    ├── EMFOperation.java              # Sealed interface with 10 operation record types
-    ├── OperationQueue.java            # Thread-safe queue with sequence ordering
-    ├── DeferredEObject.java           # Dynamic proxy for operation interception
-    └── DeferredEList.java             # EList wrapper for deferred list operations
-```
-
-### Parallel Transformation Execution
-
-The transformation framework uses a **two-phase staging approach** for thread-safe parallel execution:
-
-**Phase 1 (Parallel):**
-- Elements are created in parallel threads
-- Created elements are staged in `ConcurrentLinkedQueue`
-- Element ordering tracked via `AtomicLong` sequence numbers
-- XMI IDs stored in `ConcurrentHashMap` for deferred assignment
-
-**Phase 2 (Sequential):**
-- Staged elements sorted by creation sequence
-- Elements committed to target Resource (single-threaded)
-- XMI IDs applied after elements added to Resource
-
-**Post-Transformation XMI ID Application:**
-- Elements added through containment references (not via `addToResource()`) may have pending XMI IDs
-- Call `applyAllPendingXmiIds()` after transformation completes to ensure all elements have their XMI IDs properly set
-- This method iterates through the target resource and applies any pending IDs that weren't applied during the commit phase
-
-```java
-// Configure parallel transformation
-TransformationExecutor executor = TransformationExecutor.builder()
-    .registry(registry)
-    .context(context)
-    .parallel(true)                    // Enable parallel (default: true)
-    .parallelThreshold(1000)           // Min elements for parallel (default: 1000)
-    .chunkSize(100)                    // Elements per work unit (default: 100)
-    .executionStrategy(ExecutionStrategy.ELEMENT_BY_ELEMENT) // default
-    .build();
-
-// Execute - executor is reusable
-TransformationResult result = executor.transform(sourceElements);
-```
-
-### Execution Strategy (ELEMENT_BY_ELEMENT vs RULE_BY_RULE)
-
-The executor supports two execution strategies for eager rule processing, configured via `executionStrategy()`:
-
-| Strategy | Outer Loop | Inner Loop | Cross-Element Visibility |
-|----------|-----------|------------|--------------------------|
-| `ELEMENT_BY_ELEMENT` (default) | Source elements | Matching rules per element | Only current element's outputs via cache |
-| `RULE_BY_RULE` (ETL-compatible) | Rules in registration order | All matching source elements | ALL outputs from earlier rules |
-
-**RULE_BY_RULE** matches ETL's module import ordering: each rule processes ALL matching source elements before the next rule begins. Registration order in `TransformationRegistry` mirrors ETL's `.etl` import chain.
-
-```java
-// ETL-compatible rule-by-rule execution
-TransformationExecutor executor = TransformationExecutor.builder()
-    .registry(registry)
-    .context(context)
-    .executionStrategy(ExecutionStrategy.RULE_BY_RULE)
-    .parallel(false)    // Sequential rule-by-rule
-    .build();
-executor.transform();
-```
-
-**Parallel Rule-By-Rule:**
-- Outer rule loop remains sequential (rule ordering preserved)
-- Inner source-element loop parallelized via chunking
-- Per-rule barrier: `commitDeferredOperationsIncremental()` called between rules
-- Ensures Rule B sees ALL materialized outputs from Rule A
-
-```java
-// Parallel rule-by-rule with per-rule barriers
-TransformationExecutor executor = TransformationExecutor.builder()
-    .registry(registry)
-    .context(context)
-    .executionStrategy(ExecutionStrategy.RULE_BY_RULE)
-    .parallel(true)
-    .parallelThreshold(1)
-    .build();
-executor.transform();
-```
-
-**Key Methods:**
-- `TransformationRegistry.getOrderedEagerRules()` — returns all eager rules in registration order (filters out lazy, abstract, multi-source, activity-based). Result is cached.
-- `TransformationContext.commitDeferredOperationsIncremental()` — commits pending deferred operations between rules without disabling deferred writes (inter-rule barrier)
-- `TransformationExecutor.executeRuleForSource()` — shared logic for guard evaluation, cache getOrCreate, error handling (used by both strategies)
-
-**Incompatible Configuration:**
-`CLONE_CURRENT_STATE + RULE_BY_RULE + parallel(true)` throws `IllegalStateException`. CLONE_CURRENT_STATE requires deterministic element processing order within each rule, which parallel chunking does not guarantee. Use `parallel(false)` with this combination.
-
-### Package Resolution
-
-**Generated Metamodels** - No registration needed, EPackage is auto-discovered:
-```java
-Table table = ctx.createTarget(Table.class);  // Auto-discovers SchemaPackage
-Column col = ctx.create(Column.class);        // Auto-discovers SchemaPackage
-```
-
-**Dynamic EMF** - Register packages explicitly:
-```java
-ctx.registerTargetPackage(dynamicPackage);
-EObject obj = ctx.createTarget(dynamicType, dynamicPackage);
-```
-
-### Thread-Safety in Transformation Rules
-
-**Safe Operations:**
-- `ctx.createTarget()` - Creates staged elements
-- `ctx.createTarget(Class, EPackage)` - Creates in specific package
-- `ctx.createTarget(Class, String customId)` - Creates with custom ID (race-condition safe)
-- `ctx.equivalent()` - Thread-safe lazy rule execution with per-element locking
-- `ctx.equivalentDiscriminated()` - Thread-safe discriminated equivalence
-- Setting properties on elements you created
-- Reading from source elements
-
-**Unsafe Operations (avoid):**
-- Modifying source elements
-- Modifying target elements created by other rules
-- Shared mutable state between rules
-
-### Rule Invocation Stack (Context-Aware Resolution)
-
-The framework maintains a thread-local stack of rule invocations, enabling context-aware discriminator resolution. This is particularly useful for achieving ETL compatibility where different calling contexts require different discriminators.
-
-**Key Classes:**
-- `RuleInvocation` - Record capturing rule name, source, and discriminator
-- `DiscriminatorResolver` - Functional interface for context-aware resolution
-- `DiscriminatorResolver.Resolution` - Result containing discriminator and cache mode
-
-**Stack Management:**
-```java
-// Push rule invocation (done automatically by TransformRuleDescriptor.execute())
-ctx.pushRuleInvocation("RuleName", source, discriminator);
-
-// Access the call chain
-List<RuleInvocation> chain = ctx.getRuleInvocationChain();
-
-// Check if in specific rule context
-boolean inButton = ctx.isInRuleContext("ButtonGroupRule");
-
-// Find specific rule in chain
-RuleInvocation buttonInv = ctx.findRuleInChain("ButtonGroupRule");
-
-// Pop when rule completes (automatic in finally block)
-ctx.popRuleInvocation();
-```
-
-**Context-Aware Discriminator Resolution:**
-```java
-ctx.setDiscriminatorResolver(new DiscriminatorResolver() {
-    @Override
-    public Resolution resolve(EObject source, String ruleName, List<RuleInvocation> callChain) {
-        if (ruleName.equals("ActionDefinitionRule")) {
-            // Check if called from ButtonGroup context
-            for (RuleInvocation inv : callChain) {
-                if (inv.ruleName().equals("ButtonGroupRule")) {
-                    // Use discriminator-only cache for ETL-compatible sharing
-                    return Resolution.discriminatorOnlyCache(
-                        "buttonContext/" + getId(inv.source()));
-                }
-            }
-            // Default: source-based cache
-            return Resolution.sourceBasedCache("defaultContext");
-        }
-        return null; // Use explicit discriminator
-    }
-
-    @Override
-    @Deprecated
-    public String resolveDiscriminator(EObject source, String ruleName, List<RuleInvocation> callChain) {
-        return null; // Not used when resolve() is overridden
-    }
-});
-```
-
-### Discriminator-Only Cache (ETL-Compatible Caching)
-
-The framework supports two caching modes for `equivalentDiscriminated()`:
-
-| Mode | Cache Key | Use Case |
-|------|-----------|----------|
-| **SOURCE_BASED** (default) | `(source, ruleName, discriminator)` | Different sources create separate targets |
-| **DISCRIMINATOR_ONLY** | `(ruleName, discriminator)` | Different sources share target if same discriminator |
-
-**When to use DISCRIMINATOR_ONLY:**
-- Matching ETL's string-based caching semantics
-- When ActionDefinitions should be shared between Button and Action contexts
-- When the discriminator alone should determine identity
-
-**Resolution factory methods:**
-```java
-// Source-based caching (default ZETA behavior)
-Resolution.sourceBasedCache("my-discriminator");
-
-// Discriminator-only caching (ETL-compatible)
-Resolution.discriminatorOnlyCache("shared-discriminator");
-```
-
-**Example: Sharing ActionDefinitions across contexts:**
-```java
-ctx.setDiscriminatorResolver(new DiscriminatorResolver() {
-    @Override
-    public Resolution resolve(EObject source, String ruleName, List<RuleInvocation> callChain) {
-        if ("OperationFormCallActionDefinition".equals(ruleName)) {
-            // Both Button and Action contexts use same discriminator
-            // for the same TransferObjectForm
-            TransferObjectForm form = findFormInContext(callChain);
-            if (form != null) {
-                String disc = actorType.getName() + "/(esm/" + getId(form) + ")/Form";
-                // DISCRIMINATOR_ONLY enables sharing across different source objects
-                return Resolution.discriminatorOnlyCache(disc);
-            }
-        }
-        return null;
-    }
-    // ...
-});
-```
-
-**Orphan Element Prevention:**
-
-The DISCRIMINATOR_ONLY cache mode prevents orphan elements by using the original element directly instead of cloning:
-
-| Mode | Behavior | Orphans |
-|------|----------|---------|
-| **SOURCE_BASED** | Create original → clone → add clone to Resource | Original may become orphan |
-| **DISCRIMINATOR_ONLY** | Create original → update ID → add to Resource | No orphans (single element) |
-
-This matches ETL semantics where there's only ONE element per discriminator key, not an "original" + "clone" pair.
-
-**How it works internally:**
-1. Rule executes and creates target element via `createTarget()`
-2. Target is added to Resource via `addToResource()` (not skipped)
-3. Target's ID is updated to the discriminated ID
-4. Target is cached in discriminator-only cache
-5. Future calls with same discriminator return the cached target
-
-**Key difference from source-based cache:**
-- Source-based: `inDiscriminatedExecution=true` prevents `addToResource()`, then clones
-- Discriminator-only: `inDiscriminatedExecution=false` allows `addToResource()`, no cloning
-
-### Element ID Race Condition Prevention
-
-**Problem:** When a rule creates a target and later sets a custom ID, other rules that read the ID in between see the wrong (initial) ID.
-
-**Solution:** Use `createTarget(Class, String customId)` to set custom IDs at creation time:
-
-```java
-// WRONG - Race condition! Other rules may see initial ID
-EPackage target = ctx.createTarget(EPackage.class);
-ctx.equivalent(source, OtherRule.class);  // OtherRule reads initial ID
-ctx.setElementId(target, customId);       // THROWS IllegalStateException!
-
-// CORRECT - No race condition
-String customId = "myprefix/" + source.getName();
-EPackage target = ctx.createTarget(EPackage.class, customId);
-ctx.equivalent(source, OtherRule.class);  // OtherRule sees correct ID
-```
-
-**Rules:**
-- `setElementId()` throws `IllegalStateException` if another rule has read the ID
-- Use `createTarget(type, customId)` when you need a custom ID
-- Or call `setElementId()` BEFORE calling any `equivalent()` methods
-
-**Clone Tracking (January 2026 Update):**
-
-External read tracking also applies to **clones** from `equivalentDiscriminated()`:
-
-```java
-// WRONG - Clone's ID was read, then changed
-Action action = ctx.equivalentDiscriminated(source, Action.class, "CreateAction", disc);
-String id = ctx.getElementId(action);  // External read - marks clone
-ctx.setElementId(action, customId);    // THROWS IllegalStateException!
-
-// CORRECT - Accept the framework-generated discriminated ID
-Action action = ctx.equivalentDiscriminated(source, Action.class, "CreateAction", disc);
-// Use action as-is, ID format: (source/<id>)/CreateAction/(discriminator/<disc>)
-
-// OR - Have the lazy rule set custom ID
-@TransformRule(name = "CreateAction") @Lazy
-public TransformFunction<Source, Action> createAction() {
-    return (source, ctx) -> {
-        String customId = buildCustomId(source);
-        return ctx.createTarget(Action.class, customId);  // ID set at creation
-    };
-}
-```
-
-**Important:** `equivalentDiscriminated()` with a lazy rule **never returns null** - it executes the rule.
-
-> **Migration Guide**: See `MIGRATION-ID-RACE-CONDITION-FIX.md` for detailed migration patterns
-
-### Thread-Safety Implementation Details
-
-**Approach 1: Per-Element Locking (Default)**
-- Cache key is `(source, ruleName)` for proper cross-rule isolation
-- Double-check locking pattern in `equivalent()` calls
-- Synchronized XMI ID operations on Resource object
-
-**Approach 2: Deferred EMF Writes (Auto-enabled for parallel)**
-
-When `parallel=true`, deferred writes are automatically enabled to prevent EMF EList corruption.
-
-| Issue | Impact | Details |
-|-------|--------|---------|
-| Read-after-write | `size()`, `contains()` return stale data | See `agent-docs/EXECUTION.md` |
-| eContainer() null | Containment navigation fails | See `agent-docs/EXECUTION.md` |
-| Cross-rule visibility | Rules can't see other rules' additions | See `agent-docs/EXECUTION.md` |
-| Opt-out | `ctx.disableDeferredWrites()` | See `agent-docs/EXECUTION.md` |
-
-> **Full documentation**: `agent-docs/EXECUTION.md` → "Deferred Writes Compatibility Issues"
-
-**Guard Rejection Caching:**
-- Guard rejections cached per `(source, ruleName)` pair
-- Avoids redundant guard evaluation in complex transformation graphs
-
-### Fail-Fast Error Handling
-
-```java
-try {
-    TransformationResult result = executor.transform(sourceElements);
-} catch (TransformationException e) {
-    EObject failedElement = e.getFailedElement();
-    String ruleName = e.getRuleName();
-    Throwable cause = e.getCause();
-    // Handle error with full context
-}
-```
-
-### Diagnostic Logging
-
-The framework provides built-in diagnostics for debugging transformation issues:
-
-**XMI ID Collision Detection (ERROR level):**
-```
-ERROR XMI ID COLLISION DETECTED: ID 'xxx' is being reassigned from Type1 (obj@abc) to Type2 (obj@def)
-```
-Logged when two different elements are assigned the same XMI ID.
-
-**Context Pollution Warning (DEBUG level):**
-```
-DEBUG CONTEXT WARNING: createTarget(Action) called but currentExecutingRule is 'RelationFeatureView'
-```
-Logged when `createTarget()` type doesn't match the current rule's expected target type.
-
-**Stale Index Entry Fix:**
-When `setElementId()` is called to change an element's ID, the old ID is automatically removed from `pendingXmiIdIndex` to prevent incorrect `findByXmiId()` lookups.
-
-Enable diagnostics in `logback.xml`:
-```xml
-<logger name="hu.blackbelt.judo.zeta.transformation.core.TransformationContext" level="DEBUG"/>
-```
-
-### Key Classes
-
-| Class | Purpose |
-|-------|---------|
-| `TransformationExecutor` | Parallel execution engine with Builder pattern |
-| `TransformationContext` | Execution context with staging infrastructure |
-| `TransformationException` | RuntimeException with element/rule context |
-| `ElementResolutionCache` | Thread-safe ConcurrentHashMap-based cache |
-| `TransformationTrace` | JSON-exportable source→target mapping |
-| `ExecutionStrategy` | Enum: `ELEMENT_BY_ELEMENT` (default) vs `RULE_BY_RULE` (ETL-compatible) |
-
-### Transformation Annotations
-
-| Annotation | Description |
-|------------|-------------|
-| `@TransformationContext` | Marks a class as containing transformation rules |
-| `@TransformRule` | Defines a transformation rule method |
-| `@Lazy` | Rule executes on-demand via `equivalent()` calls |
-| `@Abstract` | Rule only executes via parent rule inheritance |
-| `@Primary` | Rule's result takes precedence in `equivalent()` |
-| `@Greedy` | Matches source type AND all subtypes |
-| `@ActivityBased` | Only processes elements activated via `equivalent()` (use with @Greedy @Lazy) |
-| `@Extends` | Inherits from parent rules (automatic execution) |
-| `@Guard` | Conditional execution based on guard method |
-| `@Detached` | Output NOT added to Resource.contents (caller adds to container) |
-| `@Transform` | Specifies source type and resource alias |
-| `@To` | Specifies target type and resource alias |
-| `@PreExecution` | Method runs before transformation starts |
-| `@PostExecution` | Method runs after transformation completes |
-
-> **@Greedy vs @Lazy Semantics**: `@Greedy` controls **type matching only** (kind-of vs type-of) - it matches subtypes, not just exact types. `@Lazy` controls **execution timing** (on-demand vs eager phase). These are orthogonal - a rule can be both `@Greedy` AND `@Lazy`. **Key difference from Epsilon ETL**: Zeta's eager phase processes ALL matching instances regardless of reachability, while Epsilon ETL may skip elements that are never referenced via `equivalent()`. To match ETL behavior, use `@ActivityBased` annotation with `@Greedy @Lazy` rules, or enable `etlCompatibilityMode(true)` on the executor.
-
-### Dependency Resolution
-
-The framework topologically sorts rules based on `@Satisfies` annotations:
-
-```java
-// Rule execution order automatically determined:
-// 1. EntityMustHaveName (no dependencies)
-// 2. EntityNameMustBeUnique (depends on EntityMustHaveName)
-// 3. EntityMustHaveTable (depends on EntityMustHaveName via guard)
-```
-
-### Caching Strategy
-
-Three cache key types:
-1. **Element-based:** `CacheKey.of(element)` - cache per EMF object
-2. **Element + String:** `CacheKey.of(element, "key")` - multiple caches per element
-3. **Element + Object:** `CacheKey.of(element, complexKey)` - arbitrary cache keys
-
-```java
-@Cached
-@Constraint(name = "ExpensiveValidation", message = "...")
-public ValidationRule expensiveValidation() {
-    return (element, ctx) -> {
-        // Result cached automatically based on element
-        Object cached = ctx.getCached(CacheKey.of(element));
-        if (cached != null) return ValidationResult.pass();
-        
-        Object result = expensiveComputation(element);
-        ctx.putCached(CacheKey.of(element), result);
-        return ValidationResult.pass();
-    };
-}
-```
+→ See `agent-docs/QUICK-REF.md` for transformation patterns and examples.
 
 ## Technology Stack
 
-### Core Technologies
 | Technology | Version | Purpose |
 |------------|---------|---------|
-| **Java** | 21 | Target language |
-| **Maven** | 3.9.4+ | Build system |
-| **Eclipse EMF** | 2.38.0 / 2.41.0 | Metamodel foundation |
-| **OSGi** | 7.0.0 | Modularity framework |
-| **SLF4J** | 2.0.16 | Logging facade |
-| **Logback** | 1.5.12 | Logging implementation |
-| **Lombok** | 1.18.34 | Annotation processing |
-
-### Build & Testing
-| Technology | Version | Purpose |
-|------------|---------|---------|
-| **Maven Bundle Plugin** | 6.0.0 | OSGi bundle creation |
-| **Apache Karaf** | 4.4.7 | OSGi runtime container |
-| **Pax Exam** | 4.13.5 | OSGi integration testing |
-| **JUnit Jupiter** | 5.11.3 | Unit testing |
-| **JaCoCo** | 0.8.12 | Code coverage |
-
-### P2 Repository
-| Technology | Version | Purpose |
-|------------|---------|---------|
-| **p2-maven-plugin** | 2.0.0 (Reficio) | P2 site generation |
-| **Maven Assembly Plugin** | 3.4.2 | ZIP packaging |
+| Java | 21 | Target language |
+| Maven | 3.9.4+ | Build system |
+| Eclipse EMF | 2.38.0+ | Metamodel foundation |
+| OSGi | 7.0.0 | Modularity framework |
+| SLF4J + Logback | 2.0.16 / 1.5.12 | Logging |
+| Lombok | 1.18.34 | Annotation processing |
+| JUnit Jupiter | 5.11.3 | Testing |
+| Apache Karaf | 4.4.7 | OSGi runtime (integration tests) |
+| Pax Exam | 4.13.5 | OSGi integration testing |
 
 ## Build Commands
 
-### Standard Build
 ```bash
-# Full build with tests
-./mvnw clean install
-
-# Skip modules (parent only)
-./mvnw clean install -DskipModules=true
-
-# Skip tests
-./mvnw clean install -DskipTests
-
-# With code coverage
-./mvnw clean verify
+./mvnw clean install              # Full build with tests
+./mvnw clean install -DskipTests  # Skip tests
+./mvnw clean verify               # Build with code coverage
+./mvnw test                       # Unit tests only
+./mvnw verify -Dit.test=*ITest    # Integration tests only
 ```
 
-### Maven Profiles
+**Maven profiles:** `release-judong` (internal Nexus), `release-central` (Maven Central), `sign-artifacts` (GPG), `release-dummy` (test to /tmp)
 
-| Profile | Purpose | Command |
-|---------|---------|---------|
-| `modules` | Default - builds all 3 modules | (active by default) |
-| `sign-artifacts` | GPG signing for releases | `-Psign-artifacts` |
-| `release-central` | Maven Central deployment | `-Prelease-central` |
-| `release-judong` | Internal Nexus deployment | `-Prelease-judong` |
-| `release-dummy` | Test deployment to /tmp | `-Prelease-dummy` |
-
-### Deployment
-
-```bash
-# Deploy to Judong Nexus (requires credentials)
-./mvnw clean deploy -Prelease-judong
-
-# Deploy to Maven Central (requires GPG)
-./mvnw clean deploy -Prelease-central -Psign-artifacts
-```
-
-## Usage Examples
-
-### Basic Validation Setup
-
-```java
-import hu.blackbelt.judo.meta.validation.*;
-import hu.blackbelt.judo.meta.validation.annotation.*;
-import hu.blackbelt.judo.meta.validation.core.*;
-
-// 1. Define validation rules
-@ValidationContext(MyEntityType.class)
-public class MyEntityValidations {
-    
-    @Constraint(name = "MustHaveName", message = "Entity must have name")
-    public ValidationRule mustHaveName() {
-        return (element, ctx) -> {
-            MyEntityType entity = (MyEntityType) element;
-            return entity.getName() != null 
-                ? ValidationResult.pass() 
-                : ValidationResult.fail("Name is required");
-        };
-    }
-    
-    @Satisfies(constraints = {"MustHaveName"})
-    @Constraint(name = "NameMustBeUnique", message = "Name must be unique")
-    public ValidationRule nameMustBeUnique() {
-        return (element, ctx) -> {
-            MyEntityType entity = (MyEntityType) element;
-            List<MyEntityType> allEntities = ctx.getAll(MyEntityType.class);
-            
-            long count = allEntities.stream()
-                .filter(e -> entity.getName().equals(e.getName()))
-                .count();
-                
-            return count == 1 
-                ? ValidationResult.pass() 
-                : ValidationResult.fail("Duplicate name: " + entity.getName());
-        };
-    }
-}
-
-// 2. Register and execute
-ValidationRegistry registry = new ValidationRegistry();
-registry.register(MyEntityValidations.class);
-
-ValidationExecutor executor = ValidationExecutor.builder()
-    .registry(registry)
-    .build();
-
-// 3. Validate model
-List<EObject> elements = myModel.getContents();
-List<ValidationResult> results = executor.validate(elements);
-
-// 4. Process results
-for (ValidationResult result : results) {
-    if (!result.isValid()) {
-        System.err.println(result.getSeverity() + ": " + result.getMessage());
-    }
-}
-```
-
-### Using Extension Methods
-
-```java
-@ValidationContext(EntityType.class)
-public class EntityValidations {
-    
-    // Define reusable helper
-    @ExtensionMethod(elementType = EntityType.class)
-    public List<Attribute> getAllAttributes(EntityType entity) {
-        List<Attribute> attrs = new ArrayList<>(entity.getAttributes());
-        if (entity.getSuperType() != null) {
-            attrs.addAll(getAllAttributes(entity.getSuperType()));
-        }
-        return attrs;
-    }
-    
-    // Use in validation
-    @Constraint(name = "MustHavePrimaryKey", message = "Entity must have primary key")
-    public ValidationRule mustHavePrimaryKey() {
-        return (element, ctx) -> {
-            EntityType entity = (EntityType) element;
-            List<Attribute> allAttrs = ctx.callExtension("getAllAttributes", entity);
-            
-            boolean hasPK = allAttrs.stream().anyMatch(Attribute::isPrimaryKey);
-            return hasPK 
-                ? ValidationResult.pass() 
-                : ValidationResult.fail("No primary key found");
-        };
-    }
-}
-```
-
-### OSGi Integration
-
-```java
-// OSGi Declarative Services component
-@Component(immediate = true)
-public class MyModelValidator {
-    
-    @Reference
-    private ModelProvider modelProvider;
-    
-    @Activate
-    public void activate() {
-        ValidationRegistry registry = new ValidationRegistry();
-        registry.register(EntityTypeValidations.class);
-        registry.register(AttributeValidations.class);
-        
-        ValidationExecutor executor = ValidationExecutor.builder()
-            .registry(registry)
-            .modelProvider(modelProvider)
-            .build();
-            
-        // Validate on model load
-        List<ValidationResult> results = executor.validate(
-            modelProvider.getModel().getContents()
-        );
-        
-        results.stream()
-            .filter(r -> !r.isValid())
-            .forEach(r -> System.err.println(r.getMessage()));
-    }
-}
-```
-
-## OSGi Bundle Configuration
-
-### Exported Packages
-- `hu.blackbelt.judo.zeta.validation` - Core interfaces (ModelProvider)
-- `hu.blackbelt.judo.zeta.validation.annotation` - All 8 annotations
-- `hu.blackbelt.judo.zeta.validation.core` - Validation engine classes
-- `hu.blackbelt.judo.zeta.validation.util` - Utility classes
-
-### Bundle Manifest
-```
-Bundle-SymbolicName: hu.blackbelt.judo.zeta.validation-core
-Bundle-Version: 1.0.0.SNAPSHOT
-Require-Capability: osgi.ee;filter:="(&(osgi.ee=JavaSE)(version=21))"
-Export-Package: 
-  hu.blackbelt.judo.zeta.validation,
-  hu.blackbelt.judo.zeta.validation.annotation,
-  hu.blackbelt.judo.zeta.validation.core,
-  hu.blackbelt.judo.zeta.validation.util
-Import-Package:
-  org.eclipse.emf.ecore;version="[2.21,3)",
-  org.slf4j;version="[1.6,3)",
-  org.osgi.framework;version="[1.8,2.0)"
-```
-
-## CI/CD Pipeline
-
-### GitHub Actions Workflow
-
-The project uses a comprehensive CI/CD pipeline (`.github/workflows/build.yml`):
-
-**Trigger Events:**
-- Push to `develop` branch
-- Pull requests to `develop`, `master`, `increment/*`, `release/*`
-
-**Build Steps:**
-1. **Version Calculation** - Timestamp-based versioning
-   - Develop: `1.0.0.20251204_181032_abc123def_develop`
-   - PR: `1.0.0.20251204_181032_abc123def_PR_42`
-   - Master: `1.0.0` (no suffix)
-
-2. **Build & Test** - Maven build with JDK 21
-   ```bash
-   ./mvnw clean install -Prelease-judong
-   ```
-
-3. **Deploy** - Dual deployment strategy:
-   - **Maven artifacts** → `https://nexus.judo.technology/repository/maven-judong-snapshots/`
-   - **P2 repository** → `https://nexus.judo.technology/repository/p2-judong/judo-zeta/{version}/`
-
-4. **Quality Analysis** - SonarQube integration
-   - URL: `https://sonar.judo.technology`
-   - Develop branch only
-
-5. **Release Management** - Automated tagging and GitHub releases
-
-**Runner:** Self-hosted `judong` runner  
-**Timeout:** 30 minutes  
-**Notification:** Discord webhook on completion
-
-## Development Environment
-
-### Required Tools
-- **Java 21 JDK** (Zulu, Temurin, or Oracle)
-- **Maven 3.9.4+** (or use `./mvnw` wrapper)
-- **Git**
-
-### Optional Tools
-- **Eclipse IDE** (with m2e, OSGi, and modeling tools)
-- **IntelliJ IDEA** (with OSGi and Maven plugins)
-- **VS Code** (with Java and Maven extensions)
-
-### JVM Configuration
-
-The build uses these JVM arguments (`.mvn/jvm.config`):
-```
--Xms1024m
--Xmx2048m
--Dfile.encoding=UTF-8
---add-opens java.base/java.lang=ALL-UNNAMED
---add-opens java.base/java.util=ALL-UNNAMED
---add-opens java.base/java.time=ALL-UNNAMED
--Dtycho.disableP2Mirrors=true
--Djansi.force=true
-```
-
-### IDE Setup
-
-**Eclipse:**
-1. Import as "Existing Maven Projects"
-2. Install OSGi bundle development tools
-3. Configure Java 21 JDK
-4. Run `./mvnw clean install` first
-
-**IntelliJ IDEA:**
-1. Open `pom.xml` as project
-2. Configure Project SDK to Java 21
-3. Enable Maven auto-import
-4. Mark `target/generated-sources` as source roots
+**Deploy:** `./mvnw clean deploy -Prelease-judong`
 
 ## Key Configuration Files
 
 | File | Purpose |
 |------|---------|
-| `/pom.xml` | Parent POM with 3 modules, dependency management, profiles |
-| `/validation-core/pom.xml` | Core validation bundle configuration |
-| `/p2/pom.xml` | P2 repository generation |
-| `/osgi-itest/pom.xml` | Integration test configuration |
-| `/.mvn/jvm.config` | JVM arguments for build |
-| `/.mvn/extensions.xml` | Maven extensions (Wagon WebDAV) |
-| `/.github/workflows/build.yml` | Main CI/CD pipeline |
-| `/logback-test.xml` | Test logging configuration |
+| `/pom.xml` | Parent POM — modules, dependency management, profiles |
+| `/validation-core/pom.xml` | Validation bundle config |
+| `/transformation-core/pom.xml` | Transformation bundle config |
+| `/.mvn/jvm.config` | JVM args (memory, add-opens) |
+| `/.mvn/extensions.xml` | Maven extensions |
+| `/.github/workflows/build.yml` | CI/CD pipeline |
 
 ## Testing
 
-### OSGi Integration Tests
+**Unit tests:** Standard JUnit 5 in each module's `src/test/`.
 
-Located in `osgi-itest/`, using Pax Exam with Apache Karaf 4.4.7:
+**OSGi integration tests:** `osgi-itest/` uses Pax Exam + Karaf. Verifies bundle activation, service registration, EMF integration.
 
-```java
-@RunWith(PaxExam.class)
-@ExamReactorStrategy(PerSuite.class)
-public class ZetaLoadITest {
-    
-    @Configuration
-    public Option[] config() {
-        return options(
-            karafDistributionConfiguration()
-                .frameworkUrl(maven().groupId("org.apache.karaf")
-                    .artifactId("apache-karaf").type("tar.gz").versionAsInProject())
-                .karafVersion(karafVersion),
-            features(getFeaturesUrl(), "judo-zeta-validation-test")
-        );
-    }
-    
-    @Test
-    public void testBundlesLoaded() {
-        // Validates OSGi bundle activation
-    }
-}
-```
+**Coverage:** JaCoCo reports at `target/site/jacoco/index.html` after `./mvnw clean verify`.
 
-**Test Features:**
-- Bundle activation verification
-- Service registration checks
-- Karaf feature installation
-- EMF integration validation
+## Git & Versioning
 
-### Running Tests
+- **Branches:** `develop` (main), `master` (stable), `feature/*`, `hotfix/*`, `release/*`, `increment/*`
+- **Commits:** Conventional commits — `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`
+- **Versioning:** `1.0.0-SNAPSHOT` (dev), `1.0.0.{timestamp}_{hash}_{branch}` (CI), `1.0.0` (release)
 
-```bash
-# Run all tests
-./mvnw clean verify
 
-# Run only unit tests
-./mvnw test
-
-# Run only integration tests
-./mvnw verify -Dit.test=*ITest
-
-# With code coverage
-./mvnw clean verify
-# Coverage report: target/site/jacoco/index.html
-```
-
-## Distribution
-
-### Maven Artifacts
-
-**Group ID:** `hu.blackbelt.judo.zeta`  
-**Artifact ID:** `hu.blackbelt.judo.zeta.validation-core`  
-**Version:** `1.0.0-SNAPSHOT`
-
-**Maven Dependency:**
-```xml
-<dependency>
-    <groupId>hu.blackbelt.judo.zeta</groupId>
-    <artifactId>hu.blackbelt.judo.zeta.validation-core</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
-</dependency>
-```
-
-### P2 Update Site
-
-**URL:** `https://nexus.judo.technology/repository/p2-judong/judo-zeta/`
-
-**Eclipse Installation:**
-1. Help → Install New Software
-2. Add site: `https://nexus.judo.technology/repository/p2-judong/judo-zeta/develop/`
-3. Select "Judo Zeta Validation Framework"
-4. Install and restart
-
-**Feature ID:** `hu.blackbelt.judo.zeta.validation.feature`
-
-### OSGi Bundle
-
-Direct bundle deployment to Karaf:
-```bash
-karaf@root()> bundle:install -s mvn:hu.blackbelt.judo.zeta/hu.blackbelt.judo.zeta.validation-core/1.0.0-SNAPSHOT
-```
-
-## Git Workflow
-
-### Branching Strategy
-- **develop** - Main development branch
-- **master** - Stable releases
-- **increment/*** - Version increment branches
-- **release/*** - Release preparation branches
-- **feature/*** - Feature branches (merge to develop)
-- **hotfix/*** - Hotfix branches (merge to master)
-
-### Versioning
-- **SNAPSHOT:** `1.0.0-SNAPSHOT` (development)
-- **CI Build:** `1.0.0.20251204_181032_abc123def_develop`
-- **Release:** `1.0.0` (no suffix)
-
-### Commit Guidelines
-- Use conventional commits: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`
-- Reference Jira tickets: `[JUDO-123] feat: Add parallel validation`
-- Sign commits with GPG (recommended)
-
-## OpenSpec Workflow
-
-This project uses OpenSpec for spec-driven development. See `openspec/AGENTS.md` for details.
-
-**When to use OpenSpec:**
-- Adding new validation annotations
-- Changing parallel execution strategy
-- Modifying dependency resolution algorithm
-- Breaking API changes
-- Major architectural decisions
-
-**OpenSpec Commands:**
-- `/openspec:proposal` - Create new change proposal
-- `/openspec:apply` - Implement approved proposal
-- `/openspec:archive` - Archive deployed change
-
-## Performance Characteristics
-
-### Parallel Validation
-- **Threshold:** 5000 elements (configurable)
-- **Chunk Size:** 100 elements per work unit
-- **Thread Pool:** ForkJoinPool with work-stealing
-- **Speedup:** ~3-4x on 8-core CPU for large models (>10k elements)
-
-### Memory Usage
-- **Baseline:** ~50MB for framework
-- **Per Element:** ~1KB (model-dependent)
-- **Cache Overhead:** Configurable, ~10-20% increase with caching
-
-### Validation Speed
-- **Simple rules:** ~0.01ms per element
-- **Complex rules:** ~0.1-1ms per element
-- **Cached rules:** ~0.001ms per element (cache hit)
-
-**Benchmark Example (10,000 elements, 50 rules):**
-- Sequential: ~5 seconds
-- Parallel (8 cores): ~1.5 seconds
-
-## Troubleshooting
-
-### Common Issues
-
-**1. ClassNotFoundException in OSGi**
-```
-Solution: Ensure all required EMF bundles are installed
-- org.eclipse.emf.ecore
-- org.eclipse.emf.common
-- org.eclipse.emf.ecore.xmi
-```
-
-**2. Validation Rules Not Discovered**
-```
-Solution: Check @ValidationContext annotation on class
-- Must be present on validation class
-- Element type must match validated elements
-```
-
-**3. Parallel Validation Not Triggering**
-```
-Solution: Verify element count and threshold
-- Default threshold: 5000 elements
-- Adjust with ValidationExecutor.builder().parallelThreshold(n)
-```
-
-**4. Cache Not Working**
-```
-Solution: Ensure @Cached annotation and unique cache keys
-- Use CacheKey.of(element) or CacheKey.of(element, key)
-- Check cache key equality (hashCode/equals)
-```
-
-### Debug Logging
-
-Enable debug logging via `logback.xml`:
-```xml
-<logger name="hu.blackbelt.judo.meta.validation" level="DEBUG"/>
-```
-
-Log output shows:
-- Rule registration
-- Dependency resolution
-- Parallel execution strategy
-- Cache hit/miss rates
-- Validation timing
-
-## Security Considerations
-
-- **Input Validation:** Framework validates EMF models only (type-safe)
-- **Code Injection:** Not applicable (annotation-based, compile-time)
-- **Resource Limits:** Configurable chunk size and thread pool size
-- **OSGi Security:** Standard OSGi security manager compatible
-
-## License
-
-Eclipse Public License 2.0 (EPL-2.0)
-
-Copyright (c) 2018-2025 BlackBelt Technology
-
-See `LICENSE` file for full license text.
-
-## Contributors
-
-- **Róbert Csákány** ([@robertcsakany](https://github.com/robertcsakany)) - Core developer
-
-## Related Projects
-
-- **judo-meta-esm** - Enterprise Service Model metamodel
-- **judo-runtime-core** - Judo runtime platform
-- **epsilon-runtime** - Epsilon validation language runtime
-
-## Support
-
-- **Issues:** https://github.com/BlackBeltTechnology/judo-zeta/issues
-- **Email:** support@blackbelt.hu
-- **Documentation:** This file + inline Javadocs
-
-## Changelog
-
-See individual commit messages and GitHub releases for detailed changelog.
-
-**Version 1.0.0-SNAPSHOT (Current):**
-- Initial validation framework implementation
-- Annotation-based rule definition
-- Parallel validation support
-- Dependency resolution
-- Caching infrastructure
-- OSGi bundle packaging
-- P2 repository distribution
