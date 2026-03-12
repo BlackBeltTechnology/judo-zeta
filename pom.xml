@@ -12,7 +12,7 @@
 
 	<name>Judo :: Zeta</name>
 
-	<description>Judo Esm Model Parent</description>
+	<description>Judo Zeta Parent</description>
 
 	<url>http://github.com/${project-repositoryId}</url>
 
@@ -314,6 +314,7 @@
 						<!--suppress UnresolvedMavenProperty -->
 						<argLine>
 							${jacoco.agent}
+							-Xmx1g
 							-Dfile.encoding=UTF-8
 							--add-opens java.base/java.lang=ALL-UNNAMED
 							--add-opens java.base/java.util=ALL-UNNAMED
