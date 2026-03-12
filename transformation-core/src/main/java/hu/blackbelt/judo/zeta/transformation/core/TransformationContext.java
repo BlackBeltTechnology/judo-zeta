@@ -1442,6 +1442,12 @@ public class TransformationContext {
                 if (pendingId != null && targetResource instanceof XMIResource) {
                     setSynchronizedXmiId((XMIResource) targetResource, unwrapped, pendingId);
                 }
+
+                // Also apply pending IDs to contained elements recursively
+                // (parallel mode already does this in the commit phase at line 3500)
+                if (targetResource instanceof XMIResource xmiRes) {
+                    applyPendingIdsRecursively(unwrapped, xmiRes);
+                }
             }
         }
     }
