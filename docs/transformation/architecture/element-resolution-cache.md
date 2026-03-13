@@ -48,6 +48,31 @@ EObject target = cache.get(sourceElement, "EntityType2Table", "");
 EObject createOp = cache.get(sourceElement, "RelationCRUD", "create");
 ```
 
+### XMI ID-based Lookup (ETL Semantics)
+
+When `useStructuredIds` is enabled (default), `equivalent()` also searches by XMI ID:
+
+```java
+// 1. Check object-reference cache first
+EObject cached = cache.get(sourceElement, ruleName, "");
+if (cached != null) return cached;
+
+// 2. Generate expected structured XMI ID
+String xmiId = generateStructuredId(sourceElement, ruleName);
+// Example: Customer/(esm/_abc123)/Entity2Table
+
+// 3. Look up by XMI ID in target resource and pending IDs
+EObject existing = findByXmiId(xmiId, targetType);
+if (existing != null) {
+    cache.store(sourceElement, ruleName, "", existing);  // Cache for future
+    return existing;
+}
+
+// 4. Execute rule if not found
+```
+
+This enables cross-phase element discovery when elements are created in separate transformation phases.
+
 ## Example Cache State
 
 After transforming Customer entity with relations:
@@ -79,16 +104,16 @@ cache = {
 
 ```java
 public class ElementResolutionCache {
-    private final ConcurrentMap<EObject, 
-        ConcurrentMap<String, 
+    private final ConcurrentMap<EObject,
+        ConcurrentMap<String,
             ConcurrentMap<String, EObject>>> cache = new ConcurrentHashMap<>();
-    
+
     public void store(EObject source, String ruleName, String discriminator, EObject target) {
         cache.computeIfAbsent(source, k -> new ConcurrentHashMap<>())
              .computeIfAbsent(ruleName, k -> new ConcurrentHashMap<>())
              .put(discriminator, target);
     }
-    
+
     public EObject get(EObject source, String ruleName, String discriminator) {
         return Optional.ofNullable(cache.get(source))
             .map(m -> m.get(ruleName))
@@ -98,12 +123,79 @@ public class ElementResolutionCache {
 }
 ```
 
+## Shared Lock Acquisition
+
+For parallel execution, the cache provides a shared locking mechanism that ensures consistent lock acquisition across different entry points:
+
+```java
+/**
+ * Get or create the lock for a specific (source, ruleName) pair.
+ * Used by both getOrCreate() and executeParentRule() to prevent race conditions.
+ * CRITICAL: All code paths that access the same (source, ruleName) must use this method
+ * to avoid deadlocks from inconsistent lock acquisition.
+ */
+public ReentrantLock getLockFor(EObject source, String ruleName) {
+    CacheKey key = new CacheKey(source, ruleName);
+    return ruleLocks.computeIfAbsent(key, k -> new ReentrantLock());
+}
+```
+
+**Why this matters**: Without shared lock acquisition, `equivalent()` and `executeParentRule()` could acquire different locks for the same `(source, ruleName)` pair, leading to race conditions where both execute the same rule simultaneously.
+
+## Proxy Unwrapping After Transformation
+
+After transformation completes, all cached proxies must be unwrapped to ensure the target model is fully materialised:
+
+```java
+/**
+ * Unwrap all proxy objects stored in the cache.
+ * This is critical because equivalent() returns cached values, and if those
+ * are proxies, they could end up in containment references after transformation.
+ */
+public int unwrapAllProxies() {
+    int count = 0;
+    for (Map<String, Map<String, EObject>> ruleMap : cache.values()) {
+        for (Map<String, EObject> discriminatorMap : ruleMap.values()) {
+            for (EObject target : discriminatorMap.values()) {
+                if (target instanceof DeferredEObject.ProxyMarker proxy) {
+                    EObject real = proxy.getDelegate();
+                    // Replace proxy with real object in cache
+                    // ...
+                    count++;
+                }
+            }
+        }
+    }
+    return count;
+}
+```
+
+**Key insight**: Phase 1 of `unwrapAllProxiesInModel()` runs this method to ensure the cache contains real EMF objects, not proxies. This prevents stale proxy references from contaminating the final model.
+
+## Structured XMI ID Format
+
+ZETA generates ETL-style structured XMI IDs for traceability:
+
+```
+Standard:      <source-name>/(<alias>/<source-id>)/<rule-name>
+Discriminated: <source-name>/(<alias>/<source-id>)/<rule-name>/(discriminator/<value>)
+
+Examples:
+  Customer/(esm/_abc123)/Entity2Table
+  Customer/(esm/_abc123)/TableAction/(discriminator/relation1)
+```
+
+The `<alias>` is the registered resource alias (e.g., "esm", "asm", "mapping", "source").
+
+When `useStructuredIds` is disabled, sequence-based IDs are used instead (`_seq0`, `_seq1`, etc.).
+
 ## Performance
 
 | Operation | Complexity |
 |-----------|------------|
 | Store | O(1) amortized |
-| Lookup | O(1) |
+| Object-reference lookup | O(1) |
+| XMI ID-based lookup | O(n) in pending IDs, O(1) in committed resource |
 | Memory | O(n) where n = number of transformations |
 
 ---
