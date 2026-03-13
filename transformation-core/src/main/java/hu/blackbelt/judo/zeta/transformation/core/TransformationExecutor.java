@@ -909,6 +909,7 @@ public class TransformationExecutor {
     private void executeRuleForSource(TransformRuleDescriptor rule, EObject source) {
         try {
             final String ruleName = rule.getName();
+            TransformationMetrics.recordRuleIteration();
             long cacheStart = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
             context.getElementResolutionCache().getOrCreate(
                     source,
@@ -927,6 +928,9 @@ public class TransformationExecutor {
                         EObject result = rule.execute(source, context);
                         if (TransformationMetrics.isEnabled()) {
                             TransformationMetrics.recordGreedyRuleExecution(ruleName, System.nanoTime() - startNanos);
+                            if (result != null) {
+                                TransformationMetrics.recordRuleExecution(ruleName);
+                            }
                         }
                         return result;
                     },

@@ -2036,7 +2036,8 @@ public class TransformationContext {
                 // This enables cross-rule target lookups within the same pass
                 EObject immediateResult = executeLazyRuleImmediately(source, rule);
                 if (immediateResult != null) {
-                    TransformationMetrics.recordEquivalentCacheHit();
+                    // Note: don't record cache hit here — a cache miss was already recorded above.
+                    // This is a fresh execution result, not a cache hit.
                     return (T) immediateResult;
                 }
                 // Fall back to activation for Phase 2

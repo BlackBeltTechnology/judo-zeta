@@ -117,6 +117,31 @@ public class TransformationMetrics {
         return enabled;
     }
 
+    // Test-accessible getters for counter values
+    public static long getRuleIterations() {
+        return ruleIterations.get();
+    }
+
+    public static long getRuleExecutions() {
+        return ruleExecutions.get();
+    }
+
+    public static long getGuardEvaluations() {
+        return guardEvaluations.get();
+    }
+
+    public static long getEquivalentCalls() {
+        return equivalentCalls.get();
+    }
+
+    public static long getEquivalentCacheHits() {
+        return equivalentCacheHits.get();
+    }
+
+    public static long getEquivalentCacheMisses() {
+        return equivalentCacheMisses.get();
+    }
+
     public static void reset() {
         // Total transformation timing
         totalTransformationNanos.set(0);
@@ -515,8 +540,9 @@ public class TransformationMetrics {
         // Hierarchy: parallelWait > chunkProcessing > ruleLoop > (ruleMatching + cacheGetOrCreate + greedyExecution)
         // ruleLoop exclusive = ruleLoop - cacheGetOrCreate - ruleMatching (greedy is already separate)
         long ruleLoopExclusiveMs = Math.max(0, ruleLoopMs - cacheGetOrCreateMs - ruleMatchMs);
-        // cacheGetOrCreate exclusive = cacheGetOrCreate - greedy execution (greedy is measured inside)
-        long cacheExclusiveMs = Math.max(0, cacheGetOrCreateMs - greedyMs);
+        // cacheGetOrCreate exclusive = cacheGetOrCreate - greedy execution - guard evaluation
+        // (both greedy and guard are measured inside cacheGetOrCreate)
+        long cacheExclusiveMs = Math.max(0, cacheGetOrCreateMs - greedyMs - guardEvaluationNanos.get() / 1_000_000);
 
         // ACCOUNTED uses exclusive metrics only (no container metrics that overlap)
         // parallelWait is wall-clock time (not additive with CPU time metrics)
@@ -532,8 +558,8 @@ public class TransformationMetrics {
         if (totalTransformMs > 0) {
             sb.append(String.format("  Greedy rule execution:        %,7d ms (%5.1f%%)\n",
                     greedyMs, 100.0 * greedyMs / totalTransformMs));
-            sb.append(String.format("    (Guard evaluation):         %,7d ms (%5.1f%% of greedy, %,d evals)\n",
-                    guardEvalMs, greedyMs > 0 ? 100.0 * guardEvalMs / greedyMs : 0, guardEvaluations.get()));
+            sb.append(String.format("    (Guard evaluation):         %,7d ms (%5.1f%% of cache ops, %,d evals)\n",
+                    guardEvalMs, cacheGetOrCreateMs > 0 ? 100.0 * guardEvalMs / cacheGetOrCreateMs : 0, guardEvaluations.get()));
             sb.append(String.format("  equivalent() total:           %,7d ms (%5.1f%%)\n",
                     equivalentMs, 100.0 * equivalentMs / totalTransformMs));
             sb.append(String.format("  equivalentDiscriminated():    %,7d ms (%5.1f%%)\n",
