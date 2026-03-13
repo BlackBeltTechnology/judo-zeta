@@ -904,6 +904,43 @@ public class ElementResolutionCache {
     }
 
     /**
+     * Find a cached target by its model element name.
+     *
+     * <p>Performs a linear scan of all cached rule mappings, returning the first target
+     * that is an {@link org.eclipse.emf.ecore.ENamedElement} whose {@code getName()} matches
+     * the given name and is assignable to the requested target type.</p>
+     *
+     * <p>This is a <strong>fallback mechanism</strong> for cases where identity-based
+     * {@code equivalent()} fails due to proxy/copy source objects having different Java
+     * identity than the originally transformed element. The matching target may have been
+     * created from a different source object instance that represents the same logical element.</p>
+     *
+     * <p>Thread-safe: In parallel mode, iterates over ConcurrentHashMap which provides
+     * weakly consistent iteration (safe during concurrent writes).</p>
+     *
+     * @param name the model element name to search for (via {@code ENamedElement.getName()})
+     * @param targetType the expected target type class
+     * @param <T> the target type
+     * @return the first matching cached target, or null if not found
+     */
+    @SuppressWarnings("unchecked")
+    public <T extends EObject> T findByName(String name, Class<T> targetType) {
+        if (name == null || targetType == null) {
+            return null;
+        }
+        for (Map<String, EObject> ruleMap : ruleCache.values()) {
+            for (EObject target : ruleMap.values()) {
+                if (targetType.isInstance(target)
+                        && target instanceof org.eclipse.emf.ecore.ENamedElement named
+                        && name.equals(named.getName())) {
+                    return (T) target;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
      * Clear all caches.
      *
      * <p>Also clears the rule locks and in-progress tracking to free memory.</p>

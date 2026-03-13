@@ -1471,21 +1471,76 @@ public class TransformationContext {
         long startNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
         TransformationMetrics.recordEquivalentCall();
 
+        // DEBUG: Log ALL equivalent() calls at entry point
+        if (DEBUG_ENABLED && source != null) {
+            String sourceInfo = source.eClass().getName();
+            String sourceName = getNameSafe(source);
+            // Log all calls, but be extra verbose for wrapper attributes and types
+            if (sourceName.startsWith("_") || sourceInfo.contains("Type") ||
+                sourceInfo.contains("Primitive") || sourceInfo.contains("Enumeration")) {
+                debugLog("equivalent() ENTRY: sourceClass=" + sourceInfo + "@" + System.identityHashCode(source) +
+                    ", sourceName=" + sourceName +
+                    ", target=" + targetType.getSimpleName());
+            }
+        }
+
         try {
             // Check cache first - Restored to ensure previously transformed elements are found
             // irrespective of rule visibility (fixes ETLPatternIntegrationTest regression)
             T cached = resolutionCache.getEquivalent(source, targetType);
             if (cached != null) {
                 TransformationMetrics.recordEquivalentCacheHit();
+                // DEBUG: Log cache hit for types
+                if (DEBUG_ENABLED && source != null && source.eClass() != null) {
+                    String sourceInfo = source.eClass().getName();
+                    if (sourceInfo.contains("Type") || sourceInfo.contains("Primitive")) {
+                        debugLog("equivalent() CACHE HIT: source=" + sourceInfo + "@" + System.identityHashCode(source) +
+                            ", target=" + targetType.getSimpleName() +
+                            ", sourceName=" + getNameSafe(source) +
+                            ", cached=" + getNameSafe(cached));
+                    }
+                }
                 return cached;
             }
             TransformationMetrics.recordEquivalentCacheMiss();
+
+            // DEBUG: Log cache miss for wrapper attributes and types
+            if (source != null && source.eClass() != null && source.eClass().getName() != null) {
+                String sourceName = source.eClass().getName();
+                if (sourceName.contains("TransferAttribute")) {
+                    debugLog("equivalent() CACHE MISS: source=" + sourceName + "@" + System.identityHashCode(source) +
+                        ", target=" + targetType.getSimpleName() +
+                        ", sourceName=" + getNameSafe(source));
+                } else if (sourceName.contains("Type")) {
+                    debugLog("equivalent() CACHE MISS (TYPE): source=" + sourceName + "@" + System.identityHashCode(source) +
+                        ", target=" + targetType.getSimpleName() +
+                        ", sourceName=" + getNameSafe(source));
+                }
+            }
 
             // Check XMI ID lookup and on-demand execution for ALL rules (eager AND lazy)
             if (transformationRegistry != null) {
                 @SuppressWarnings("unchecked")
                 Collection<TransformRuleDescriptor> allRules = transformationRegistry.getRulesForSource(
                         (Class<? extends EObject>) source.getClass());
+
+                // DEBUG: log rules found for wrapper attributes AND types
+                boolean isWrapperAttribute = source.eClass() != null && source.eClass().getName().contains("TransferAttribute") &&
+                        getNameSafe(source).startsWith("_");
+                boolean isTypeElement = source.eClass() != null && source.eClass().getName().contains("Type");
+                if (isWrapperAttribute || isTypeElement) {
+                    debugLog("getRulesForSource: source=" + getNameSafe(source) + "@" + System.identityHashCode(source) +
+                        ", target=" + targetType.getSimpleName() +
+                        ", rulesFound=" + (allRules == null ? "null" : allRules.size()));
+                    if (allRules != null && !allRules.isEmpty()) {
+                        for (TransformRuleDescriptor r : allRules) {
+                            debugLog("  Rule: name=" + r.getName() + ", sourceType=" + r.getSourceType().getSimpleName() +
+                                ", targetType=" + r.getTargetType().getSimpleName() +
+                                ", targetAssignable=" + targetType.isAssignableFrom(r.getTargetType()) +
+                                ", appliesTo=" + r.appliesTo(source));
+                        }
+                    }
+                }
 
                 for (TransformRuleDescriptor rule : allRules) {
                     TransformationMetrics.recordRuleIteration();
@@ -1512,8 +1567,17 @@ public class TransformationContext {
 
                         if (existingByXmiId != null) {
                             // Found by XMI ID - cache it and return
+                            debugLog("XMI ID HIT: source=" + getNameSafe(source) + "@" + System.identityHashCode(source) +
+                                ", rule=" + rule.getName() + ", structuredId=" + structuredId +
+                                ", found=" + getNameSafe(existingByXmiId));
                             resolutionCache.addMapping(source, rule.getName(), existingByXmiId, rule.isPrimary());
                             return existingByXmiId;
+                        } else {
+                            // DEBUG: log XMI ID miss for types
+                            if (rule.getName().contains("Type") || rule.getName().contains("Enumeration")) {
+                                debugLog("XMI ID MISS: source=" + getNameSafe(source) + "@" + System.identityHashCode(source) +
+                                    ", rule=" + rule.getName() + ", structuredId=" + structuredId);
+                            }
                         }
                     }
 
@@ -1621,6 +1685,13 @@ public class TransformationContext {
                                 }
                                 TransformationMetrics.recordRuleExecution(rule.getName());
                                 if (result != null) {
+                                    // DEBUG: log on-demand rule execution
+                                    if (rule.getName().contains("Type") || rule.getName().contains("Enumeration")) {
+                                        debugLog("ON-DEMAND EXECUTION: rule=" + rule.getName() +
+                                            ", source=" + getNameSafe(source) + "@" + System.identityHashCode(source) +
+                                            ", result=" + getNameSafe(result) +
+                                            ", resultClass=" + result.getClass().getSimpleName());
+                                    }
                                     // Store mapping under rule name
                                     resolutionCache.addMapping(source, rule.getName(), result, rule.isPrimary());
                                     executingLazyRules.put(key, result);
@@ -2115,6 +2186,37 @@ public class TransformationContext {
             }
         }
         return null;
+    }
+
+    /**
+     * Find a cached transformation target by its EMF type name.
+     *
+     * <p>This is a <strong>fallback mechanism</strong> for cases where identity-based
+     * {@link #equivalent(EObject, Class)} fails because the source object is a different
+     * Java instance than what was originally transformed (e.g., proxy/copy in extension
+     * packages). Unlike {@code equivalent()}, this method does NOT trigger on-demand
+     * rule execution — it only searches existing cache entries.</p>
+     *
+     * <p>Typical usage pattern in consuming transformations:</p>
+     * <pre>{@code
+     * EClassifier type = ctx.equivalent(s.getDataType(), EClassifier.class);
+     * if (type == null && s.getDataType() != null) {
+     *     type = ctx.findCachedTargetByName(s.getDataType().getName(), EClassifier.class);
+     * }
+     * }</pre>
+     *
+     * @param name the model element name to search for (via {@code ENamedElement.getName()})
+     * @param targetType the expected target type class
+     * @param <T> the target type
+     * @return the first matching cached target, or null if not found
+     * @see #equivalent(EObject, Class)
+     * @see #equivalentCached(EObject, String)
+     */
+    public <T extends EObject> T findCachedTargetByName(String name, Class<T> targetType) {
+        if (name == null || targetType == null) {
+            return null;
+        }
+        return resolutionCache.findByName(name, targetType);
     }
 
     /**
@@ -4461,5 +4563,45 @@ public class TransformationContext {
         }
 
         return count;
+    }
+
+    // =========================================================================
+    // DEBUG HELPER METHODS (for troubleshooting wrapper attribute type issues)
+    // =========================================================================
+
+    private static boolean DEBUG_ENABLED = Boolean.parseBoolean(System.getProperty("zeta.debug", "false"));
+    private static java.io.PrintWriter DEBUG_WRITER = null;
+    static {
+        if (DEBUG_ENABLED) {
+            try {
+                DEBUG_WRITER = new java.io.PrintWriter(new java.io.FileWriter("/tmp/zeta-debug.log"));
+            } catch (Exception e) {
+                System.err.println("Failed to open zeta-debug.log: " + e.getMessage());
+            }
+        }
+    }
+
+    private static synchronized void debugLog(String message) {
+        if (DEBUG_ENABLED) {
+            System.err.println("[ZETA-DEBUG] " + message);
+            if (DEBUG_WRITER != null) {
+                DEBUG_WRITER.println("[ZETA-DEBUG] " + message);
+                DEBUG_WRITER.flush();
+            }
+        }
+    }
+
+    private String getNameSafe(EObject obj) {
+        if (obj == null) return "null";
+        try {
+            EStructuralFeature nameFeature = obj.eClass().getEStructuralFeature("name");
+            if (nameFeature != null) {
+                Object nameValue = obj.eGet(nameFeature);
+                if (nameValue != null) {
+                    return nameValue.toString();
+                }
+            }
+        } catch (Exception e) {}
+        return obj.eClass().getName();
     }
 }
