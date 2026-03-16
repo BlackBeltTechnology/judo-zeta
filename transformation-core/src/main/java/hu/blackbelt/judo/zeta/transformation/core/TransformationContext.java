@@ -38,6 +38,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -143,6 +144,21 @@ public class TransformationContext {
      * Map tracking creation order of each staged element.
      */
     private final ConcurrentHashMap<EObject, Long> elementOrder = new ConcurrentHashMap<>();
+
+    /**
+     * Guard result cache keyed by (guardMethod, source).
+     *
+     * <p>Shared across all rules that reference the same guard method, so a guard
+     * evaluated once for a source element is not re-evaluated by other rules
+     * that share the same guard method. Both true and false results are cached.</p>
+     *
+     * <p>Scoped to a single transformation run — created fresh with each
+     * TransformationContext instance.</p>
+     *
+     * <p>Thread-safe for parallel transformation execution.</p>
+     */
+    private final ConcurrentHashMap<Method, ConcurrentHashMap<EObject, Boolean>> guardResultCache =
+            new ConcurrentHashMap<>();
 
     /**
      * Map storing intended XMI IDs for staged elements (applied during commit).
@@ -1150,6 +1166,39 @@ public class TransformationContext {
      */
     public ElementResolutionCache getElementResolutionCache() {
         return resolutionCache;
+    }
+
+    /**
+     * Get the cached guard result for the given guard method and source element.
+     *
+     * @param guardMethod the guard method (used as cache key)
+     * @param source      the source element
+     * @return the cached result (true or false), or null if not cached
+     */
+    public Boolean getGuardResult(Method guardMethod, EObject source) {
+        ConcurrentHashMap<EObject, Boolean> perMethod = guardResultCache.get(guardMethod);
+        return perMethod != null ? perMethod.get(source) : null;
+    }
+
+    /**
+     * Store a guard evaluation result in the guard method cache.
+     *
+     * @param guardMethod the guard method (used as cache key)
+     * @param source      the source element
+     * @param result      the guard evaluation result
+     */
+    public void putGuardResult(Method guardMethod, EObject source, boolean result) {
+        guardResultCache.computeIfAbsent(guardMethod, k -> new ConcurrentHashMap<>()).put(source, result);
+    }
+
+    /**
+     * Clear the guard result cache.
+     *
+     * <p>Called during executor reset to ensure fresh guard evaluation for
+     * reused executors. The guard cache is scoped to a single transformation run.</p>
+     */
+    public void clearGuardResultCache() {
+        guardResultCache.clear();
     }
 
     /**
@@ -2854,15 +2903,17 @@ public class TransformationContext {
             // If target provided, set up inheritance context so parent's createTarget() returns it
             setPreCreatedTarget(target);
             setInInheritanceExecution(true);
-        } else if (wasInInheritance && previousPreCreated != null && parentRule.isLazy()) {
-            // IMPORTANT: When invoking a LAZY rule from within an inheritance context,
-            // ALWAYS reset the context so the lazy rule creates its own independent target.
-            // This is crucial because lazy rules are meant to create separate objects,
-            // not share the caller's pre-created target.
+        } else if (wasInInheritance && previousPreCreated != null) {
+            // IMPORTANT: When invoking any rule (lazy or non-lazy) from within an inheritance
+            // context with target=null, ALWAYS reset the inheritance state so the invoked rule
+            // creates its own independent target via createTarget().
             //
-            // Without this fix, two lazy rules with the same target type (e.g., both creating
-            // UnmappedTransferObjectType) would incorrectly share the same pre-created target,
-            // with the second rule overwriting the first rule's properties.
+            // Without this reset, a non-lazy rule called for a DIFFERENT source element would
+            // inherit inInheritanceExecution=true and preCreatedTarget from the outer @Extends
+            // chain. If the outer pre-created target's type is a supertype of the requested
+            // target type, createTarget() would return the wrong object — silently corrupting
+            // the model (e.g., MappedActorType pre-created target returned for the principal's
+            // CreateMappedTransferObjectType call because MappedActorType IS-A MappedTransferObjectType).
             clearPreCreatedTarget();
             setInInheritanceExecution(false);
         }

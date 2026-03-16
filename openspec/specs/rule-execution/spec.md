@@ -7,6 +7,8 @@ TBD - created by archiving change fix-execute-parent-rule-guard-regression. Upda
 
 The `executeParentRule()` method in `TransformationContext` SHALL NOT evaluate the target rule's guard. Guard evaluation for `@Extends` inheritance chains is handled separately in `TransformRuleDescriptor.execute()`.
 
+When called with `target=null` from within an active `@Extends` chain, `executeParentRule()` SHALL additionally clear the active inheritance state (`preCreatedTarget` and `inInheritanceExecution`) before invoking the rule, regardless of whether the rule is lazy or non-lazy.
+
 #### Scenario: Direct rule invocation via executeParentRule bypasses guards
 
 **Given** a transformation context with a lazy rule that has a guard
@@ -21,6 +23,16 @@ The `executeParentRule()` method in `TransformationContext` SHALL NOT evaluate t
 **When** the child rule is executed on an element rejected by ParentRule's guard
 **Then** the child rule returns null (execution aborted)
 **Because** guard evaluation happens in `TransformRuleDescriptor.execute()`, not `executeParentRule()`
+
+#### Scenario: executeParentRule with null target inside active @Extends chain clears inheritance state
+
+**Given** a rule is executing inside an `@Extends` chain with `inInheritanceExecution=true`
+**And** `preCreatedTarget` is set to an object of type ActorTarget (a subtype of BaseTarget)
+**When** `executeParentRule("CreateBaseRule", differentSource, null)` is called
+**And** `CreateBaseRule` is a non-lazy rule
+**Then** the inheritance state SHALL be cleared before `CreateBaseRule` executes
+**And** `createTarget(BaseTarget.class)` inside `CreateBaseRule` SHALL return a fresh BaseTarget
+**And** the outer `@Extends` chain's `preCreatedTarget` SHALL be restored after `CreateBaseRule` returns
 
 ### Requirement: Automatic Source Type Inference from Generic Parameters
 
@@ -239,11 +251,12 @@ Guard predicates MUST be pure functions with no observable side effects. The fra
 
 ### Requirement: Deterministic Transformation Output
 
-The transformation framework SHALL produce byte-identical XMI output for the same input model across multiple executions. Rule ordinal assignment, cache iteration order, and all internal state SHALL be deterministic.
+The transformation framework SHALL produce byte-identical XMI output for the same input model across multiple executions **with the same `ExecutionStrategy`**. Rule ordinal assignment, cache iteration order, and all internal state SHALL be deterministic. Different execution strategies (`ELEMENT_BY_ELEMENT` vs `RULE_BY_RULE`) MAY produce different output because the rule-source execution order differs.
 
 #### Scenario: Same input produces identical XMI output
 
 - **GIVEN** an input model M
+- **AND** the same `ExecutionStrategy` is used
 - **WHEN** transformation is executed twice with identical configuration
 - **THEN** the XMI output SHALL be byte-identical
 - **AND** all XMI IDs SHALL be identical
@@ -253,8 +266,17 @@ The transformation framework SHALL produce byte-identical XMI output for the sam
 - **GIVEN** rules A, B, C registered in order A, B, C
 - **AND** transformation produces output O1
 - **WHEN** rules are registered in order C, A, B
-- **AND** transformation is executed again
+- **AND** transformation is executed again with same strategy
 - **THEN** the output SHALL be identical to O1
+
+#### Scenario: Different strategies may produce different output
+
+- **GIVEN** an input model M
+- **WHEN** transformation is executed with `ELEMENT_BY_ELEMENT`
+- **AND** transformation is executed again with `RULE_BY_RULE`
+- **THEN** the outputs MAY differ
+- **BECAUSE** the execution order of rule-source pairs differs between strategies
+- **AND** rules that depend on cross-element outputs from earlier rules will produce different results
 
 ### Requirement: In-Progress Target Cleanup
 
@@ -746,3 +768,51 @@ Transformation code SHALL be able to use `ctx.getElementId(targetElement)` to bu
 **Because** deferred IDs are not yet committed to the XMI resource
 **Therefore** transformation code MUST use `ctx.getElementId()` instead
 
+### Requirement: Metrics counters SHALL be consistent across execution strategies
+
+TransformationMetrics counters (`ruleIterations`, `ruleExecutions`, `guardEvaluations`) SHALL be incremented for every rule iteration, execution, and guard evaluation regardless of execution strategy (ELEMENT_BY_ELEMENT or RULE_BY_RULE).
+
+#### Scenario: RULE_BY_RULE increments ruleIterations
+- **WHEN** a transformation runs with `ExecutionStrategy.RULE_BY_RULE`
+- **AND** the executor iterates over source elements for a rule
+- **THEN** `ruleIterations` SHALL be incremented for each source element checked
+
+#### Scenario: RULE_BY_RULE increments ruleExecutions
+- **WHEN** a rule executes successfully (non-null result) during a RULE_BY_RULE greedy pass
+- **THEN** `ruleExecutions` SHALL be incremented
+
+#### Scenario: ELEMENT_BY_ELEMENT and RULE_BY_RULE produce comparable counter values
+- **WHEN** the same transformation runs with both strategies on identical input
+- **THEN** `ruleExecutions` SHALL be equal
+- **AND** `guardEvaluations` SHALL be equal
+
+### Requirement: equivalent() cache hit and miss counts SHALL sum to total calls
+
+The sum of `equivalentCacheHits` and `equivalentCacheMisses` SHALL NOT exceed `equivalentCalls`. Each call to `equivalent()` SHALL record exactly one of: cache hit OR cache miss (not both, and not multiple misses).
+
+#### Scenario: No double-counting of cache misses in equivalent(source, ruleName)
+- **WHEN** `equivalent(source, ruleName)` is called
+- **AND** the result is not cached and not rejected
+- **THEN** exactly one `recordEquivalentCacheMiss()` SHALL be recorded (not two)
+
+#### Scenario: Rejection cache check does not record additional cache miss
+- **WHEN** `equivalent(source, ruleName)` is called
+- **AND** the source is rejected for that rule
+- **THEN** exactly one `recordEquivalentCacheMiss()` SHALL be recorded
+
+### Requirement: Guard evaluation time SHALL be reported relative to correct parent
+
+Guard evaluation time in the metrics report SHALL be shown as a percentage of `cacheGetOrCreate` time (its actual timing parent), not as a percentage of `greedyRuleNanos` (which excludes guard time).
+
+#### Scenario: Guard time percentage does not exceed 100% of parent
+- **WHEN** a metrics report is generated
+- **THEN** the guard evaluation time percentage SHALL NOT exceed 100% of its reported parent metric
+
+### Requirement: Cache time breakdown SHALL account for all sub-components
+
+The cache time breakdown in the metrics report SHALL subtract both `greedyRuleNanos` and `guardEvaluationNanos` from `cacheGetOrCreateNanos` when computing exclusive cache overhead time.
+
+#### Scenario: Cache UNACCOUNTED is minimized
+- **WHEN** a metrics report is generated
+- **THEN** the cache exclusive time SHALL equal `cacheGetOrCreate - greedyRule - guardEvaluation` (approximately)
+- **AND** the unaccounted percentage SHALL be significantly less than 78%

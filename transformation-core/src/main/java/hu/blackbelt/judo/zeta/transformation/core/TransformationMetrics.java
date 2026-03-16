@@ -38,6 +38,8 @@ public class TransformationMetrics {
     private static final AtomicLong getRulesForSourceCalls = new AtomicLong(0);
     private static final AtomicLong ruleIterations = new AtomicLong(0);
     private static final AtomicLong guardEvaluations = new AtomicLong(0);
+    private static final AtomicLong guardCacheHits = new AtomicLong(0);
+    private static final AtomicLong guardCacheMisses = new AtomicLong(0);
     private static final AtomicLong ruleExecutions = new AtomicLong(0);
     private static final AtomicLong findByXmiIdCalls = new AtomicLong(0);
     private static final AtomicLong findByXmiIdScans = new AtomicLong(0);
@@ -154,6 +156,8 @@ public class TransformationMetrics {
         getRulesForSourceCalls.set(0);
         ruleIterations.set(0);
         guardEvaluations.set(0);
+        guardCacheHits.set(0);
+        guardCacheMisses.set(0);
         ruleExecutions.set(0);
         findByXmiIdCalls.set(0);
         findByXmiIdScans.set(0);
@@ -248,6 +252,22 @@ public class TransformationMetrics {
 
     public static void recordGuardEvaluation() {
         if (enabled) guardEvaluations.incrementAndGet();
+    }
+
+    public static void recordGuardCacheHit() {
+        if (enabled) guardCacheHits.incrementAndGet();
+    }
+
+    public static void recordGuardCacheMiss() {
+        if (enabled) guardCacheMisses.incrementAndGet();
+    }
+
+    public static long getGuardCacheHits() {
+        return guardCacheHits.get();
+    }
+
+    public static long getGuardCacheMisses() {
+        return guardCacheMisses.get();
     }
 
     public static void recordRuleExecution(String ruleName) {
@@ -509,7 +529,12 @@ public class TransformationMetrics {
         sb.append(String.format("  extensionMethod() calls:      %,d\n", extensionMethodCalls.get()));
         sb.append(String.format("  getRulesForSource() calls:    %,d\n", getRulesForSourceCalls.get()));
         sb.append(String.format("  Rule iterations:              %,d\n", ruleIterations.get()));
+        long totalGuardChecks = guardCacheHits.get() + guardCacheMisses.get();
         sb.append(String.format("  Guard evaluations:            %,d\n", guardEvaluations.get()));
+        sb.append(String.format("  Guard cache hits:             %,d (%.1f%%)\n",
+                guardCacheHits.get(), totalGuardChecks > 0 ? 100.0 * guardCacheHits.get() / totalGuardChecks : 0));
+        sb.append(String.format("  Guard cache misses:           %,d (%.1f%%)\n",
+                guardCacheMisses.get(), totalGuardChecks > 0 ? 100.0 * guardCacheMisses.get() / totalGuardChecks : 0));
         sb.append(String.format("  Rule executions:              %,d\n", ruleExecutions.get()));
         sb.append(String.format("  findByXmiId() calls:          %,d\n", findByXmiIdCalls.get()));
         sb.append(String.format("  findByXmiId() scans:          %,d\n", findByXmiIdScans.get()));

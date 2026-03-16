@@ -25,8 +25,6 @@ import org.eclipse.emf.ecore.EObject;
 import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.List;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Metadata descriptor for a transformation rule.
@@ -75,17 +73,6 @@ public class TransformRuleDescriptor {
      */
     private final boolean isEagerExecutable;
 
-    /**
-     * Per-rule cache of source elements rejected by this rule's guard.
-     *
-     * <p>ETL-compatible behavior: Each rule maintains its own rejected set.
-     * When a guard returns false for a source element, it's added to this set.
-     * Subsequent guard evaluations for the same source return false immediately
-     * without re-evaluating the guard.</p>
-     *
-     * <p>Thread-safe for parallel transformations.</p>
-     */
-    private final Set<EObject> rejected = ConcurrentHashMap.newKeySet();
 
     /**
      * Unique integer ordinal assigned at registration time.
@@ -285,40 +272,6 @@ public class TransformRuleDescriptor {
     }
 
     /**
-     * Check if this source element was previously rejected by this rule's guard.
-     *
-     * <p>ETL-compatible behavior: Each rule maintains its own rejected set.
-     * This allows different rules to independently evaluate the same source element.</p>
-     *
-     * @param source the source element to check
-     * @return true if the source was previously rejected by this rule's guard
-     */
-    public boolean wasRejected(EObject source) {
-        return rejected.contains(source);
-    }
-
-    /**
-     * Record that this source element was rejected by this rule's guard.
-     *
-     * <p>Called when the guard evaluates to false. Subsequent guard evaluations
-     * for the same source will return false immediately without re-evaluating.</p>
-     *
-     * @param source the rejected source element
-     */
-    public void recordRejection(EObject source) {
-        rejected.add(source);
-    }
-
-    /**
-     * Clear all rejected elements from this rule's cache.
-     *
-     * <p>Called during executor reset to ensure fresh state for reused executors.</p>
-     */
-    public void clearRejected() {
-        rejected.clear();
-    }
-
-    /**
      * Get the rule's ordinal for O(1) array-indexed cache lookups.
      *
      * @return the ordinal (0 or greater if assigned, -1 if not yet assigned)
@@ -446,18 +399,24 @@ public class TransformRuleDescriptor {
     /**
      * Evaluate the guard for this rule (single-source).
      *
-     * <p>ETL-compatible rejection caching: If this source was previously rejected
-     * by this rule's guard, returns false immediately without re-evaluating.
-     * If the guard fails, the source is recorded as rejected for future calls.</p>
+     * <p>Guard results are cached at the guard-method level in {@code TransformationContext},
+     * keyed by {@code (guardMethod, source)}. Multiple rules sharing the same guard method
+     * will share cached results, avoiding redundant guard evaluations.</p>
      *
      * @param source the source element
      * @param context the transformation context
      * @return true if the guard passes (or no guard), false otherwise
      */
     public boolean evaluateGuard(EObject source, TransformationContext context) {
-        // ETL-compatible: Check rejection cache first
-        if (rejected.contains(source)) {
-            return false;
+        if (guardMethod == null) {
+            return true;
+        }
+
+        // Check guard method cache first
+        Boolean cached = context.getGuardResult(guardMethod, source);
+        if (cached != null) {
+            TransformationMetrics.recordGuardCacheHit();
+            return cached;
         }
 
         TransformGuard guard = getGuard();
@@ -465,11 +424,9 @@ public class TransformRuleDescriptor {
             return true;
         }
 
+        TransformationMetrics.recordGuardCacheMiss();
         boolean result = guard.evaluate(source, context);
-        if (!result) {
-            // Record rejection for future calls (ETL-compatible caching)
-            rejected.add(source);
-        }
+        context.putGuardResult(guardMethod, source, result);
         return result;
     }
 
@@ -501,21 +458,19 @@ public class TransformRuleDescriptor {
             return guard.evaluate(sources, context);
         } else {
             // Fall back to single-source guard with first element
-            // ETL-compatible: rejection caching applies only to single-source guards
             EObject source = sources[0];
 
-            // Check rejection cache first
-            if (rejected.contains(source)) {
-                return false;
+            // Check guard method cache first
+            Boolean cached = context.getGuardResult(guardMethod, source);
+            if (cached != null) {
+                TransformationMetrics.recordGuardCacheHit();
+                return cached;
             }
 
+            TransformationMetrics.recordGuardCacheMiss();
             TransformGuard guard = getGuard();
             boolean result = guard == null || guard.evaluate(source, context);
-
-            if (!result) {
-                // Record rejection for future calls
-                rejected.add(source);
-            }
+            context.putGuardResult(guardMethod, source, result);
             return result;
         }
     }

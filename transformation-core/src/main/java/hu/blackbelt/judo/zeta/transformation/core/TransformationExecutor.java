@@ -352,8 +352,8 @@ public class TransformationExecutor {
         context.clearPendingXmiIds();
         context.clearExecutingLazyRules();
         context.getActivationTracker().clear();
-        // Clear per-rule guard rejection caches (ETL-compatible)
-        registry.clearAllRejectedSets();
+        // Clear guard method cache (guard results are scoped to one transformation run)
+        context.clearGuardResultCache();
         // Clear atomic cache rejection tracking (for getOrCreate pattern)
         context.getElementResolutionCache().clearRejections();
         // Propagate ETL compatibility mode to context for equivalent() calls

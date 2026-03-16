@@ -531,3 +531,173 @@ TransformationHelper.addToResource(targetResource, table);  // Thread-safe
 ```
 
 **Note**: Prefer full migration to `ctx.createTarget()` pattern. Synchronized helpers should be temporary until migration is complete.
+
+---
+
+## Testing Transformation Rules
+
+### Ecore Test Infrastructure
+
+The framework includes comprehensive test infrastructure for transformation testing using Ecore metamodel elements:
+
+#### AbstractEcoreTransformationTest Base Class
+
+```java
+class MyTransformationTest extends AbstractEcoreTransformationTest {
+
+    @Test
+    void testMyTransformation() {
+        // Create source Ecore model
+        EClass person = createEClass("Person");
+        person.getEStructuralFeatures().add(createStringAttribute("name"));
+
+        // Register and execute transformation
+        registry.register(MyTransformation.class);
+        context.setTransformationRegistry(registry);
+
+        TransformationExecutor executor = TransformationExecutor.builder()
+                .registry(registry)
+                .context(context)
+                .parallel(false)
+                .build();
+        executor.transform();
+
+        // Verify results
+        EClass targetPerson = findTargetClassByName("PersonTO");
+        assertNotNull(targetPerson);
+        assertEClassHasAttribute(targetPerson, "name");
+    }
+}
+```
+
+#### RealisticEcoreModelGenerator
+
+Generate realistic test models with configurable complexity:
+
+```java
+// Small model for CI
+var config = RealisticEcoreModelGenerator.Config.builder()
+        .packageCount(1)
+        .classesPerPackage(20)
+        .attributesPerClass(5)
+        .referencesPerClass(3)
+        .inheritanceDepth(3)
+        .seed(42L)  // Deterministic
+        .build();
+
+var generator = new RealisticEcoreModelGenerator(config);
+generator.generate();
+
+var stats = generator.getStatistics();
+// stats: {classCount=20, attributeCount=100, referenceCount=60, ...}
+```
+
+### Bidirectional Reference Handling
+
+Use `@PostExecution` to set up bidirectional references after all transformations complete:
+
+```java
+@TransformationContext(source = EClass.class, target = EClass.class)
+public static class BidirectionalTransformation {
+
+    private static final Map<EReference, EReference> sourceToTargetRef = new HashMap<>();
+
+    @TransformRule(name = "EClassRule")
+    @Transform(type = EClass.class)
+    public TransformFunction<EClass, EClass> eClassRule() {
+        return (source, ctx) -> {
+            EClass target = ctx.createTarget(EClass.class);
+            target.setName(source.getName());
+
+            for (EReference ref : source.getEReferences()) {
+                EReference targetRef = ctx.createTarget(EReference.class);
+                targetRef.setName(ref.getName());
+                targetRef.setEType(ctx.equivalent((EClass) ref.getEType(), EClass.class));
+                target.getEStructuralFeatures().add(targetRef);
+                sourceToTargetRef.put(ref, targetRef);
+            }
+
+            ctx.addToResource(target);
+            return target;
+        };
+    }
+
+    @PostExecution
+    public void setupBidirectionalReferences(TransformationContext ctx) {
+        for (Map.Entry<EReference, EReference> entry : sourceToTargetRef.entrySet()) {
+            EReference sourceRef = entry.getKey();
+            EReference targetRef = entry.getValue();
+
+            if (sourceRef.getEOpposite() != null) {
+                EReference targetOpposite = sourceToTargetRef.get(sourceRef.getEOpposite());
+                if (targetOpposite != null) {
+                    targetRef.setEOpposite(targetOpposite);
+                }
+            }
+        }
+        sourceToTargetRef.clear();
+    }
+}
+```
+
+### Nested Projection with equivalent()
+
+When transforming nested references, ensure referenced elements are processed first:
+
+```java
+@Test
+void testNestedProjection() {
+    // Create Customer BEFORE Order so it's processed first
+    EClass customer = createEClass("Customer");
+    EClass order = createEClass("Order");
+
+    // Order references Customer
+    order.getEStructuralFeatures().add(createEReference("customer", customer));
+
+    // Register transformation
+    registry.register(NestedProjectionTransformation.class);
+    context.setTransformationRegistry(registry);
+
+    executor.transform();
+
+    // equivalent() found CustomerTO when processing Order
+    EClass orderTO = findTargetClassByName("OrderTO");
+    EReference customerRef = findReferenceByName(orderTO, "customer");
+    assertEquals("CustomerTO", ((EClass) customerRef.getEType()).getName());
+}
+```
+
+### Performance Benchmarks
+
+```java
+@Nested
+@Tag("performance")
+class PerformanceBenchmark {
+
+    @Test
+    void benchmarkLargeModel() {
+        var config = RealisticEcoreModelGenerator.Config.scaled(500);
+        var generator = new RealisticEcoreModelGenerator(config);
+        generator.generate();
+
+        long start = System.currentTimeMillis();
+        executor.transform();
+        long duration = System.currentTimeMillis() - start;
+
+        int totalElements = generator.getStatistics().get("totalElements");
+        double throughput = (double) totalElements / duration * 1000.0;
+
+        LOG.info(String.format("Throughput: %.1f elements/sec", throughput));
+        assertTrue(duration < 60000, "Should complete in < 60 seconds");
+    }
+}
+```
+
+### Test Patterns Summary
+
+| Pattern | Test Class | Use Case |
+|---------|------------|----------|
+| Inheritance | `EcoreInheritanceTest` | Abstract classes, multi-level inheritance, feature visibility |
+| Cardinality | `EcoreRelationCardinalityTest` | Single/collection refs, containment, bidirectional |
+| Projection | `EcoreProjectionTest` | Entity→TO, subset attributes, renaming, derived features |
+| Performance | `EcorePerformanceBenchmarkTest` | Throughput, memory, scalability, parallel comparison |
