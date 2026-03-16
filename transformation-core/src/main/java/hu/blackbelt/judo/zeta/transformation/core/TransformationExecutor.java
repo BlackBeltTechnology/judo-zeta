@@ -521,7 +521,7 @@ public class TransformationExecutor {
             }
 
             long duration = System.currentTimeMillis() - startTime;
-            log.info("Transformation completed in {}ms (strategy={}){}",
+            log.debug("Transformation completed in {}ms (strategy={}){}",
                     duration, executionStrategy, useParallel ? " (parallel)" : "");
 
             return new TransformationResult(context, duration);
@@ -600,7 +600,7 @@ public class TransformationExecutor {
             }
 
             long duration = System.currentTimeMillis() - startTime;
-            log.info("Transformation completed in {}ms, processed {} elements (strategy={}){}",
+            log.debug("Transformation completed in {}ms, processed {} elements (strategy={}){}",
                     duration, sourceElements.size(), executionStrategy,
                     useParallel ? " (parallel)" : "");
 

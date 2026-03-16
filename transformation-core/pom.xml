@@ -29,6 +29,7 @@
 						</Import-Package>
 						<Export-Package>
                             hu.blackbelt.judo.zeta.transformation.core;version=${project.version},
+                            hu.blackbelt.judo.zeta.transformation.core.deferred;version=${project.version},
                         </Export-Package>
 					</instructions>
 				</configuration>
