@@ -57,3 +57,6 @@ wercker.env
 .release
 **/.flattened-pom.xml
 
+
+# Auto Claude data directory
+.auto-claude/
