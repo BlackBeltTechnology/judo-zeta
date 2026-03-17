@@ -355,18 +355,6 @@
 			</dependency>
 
 			<dependency>
-				<groupId>hu.blackbelt.epsilon</groupId>
-				<artifactId>epsilon-runtime-osgi</artifactId>
-				<version>${epsilon-runtime-version}</version>
-			</dependency>
-
-	        <dependency>
-	            <groupId>hu.blackbelt.epsilon</groupId>
-	            <artifactId>epsilon-runtime-execution</artifactId>
-	            <version>${epsilon-runtime-version}</version>
-	        </dependency>
-
-			<dependency>
 				<groupId>hu.blackbelt.judo.generator</groupId>
 				<artifactId>judo-generator-commons</artifactId>
 				<version>${judo-generator-commons-version}</version>
