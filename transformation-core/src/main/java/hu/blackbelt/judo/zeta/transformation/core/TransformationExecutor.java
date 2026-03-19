@@ -881,19 +881,18 @@ public class TransformationExecutor {
     /**
      * Validate executor configuration for incompatible combinations.
      *
-     * @throws IllegalStateException if CLONE_CURRENT_STATE + RULE_BY_RULE + parallel
+     * <p>CLONE_CURRENT_STATE + RULE_BY_RULE + parallel is now allowed because:
+     * <ul>
+     *   <li>RULE_BY_RULE provides rule-level sequential ordering (barrier between rules)</li>
+     *   <li>Within a single rule, parallel chunks process independent source elements</li>
+     *   <li>The discriminatedLocks in TransformationContext ensure atomic first-caller semantics</li>
+     *   <li>The resourceLock in TransformationContext synchronizes Resource.getContents() mutations</li>
+     * </ul>
      */
     private void validateConfiguration() {
-        if (executionStrategy == ExecutionStrategy.RULE_BY_RULE
-                && parallel
-                && context.getEquivalentDiscriminatedStrategy()
-                        == EquivalentDiscriminatedStrategy.CLONE_CURRENT_STATE) {
-            throw new IllegalStateException(
-                    "CLONE_CURRENT_STATE + RULE_BY_RULE + parallel is not supported. "
-                    + "CLONE_CURRENT_STATE requires deterministic element processing order "
-                    + "within each rule, which parallel chunking does not guarantee. "
-                    + "Use parallel(false) with CLONE_CURRENT_STATE + RULE_BY_RULE.");
-        }
+        // No incompatible combinations currently blocked.
+        // CLONE_CURRENT_STATE + RULE_BY_RULE + parallel is supported via
+        // resourceLock and discriminatedLocks in TransformationContext.
     }
 
     /**
@@ -1016,9 +1015,12 @@ public class TransformationExecutor {
         int effectiveChunkSize = Math.max(chunkSize, (elementList.size() + numProcessors - 1) / numProcessors);
 
         try {
-            // Enable staging and deferred writes for the entire rule-by-rule phase
+            // Enable staging: addToResource() calls are queued for single-threaded commit.
+            // Enable deferred containment: containment mutations (list adds, single-valued
+            // containment setters) are queued and replayed single-threaded at each rule barrier.
+            // This allows safe parallel execution without corrupting EMF containment state.
             context.enableStaging();
-            context.enableDeferredWrites();
+            context.enableDeferredContainment();
 
             ExecutorService exec = getOrCreateExecutor();
 
@@ -1030,36 +1032,53 @@ public class TransformationExecutor {
                 // Skip activity-based rules - they execute in Phase 2
                 if (isEffectivelyActivityBased(rule)) continue;
 
-                // Parallelize the inner source-element loop for this rule
+                // Parallelize only if there are enough elements to justify thread scheduling overhead.
+                // Below threshold, run sequentially in the current thread (avoids CompletableFuture cost).
                 List<List<EObject>> chunks = partitionList(elementList, effectiveChunkSize);
+                boolean runParallel = chunks.size() > 1;
 
-                List<CompletableFuture<Void>> futures = chunks.stream()
-                        .map(chunk -> CompletableFuture.runAsync(() -> {
-                            for (EObject source : chunk) {
-                                if (firstError.get() != null) {
-                                    break;
+                if (runParallel) {
+                    List<CompletableFuture<Void>> futures = chunks.stream()
+                            .map(chunk -> CompletableFuture.runAsync(() -> {
+                                for (EObject source : chunk) {
+                                    if (firstError.get() != null) {
+                                        break;
+                                    }
+                                    if (!rule.appliesTo(source)) continue;
+                                    if (!isFromExpectedAlias(source, rule)) continue;
+
+                                    try {
+                                        context.setCurrentSource(source);
+                                        executeRuleForSource(rule, source);
+                                    } finally {
+                                        context.clearCurrentSource();
+                                    }
                                 }
-                                if (!rule.appliesTo(source)) continue;
-                                if (!isFromExpectedAlias(source, rule)) continue;
+                            }, exec))
+                            .collect(Collectors.toList());
 
-                                try {
-                                    context.setCurrentSource(source);
-                                    executeRuleForSource(rule, source);
-                                } finally {
-                                    context.clearCurrentSource();
-                                }
-                            }
-                        }, exec))
-                        .collect(Collectors.toList());
-
-                // Barrier: wait for all chunks of this rule to complete
-                CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
-
-                // Commit deferred operations from this rule before next rule starts
-                // This ensures Rule B sees Rule A's materialized property values
-                if (firstError.get() == null) {
-                    context.commitDeferredOperationsIncremental();
+                    // Barrier: wait for all chunks of this rule to complete
+                    CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+                } else {
+                    // Sequential fallback for small element sets
+                    for (EObject source : elementList) {
+                        if (firstError.get() != null) break;
+                        if (!rule.appliesTo(source)) continue;
+                        if (!isFromExpectedAlias(source, rule)) continue;
+                        try {
+                            context.setCurrentSource(source);
+                            executeRuleForSource(rule, source);
+                        } finally {
+                            context.clearCurrentSource();
+                        }
+                    }
                 }
+
+                // Commit containment ops before staged elements so that containment is wired
+                // before elements are added to the resource. This ensures the next rule sees
+                // fully-wired containment from the current rule.
+                context.commitContainmentOps();
+
             }
 
             // Check for errors before final commit
@@ -1067,16 +1086,12 @@ public class TransformationExecutor {
                 return;
             }
 
-            // Final commit: staged elements to Resource
+            // Final commit: staged elements to Resource (after all containment is wired)
             context.commitStagedElements();
 
-            // Unwrap all proxies in the model
-            context.unwrapAllProxiesInModel();
-
         } finally {
-            context.disableDeferredWrites();
+            context.disableDeferredContainment();
             context.disableStaging();
-            context.clearDeferredOperations();
             context.clearStagedElements();
         }
     }

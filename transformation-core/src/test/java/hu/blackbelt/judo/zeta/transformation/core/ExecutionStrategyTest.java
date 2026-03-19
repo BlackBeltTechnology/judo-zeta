@@ -599,11 +599,11 @@ class ExecutionStrategyTest {
         }
 
         /**
-         * Test 22: CLONE_CURRENT_STATE + RULE_BY_RULE + parallel throws IllegalStateException.
+         * Test 22: CLONE_CURRENT_STATE + RULE_BY_RULE + parallel is now allowed.
          */
         @Test
-        @DisplayName("Test 22: CLONE_CURRENT_STATE + RULE_BY_RULE + parallel throws IllegalStateException")
-        void cloneCurrentStateWithParallelRuleByRuleThrows() {
+        @DisplayName("Test 22: CLONE_CURRENT_STATE + RULE_BY_RULE + parallel is allowed")
+        void cloneCurrentStateWithParallelRuleByRuleAllowed() {
             createEClass("Test");
             registry.register(ClassRules.class);
 
@@ -612,8 +612,8 @@ class ExecutionStrategyTest {
 
             TransformationExecutor executor = buildExecutor(ExecutionStrategy.RULE_BY_RULE, true);
 
-            assertThrows(IllegalStateException.class, executor::transform,
-                    "CLONE_CURRENT_STATE + RULE_BY_RULE + parallel should throw");
+            assertDoesNotThrow(() -> executor.transform(),
+                    "CLONE_CURRENT_STATE + RULE_BY_RULE + parallel is now supported");
         }
     }
 

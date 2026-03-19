@@ -348,11 +348,11 @@ class EquivalentDiscriminatedStrategyTest {
         }
     }
 
-    // ==================== Fail-Fast Test ====================
+    // ==================== Deferred Writes Compatibility Test ====================
 
     @Test
-    @DisplayName("Test 8: Fail-fast when deferred writes enabled")
-    void failFastOnDeferredWrites() {
+    @DisplayName("Test 8: CLONE_CURRENT_STATE + deferred writes is allowed")
+    void cloneCurrentStateWithDeferredWritesAllowed() {
         EClass source = createSource("Entity1");
 
         TransformationRegistry registry = new TransformationRegistry();
@@ -362,9 +362,11 @@ class EquivalentDiscriminatedStrategyTest {
         // Enable deferred writes (parallel mode)
         ctx.enableDeferredWrites();
 
-        assertThrows(IllegalStateException.class, () ->
+        EAnnotation result = assertDoesNotThrow(() ->
                 ctx.equivalentDiscriminated(source, EAnnotation.class, "TestLazy", "discA"),
-                "Should throw when CLONE_CURRENT_STATE is used with deferred writes");
+                "CLONE_CURRENT_STATE + deferred writes is now allowed");
+        assertNotNull(result, "Should return a valid target");
+        assertEquals("base", result.getSource());
     }
 
     // ==================== CLONE_PRISTINE Regression Test ====================

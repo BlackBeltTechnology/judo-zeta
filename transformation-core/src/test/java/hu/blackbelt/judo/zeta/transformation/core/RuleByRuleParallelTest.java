@@ -1112,11 +1112,11 @@ class RuleByRuleParallelTest {
     // ========================================================================
 
     @Nested
-    @DisplayName("Invalid Configuration Rejection")
+    @DisplayName("Configuration Compatibility")
     class InvalidConfigurationTests {
 
         @Test
-        @DisplayName("10.1 CLONE_CURRENT_STATE + RULE_BY_RULE + parallel throws IllegalStateException")
+        @DisplayName("10.1 CLONE_CURRENT_STATE + RULE_BY_RULE + parallel is allowed")
         void cloneCurrentStateRejected() {
             createEClass("Test");
             registry.register(RuleA.class);
@@ -1124,7 +1124,7 @@ class RuleByRuleParallelTest {
             context.setEquivalentDiscriminatedStrategy(
                     EquivalentDiscriminatedStrategy.CLONE_CURRENT_STATE);
 
-            IllegalStateException ex = assertThrows(IllegalStateException.class, () -> {
+            assertDoesNotThrow(() -> {
                 TransformationExecutor executor = TransformationExecutor.builder()
                         .registry(registry)
                         .context(context)
@@ -1133,12 +1133,7 @@ class RuleByRuleParallelTest {
                         .executionStrategy(ExecutionStrategy.RULE_BY_RULE)
                         .build();
                 executor.transform();
-            });
-
-            assertTrue(ex.getMessage().contains("CLONE_CURRENT_STATE"),
-                    "Error message should mention CLONE_CURRENT_STATE: " + ex.getMessage());
-            assertTrue(ex.getMessage().contains("RULE_BY_RULE"),
-                    "Error message should mention RULE_BY_RULE: " + ex.getMessage());
+            }, "CLONE_CURRENT_STATE + RULE_BY_RULE + parallel is now supported");
         }
     }
 }

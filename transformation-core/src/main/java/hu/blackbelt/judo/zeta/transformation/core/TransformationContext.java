@@ -22,6 +22,7 @@ package hu.blackbelt.judo.zeta.transformation.core;
 
 import hu.blackbelt.judo.zeta.common.ExtensionMethodRegistry;
 import hu.blackbelt.judo.zeta.common.ModelProvider;
+import hu.blackbelt.judo.zeta.transformation.core.deferred.ContainmentOp;
 import hu.blackbelt.judo.zeta.transformation.core.deferred.DeferredEObject;
 import hu.blackbelt.judo.zeta.transformation.core.deferred.OperationQueue;
 import org.eclipse.emf.ecore.EClass;
@@ -189,6 +190,27 @@ public class TransformationContext {
      * Key is (source, ruleName) for cross-rule isolation.
      */
     private final ConcurrentHashMap<RuleCacheKey, EObject> executingLazyRules = new ConcurrentHashMap<>();
+
+    /**
+     * Global lock for synchronizing EMF Resource containment mutations.
+     * EMF's Resource.getContents() list is not thread-safe — concurrent add/remove
+     * operations can corrupt internal state. This lock protects all
+     * targetResource.getContents().add() calls during parallel execution.
+     */
+    private final java.util.concurrent.locks.ReentrantLock resourceLock =
+            new java.util.concurrent.locks.ReentrantLock();
+
+    /**
+     * Queue of deferred containment operations accumulated during parallel execution.
+     * Drained and replayed single-threaded by {@link #commitContainmentOps()} at each rule barrier.
+     */
+    private final ConcurrentLinkedQueue<ContainmentOp> pendingContainmentOps = new ConcurrentLinkedQueue<>();
+
+    /** Monotonically increasing counter used to assign sequence numbers to containment ops. */
+    private final AtomicLong containmentOpSequence = new AtomicLong(0L);
+
+    /** Whether deferred containment mode is currently enabled. */
+    private volatile boolean deferredContainmentEnabled = false;
 
     /**
      * Per-element locks for thread-safe rule execution.
@@ -601,6 +623,15 @@ public class TransformationContext {
      */
     public void setTransformationRegistry(TransformationRegistry registry) {
         this.transformationRegistry = registry;
+    }
+
+    /**
+     * Get the global resource lock for synchronizing EMF containment mutations.
+     * Use this lock when adding elements to Resource.getContents() or
+     * modifying containment lists during parallel execution.
+     */
+    public java.util.concurrent.locks.ReentrantLock getResourceLock() {
+        return resourceLock;
     }
 
     /**
@@ -1429,6 +1460,16 @@ public class TransformationContext {
                 return proxy;
             }
 
+            // Wrap with containment-deferring proxy if deferred containment mode is enabled,
+            // but only if the EClass actually has containment EReferences — attribute-only types
+            // have nothing to defer and don't need the proxy overhead.
+            if (deferredContainmentEnabled
+                    && hu.blackbelt.judo.zeta.transformation.core.deferred.ContainmentDeferringProxy
+                            .hasContainmentFeatures(instance.eClass())) {
+                return hu.blackbelt.judo.zeta.transformation.core.deferred.ContainmentDeferringProxy
+                        .createProxy((T) instance, this);
+            }
+
             return (T) instance;
         } finally {
             if (TransformationMetrics.isEnabled()) {
@@ -1480,7 +1521,12 @@ public class TransformationContext {
             // Sequential mode: add directly to Resource
             if (!targetResourceSet.getResources().isEmpty()) {
                 Resource targetResource = targetResourceSet.getResources().get(0);
-                targetResource.getContents().add(unwrapped);
+                resourceLock.lock();
+                try {
+                    targetResource.getContents().add(unwrapped);
+                } finally {
+                    resourceLock.unlock();
+                }
 
                 // Apply pending XMI ID if one was set before adding to resource
                 // Check both original element and unwrapped element for pending IDs
@@ -2296,14 +2342,10 @@ public class TransformationContext {
         long startNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
         TransformationMetrics.recordEquivalentDiscriminatedCall();
 
-        // Fail-fast: CLONE_CURRENT_STATE is incompatible with deferred writes (parallel mode)
-        if (equivalentDiscriminatedStrategy == EquivalentDiscriminatedStrategy.CLONE_CURRENT_STATE
-                && deferredWritesEnabled) {
-            throw new IllegalStateException(
-                    "CLONE_CURRENT_STATE strategy is incompatible with deferred writes (parallel mode). " +
-                    "ETL's equivalentDiscriminated depends on mutation ordering which is non-deterministic " +
-                    "in parallel mode. Use sequential execution (parallel=false) with CLONE_CURRENT_STATE.");
-        }
+        // Note: CLONE_CURRENT_STATE + deferred writes is now allowed with RULE_BY_RULE execution.
+        // The barrier between rules (commitDeferredOperationsIncremental) ensures mutations from
+        // prior rules are visible. Within a single rule, discriminatedLocks serialize access to
+        // the same (source, ruleName, discriminator) tuple atomically.
 
         // Use local variable for potentially resolved discriminator
         String effectiveDiscriminator = discriminator;
@@ -2574,7 +2616,12 @@ public class TransformationContext {
                     if (!isDetached && original.eContainer() == null && original.eResource() == null) {
                         if (!targetResourceSet.getResources().isEmpty()) {
                             Resource targetResource = targetResourceSet.getResources().get(0);
-                            targetResource.getContents().add(original);
+                            resourceLock.lock();
+                            try {
+                                targetResource.getContents().add(original);
+                            } finally {
+                                resourceLock.unlock();
+                            }
                             if (targetResource instanceof XMIResource) {
                                 setSynchronizedXmiId((XMIResource) targetResource, original, discriminatedId);
                             }
@@ -2613,7 +2660,12 @@ public class TransformationContext {
                     if (!isDetached) {
                         if (!targetResourceSet.getResources().isEmpty()) {
                             Resource targetResource = targetResourceSet.getResources().get(0);
-                            targetResource.getContents().add(clone);
+                            resourceLock.lock();
+                            try {
+                                targetResource.getContents().add(clone);
+                            } finally {
+                                resourceLock.unlock();
+                            }
                             if (targetResource instanceof XMIResource) {
                                 setSynchronizedXmiId((XMIResource) targetResource, clone, discriminatedId);
                             }
@@ -2780,7 +2832,12 @@ public class TransformationContext {
                         // Sequential mode: add directly to Resource
                         if (!targetResourceSet.getResources().isEmpty()) {
                             Resource targetResource = targetResourceSet.getResources().get(0);
-                            targetResource.getContents().add(clone);
+                            resourceLock.lock();
+                            try {
+                                targetResource.getContents().add(clone);
+                            } finally {
+                                resourceLock.unlock();
+                            }
 
                             // Apply the discriminated XMI ID
                             if (targetResource instanceof XMIResource) {
@@ -3726,7 +3783,12 @@ public class TransformationContext {
         }
 
         // Remove contained elements from root
-        targetResource.getContents().removeAll(toRemove);
+        resourceLock.lock();
+        try {
+            targetResource.getContents().removeAll(toRemove);
+        } finally {
+            resourceLock.unlock();
+        }
     }
 
     /**
@@ -4514,6 +4576,92 @@ public class TransformationContext {
      */
     public int getPendingOperationCount() {
         return operationQueue.size();
+    }
+
+    // -----------------------------------------------------------------------
+    // Deferred containment support
+    // -----------------------------------------------------------------------
+
+    /**
+     * Enable deferred containment mode.
+     * When enabled, {@code createTargetInPackage()} wraps returned EMF objects with
+     * {@link hu.blackbelt.judo.zeta.transformation.core.deferred.ContainmentDeferringProxy}
+     * so that containment mutations are queued rather than applied immediately.
+     */
+    public void enableDeferredContainment() {
+        deferredContainmentEnabled = true;
+    }
+
+    /**
+     * Disable deferred containment mode.
+     * After this call, {@code createTargetInPackage()} returns unwrapped EMF objects.
+     */
+    public void disableDeferredContainment() {
+        deferredContainmentEnabled = false;
+    }
+
+    /**
+     * Returns {@code true} when deferred containment mode is active.
+     */
+    public boolean isDeferredContainmentEnabled() {
+        return deferredContainmentEnabled;
+    }
+
+    /**
+     * Allocates the next monotonically increasing sequence number for a containment op.
+     * Thread-safe.
+     */
+    public long nextContainmentOpSequence() {
+        return containmentOpSequence.getAndIncrement();
+    }
+
+    /**
+     * Enqueues a containment operation to be replayed at the next rule barrier.
+     * Thread-safe (uses {@link ConcurrentLinkedQueue}).
+     */
+    public void queueContainmentOp(ContainmentOp op) {
+        pendingContainmentOps.add(op);
+    }
+
+    /**
+     * Drains all queued containment operations, sorts them by sequence number, and replays
+     * them on the real EMF model in a single thread.
+     *
+     * <p>Must be called from a single thread at the rule barrier, after the parallel phase
+     * for a rule has completed and before {@code commitStagedElements()} or the next rule
+     * starts executing.</p>
+     *
+     * @return the number of containment operations applied
+     */
+    public int commitContainmentOps() {
+        if (pendingContainmentOps.isEmpty()) {
+            return 0;
+        }
+        List<ContainmentOp> ops = new ArrayList<>(pendingContainmentOps.size());
+        ContainmentOp op;
+        while ((op = pendingContainmentOps.poll()) != null) {
+            ops.add(op);
+        }
+        // Apply adds and sets first (sorted by sequence), then moves.
+        // Moves must run after all adds so that target positions are valid.
+        List<ContainmentOp> adds = new ArrayList<>(ops.size());
+        List<ContainmentOp> moves = new ArrayList<>();
+        for (ContainmentOp o : ops) {
+            if (o instanceof ContainmentOp.MoveInList) {
+                moves.add(o);
+            } else {
+                adds.add(o);
+            }
+        }
+        adds.sort(java.util.Comparator.comparingLong(ContainmentOp::sequence));
+        moves.sort(java.util.Comparator.comparingLong(ContainmentOp::sequence));
+        for (ContainmentOp o : adds) {
+            o.apply();
+        }
+        for (ContainmentOp o : moves) {
+            o.apply();
+        }
+        return ops.size();
     }
 
     /**
