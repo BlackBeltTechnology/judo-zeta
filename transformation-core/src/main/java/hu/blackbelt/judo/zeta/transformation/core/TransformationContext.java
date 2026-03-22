@@ -1353,6 +1353,45 @@ public class TransformationContext {
     }
 
     /**
+     * Create a target element with an XMI ID derived from a source element and a suffix.
+     *
+     * <p>Builds the XMI ID as {@code {sourcePath}/{suffix}} where {@code sourcePath}
+     * is resolved from the source element's registered resource alias and XMI ID.
+     * For example, if the source resource was registered as "psm" and the source element
+     * has XMI ID "_abc123", calling {@code createTarget(EClass.class, source, "EntityClass")}
+     * produces an element with XMI ID {@code (psm/_abc123)/EntityClass}.</p>
+     *
+     * @param targetType the type of element to create
+     * @param source the source element whose resource alias and XMI ID form the ID prefix
+     * @param suffix the ETL-compatible rule name suffix for the ID
+     * @param <T> the target type
+     * @return the created element with source-based ID
+     * @see #createTarget(Class, String)
+     * @see #buildSourceBasedId(EObject, String)
+     */
+    public <T extends EObject> T createTarget(Class<T> targetType, EObject source, String suffix) {
+        String customId = buildSourceBasedId(source, suffix);
+        return createTarget(targetType, customId);
+    }
+
+    /**
+     * Build a source-based XMI ID string without creating any element.
+     *
+     * <p>Returns {@code {sourcePath}/{suffix}} where {@code sourcePath} is resolved
+     * from the source element's registered resource alias and XMI ID. Use this method
+     * with {@link #setElementId(EObject, String)} for inline elements that are created
+     * by EMF factories rather than {@link #createTarget(Class)}.</p>
+     *
+     * @param source the source element whose resource alias and XMI ID form the ID prefix
+     * @param suffix the ETL-compatible rule name suffix for the ID
+     * @return the constructed ID string
+     * @see #createTarget(Class, EObject, String)
+     */
+    public String buildSourceBasedId(EObject source, String suffix) {
+        return getSourcePath(source) + "/" + suffix;
+    }
+
+    /**
      * Internal method to create a target element in a specific package.
      *
      * <p>ETL semantics (default): Elements are NOT added to resource root automatically.
@@ -1382,6 +1421,22 @@ public class TransformationContext {
             if (Boolean.TRUE.equals(inInheritanceExecution.get())) {
                 EObject preCreated = preCreatedTarget.get();
                 if (preCreated != null && targetType.isInstance(preCreated)) {
+                    // Increment the rule instance counter so subsequent createTarget() calls
+                    // in the same rule generate unique IDs (not the base ID which would collide
+                    // with the pre-created target's ID after it gets overwritten by customId).
+                    EObject source = currentSource.get();
+                    TransformRuleDescriptor rule = currentExecutingRule.get();
+                    if (rule != null && useStructuredIds) {
+                        String ruleName = rule.getName();
+                        String typeName = targetType.getSimpleName();
+                        String ruleKey = String.format("%d_%s",
+                                source != null ? System.identityHashCode(source) : 0,
+                                ruleName);
+                        String typeKey = ruleKey + "_" + typeName;
+                        Map<String, Integer> counters = ruleInstanceCounters.get();
+                        counters.merge(ruleKey, 1, Integer::sum);
+                        counters.merge(typeKey, 1, Integer::sum);
+                    }
                     return targetType.cast(preCreated);
                 }
             }
@@ -2332,12 +2387,41 @@ public class TransformationContext {
      * @param <T> the target type
      * @return the discriminated target, or null if no matching rule found
      */
-    @SuppressWarnings("unchecked")
     public <T extends EObject> T equivalentDiscriminated(
             EObject source,
             Class<T> targetType,
             String ruleName,
             String discriminator
+    ) {
+        return equivalentDiscriminated(source, targetType, ruleName, discriminator, null);
+    }
+
+    /**
+     * Get a discriminated equivalent with an optional explicit XMI ID override.
+     *
+     * <p>Behaves identically to the 4-argument overload when {@code customId} is null.
+     * When {@code customId} is non-null, the clone (or original in CLONE_CURRENT_STATE mode)
+     * receives the specified ID instead of the generated discriminated ID.</p>
+     *
+     * <p>This enables callers to produce clones with specific XMI IDs, e.g., to match
+     * ETL-produced IDs for inherited operation fault parameter types where the ID must
+     * be based on the child ClassType's ID rather than the standard structured ID.</p>
+     *
+     * @param source the source element
+     * @param targetType the expected target type
+     * @param ruleName the rule name (triggers this specific rule, not just any matching rule)
+     * @param discriminator the discriminator value
+     * @param customId explicit XMI ID for the clone, or null to use generated discriminated ID
+     * @param <T> the target type
+     * @return the discriminated target, or null if no matching rule found
+     */
+    @SuppressWarnings("unchecked")
+    public <T extends EObject> T equivalentDiscriminated(
+            EObject source,
+            Class<T> targetType,
+            String ruleName,
+            String discriminator,
+            String customId
     ) {
         long startNanos = TransformationMetrics.isEnabled() ? System.nanoTime() : 0;
         TransformationMetrics.recordEquivalentDiscriminatedCall();
@@ -2383,10 +2467,9 @@ public class TransformationContext {
                 }
             }
 
-            // When structured IDs are enabled, use XMI ID-based lookup first (ETL semantics)
-            if (useStructuredIds && effectiveDiscriminator != null) {
-                String baseId = generateStructuredId(source, ruleName);
-                String discriminatedId = generateDiscriminatedId(baseId, effectiveDiscriminator);
+            // When structured IDs are enabled (or customId is provided), use XMI ID-based lookup first
+            if ((useStructuredIds || customId != null) && effectiveDiscriminator != null) {
+                String discriminatedId = resolveDiscriminatedId(customId, source, ruleName, effectiveDiscriminator, null);
 
                 // Look up by XMI ID in target resource
                 T existing = findByXmiId(discriminatedId, targetType);
@@ -2593,17 +2676,20 @@ public class TransformationContext {
 
                 if (firstCallResult.isFirstCall()) {
                     // FIRST CALLER: Return the original directly (no cloning)
-                    // Store the base ID before we modify it with the discriminator suffix
-                    String baseId;
-                    if (useStructuredIds) {
-                        baseId = generateStructuredId(source, ruleName);
-                    } else {
-                        baseId = getElementId(original);
-                    }
-                    originalTracker.registerBaseId(source, ruleName, baseId);
-
-                    String discriminatedId = generateDiscriminatedId(baseId, effectiveDiscriminator);
+                    String discriminatedId = resolveDiscriminatedId(customId, source, ruleName, effectiveDiscriminator, original);
                     setElementId(original, discriminatedId);
+
+                    // Store the base ID for subsequent callers (only when not using customId,
+                    // since customId callers provide their own IDs)
+                    if (customId == null) {
+                        String baseId;
+                        if (useStructuredIds) {
+                            baseId = generateStructuredId(source, ruleName);
+                        } else {
+                            baseId = getElementId(original);
+                        }
+                        originalTracker.registerBaseId(source, ruleName, baseId);
+                    }
 
                     // Add original to resource if not @Detached and not already contained
                     // In CLONE_CURRENT_STATE mode, inDiscriminatedExecution is NOT set, so
@@ -2647,9 +2733,14 @@ public class TransformationContext {
                         elementCreatingRule.put(clone, originalCreatingRule);
                     }
 
-                    // Generate discriminated ID for the clone using stored base ID
-                    String baseId = originalTracker.getBaseId(source, ruleName);
-                    String discriminatedId = generateDiscriminatedId(baseId, effectiveDiscriminator);
+                    // Generate discriminated ID for the clone
+                    String discriminatedId;
+                    if (customId != null) {
+                        discriminatedId = customId;
+                    } else {
+                        String baseId = originalTracker.getBaseId(source, ruleName);
+                        discriminatedId = generateDiscriminatedId(baseId, effectiveDiscriminator);
+                    }
                     setElementId(clone, discriminatedId);
 
                     // Add clone to resource (check @Detached)
@@ -2690,14 +2781,7 @@ public class TransformationContext {
             // This prevents orphan elements - no unused "original" left behind.
             if (useDiscriminatorOnlyCache) {
                 // Generate discriminated ID for the original
-                String discriminatedId;
-                if (useStructuredIds) {
-                    String baseId = generateStructuredId(source, ruleName);
-                    discriminatedId = generateDiscriminatedId(baseId, effectiveDiscriminator);
-                } else {
-                    String baseId = getElementId(original);
-                    discriminatedId = baseId + "/(discriminator/" + effectiveDiscriminator + ")";
-                }
+                String discriminatedId = resolveDiscriminatedId(customId, source, ruleName, effectiveDiscriminator, original);
 
                 // Update the original's ID to the discriminated ID
                 // This is safe because the original was just created by the rule - no external
@@ -2798,15 +2882,8 @@ public class TransformationContext {
 
                 // Generate discriminated ID following ETL semantics
                 // Format: <source-path>/<rule-name>/(discriminator/<discriminator-value>)
-                String discriminatedId;
-                if (useStructuredIds) {
-                    String baseId = generateStructuredId(source, ruleName);
-                    discriminatedId = generateDiscriminatedId(baseId, effectiveDiscriminator);
-                } else {
-                    // Legacy: append discriminator to whatever ID the original has
-                    String baseId = getElementId(original);
-                    discriminatedId = baseId + "/(discriminator/" + effectiveDiscriminator + ")";
-                }
+                // When customId is provided, it overrides the generated ID
+                String discriminatedId = resolveDiscriminatedId(customId, source, ruleName, effectiveDiscriminator, original);
                 setElementId(clone, discriminatedId);
 
                 // Check if the rule is @Detached - detached rules don't add to Resource
@@ -4332,6 +4409,40 @@ public class TransformationContext {
      * @param discriminator the discriminator value
      * @return the discriminated ID
      */
+    /**
+     * Resolve the discriminated ID for a clone/original element.
+     *
+     * <p>When {@code customId} is non-null, it is used directly as the element's XMI ID,
+     * bypassing the standard {@code generateDiscriminatedId()} computation. This enables
+     * callers of {@code equivalentDiscriminated()} to produce clones with specific XMI IDs
+     * (e.g., to match ETL-produced IDs for inherited operation faults).</p>
+     *
+     * @param customId explicit XMI ID override, or null to use standard generation
+     * @param source the source element (used for structured ID generation)
+     * @param ruleName the rule name (used for structured ID generation)
+     * @param discriminator the discriminator value
+     * @param original the original target element (used for legacy non-structured ID fallback, may be null)
+     * @return the resolved discriminated ID
+     */
+    private String resolveDiscriminatedId(String customId, EObject source, String ruleName,
+                                           String discriminator, EObject original) {
+        if (customId != null) {
+            return customId;
+        }
+        if (useStructuredIds) {
+            String baseId = generateStructuredId(source, ruleName);
+            return generateDiscriminatedId(baseId, discriminator);
+        }
+        // Legacy fallback: append discriminator to original's current ID
+        if (original != null) {
+            String baseId = getElementId(original);
+            return baseId + "/(discriminator/" + discriminator + ")";
+        }
+        // Safety: if original is null and structured IDs are off, fall back to structured
+        String baseId = generateStructuredId(source, ruleName);
+        return generateDiscriminatedId(baseId, discriminator);
+    }
+
     String generateDiscriminatedId(String baseId, String discriminator) {
         if (discriminator == null || discriminator.isEmpty()) {
             return baseId;
