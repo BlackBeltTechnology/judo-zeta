@@ -97,18 +97,18 @@ the CI pipeline.
 ## Detailed documentation (agent-docs/)
 
 **Start with `agent-docs/INDEX.md`** — it has a decision tree for which file to read.
+Per-file detail for that directory lives in `agent-docs/AGENTS.md`, not here; the
+reading order is:
 
-| File | When to Read |
-|------|--------------|
-| `agent-docs/QUICK-REF.md` | **Always start here** — covers 90% of transformation tasks |
-| `agent-docs/ANNOTATIONS.md` | Need annotation details for transformation rules |
-| `agent-docs/CONTEXT-API.md` | Working with `TransformationContext` methods |
-| `agent-docs/EXECUTION.md` | Execution flow, parallel mode, staging, deferred writes |
-| `agent-docs/GUARD_CACHE.md` | `@Guard` evaluation and `@Cached` memoisation semantics |
-| `agent-docs/PATTERNS.md` | Complex patterns: inheritance, multi-source, lazy, thread-safety |
-| `agent-docs/MIGRATION.md` | Migrating ETL → Zeta transformations |
-| `agent-docs/MIGRATION-EVL.md` | Migrating EVL → Zeta validations |
-| `agent-docs/TROUBLESHOOTING.md` | Debugging transformation/validation issues |
+- **`QUICK-REF.md` first** — it covers ~90% of transformation tasks on its own.
+- **Writing rules:** `ANNOTATIONS.md` for the annotation vocabulary, `CONTEXT-API.md`
+  for the `TransformationContext` method surface, `PATTERNS.md` for the harder shapes
+  (inheritance, multi-source, lazy resolution, thread-safety).
+- **Runtime semantics:** `EXECUTION.md` for execution flow, parallel mode, staging and
+  deferred writes; `GUARD_CACHE.md` for `@Guard` evaluation and `@Cached` memoisation.
+- **Porting off Epsilon:** `MIGRATION.md` (ETL → Zeta transformations) and
+  `MIGRATION-EVL.md` (EVL → Zeta validations).
+- **When it misbehaves:** `TROUBLESHOOTING.md`.
 
 ## Validation framework summary
 
