@@ -35,6 +35,7 @@ For developers familiar with Epsilon Transformation Language:
 - [Overview](etl-comparison/overview.md) - High-level differences and similarities
 - [Syntax Mapping](etl-comparison/syntax-mapping.md) - ETL constructs to Zeta equivalents
 - [Migration Guide](etl-comparison/migration-guide.md) - Step-by-step migration from ETL
+- [Dual-Engine Testing](etl-comparison/dual-engine-testing.md) - Testing framework for ETL/Zeta equivalence
 - [Feature Parity](etl-comparison/feature-parity.md) - What's supported and what's not
 
 ### Real-World Examples

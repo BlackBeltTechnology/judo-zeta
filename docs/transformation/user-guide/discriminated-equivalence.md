@@ -2,6 +2,8 @@
 
 **Navigation**: [Documentation Hub](../../index.md) > [Transformation](../index.md) > [User Guide](core-concepts.md) > Discriminated Equivalence
 
+> **Note**: Discriminated equivalence is a **Zeta-specific extension**, not part of the original Epsilon ETL specification. It was designed as a workaround for scenarios where multiple target elements need to be created from a single source element, which ETL handles differently using multiple target declarations in a single rule.
+
 Discriminated equivalence allows creating multiple distinct target elements from the same source element.
 
 ## equivalentDiscriminated()
@@ -58,19 +60,37 @@ public TransformFunction<Relation, Void> relation2Operations() {
 }
 ```
 
-## ID Generation
+## Structured XMI ID Generation
 
-Discriminated elements get unique IDs based on the discriminator:
+When `useStructuredIds` is enabled (default), discriminated elements get ETL-style structured XMI IDs:
 
 ```
-Base ID: relation-customer-orders
+Format: <source-name>/(<alias>/<source-id>)/<rule-name>/(discriminator/<discriminator-value>)
 
-Discriminated IDs:
-  relation-customer-orders/(discriminator/create)
-  relation-customer-orders/(discriminator/read)
-  relation-customer-orders/(discriminator/update)
-  relation-customer-orders/(discriminator/delete)
+Example for relation "orders" in "esm" resource:
+  Customer/(esm/_abc123)/RelationOperation/(discriminator/create)
+  Customer/(esm/_abc123)/RelationOperation/(discriminator/read)
+  Customer/(esm/_abc123)/RelationOperation/(discriminator/update)
+  Customer/(esm/_abc123)/RelationOperation/(discriminator/delete)
 ```
+
+The `<alias>` is the registered resource alias (e.g., "esm", "asm", "mapping", "source").
+
+### XMI ID-based Lookup
+
+When calling `equivalentDiscriminated()`, ZETA first looks up elements by their structured XMI ID:
+
+```java
+// First call creates element with ID: Customer/(esm/_abc123)/RelOp/(discriminator/create)
+Operation create = ctx.equivalentDiscriminated(rel, Operation.class, "RelOp", "create");
+
+// Second call finds existing element by XMI ID lookup
+Operation sameCreate = ctx.equivalentDiscriminated(rel, Operation.class, "RelOp", "create");
+
+assert create == sameCreate;  // Same instance found by XMI ID
+```
+
+This enables cross-phase element discovery and ensures elements created in earlier transformation phases are found correctly.
 
 ## Cache Structure
 

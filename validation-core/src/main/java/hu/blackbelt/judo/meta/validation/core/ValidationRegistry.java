@@ -87,7 +87,8 @@ public class ValidationRegistry {
                         constraint.name(),
                         constraint.message(),
                         Severity.ERROR,
-                        contextType
+                        contextType,
+                        constraint.resourceAlias()
                     );
                 } else if (critique != null) {
                     registerRule(
@@ -96,7 +97,8 @@ public class ValidationRegistry {
                         critique.name(),
                         critique.message(),
                         Severity.WARNING,
-                        contextType
+                        contextType,
+                        critique.resourceAlias()
                     );
                 }
 
@@ -137,7 +139,8 @@ public class ValidationRegistry {
         String name,
         String message,
         Severity severity,
-        Class<? extends EObject> contextType
+        Class<? extends EObject> contextType,
+        String resourceAlias
     ) {
         // Find guard method if specified
         hu.blackbelt.judo.zeta.annotation.Guard guardAnnotation =
@@ -181,7 +184,8 @@ public class ValidationRegistry {
             severity,
             contextType,
             guardMethod,
-            dependencies
+            dependencies,
+            resourceAlias
         );
 
         validators
@@ -199,7 +203,8 @@ public class ValidationRegistry {
     public Collection<ValidatorDescriptor> getValidatorsFor(
         Class<? extends EObject> eClass
     ) {
-        List<ValidatorDescriptor> result = new ArrayList<>();
+        // Use LinkedHashSet to preserve order while avoiding duplicates
+        Set<ValidatorDescriptor> result = new LinkedHashSet<>();
 
         // Get validators for this exact type
         result.addAll(validators.getOrDefault(eClass, Collections.emptyList()));
@@ -216,21 +221,26 @@ public class ValidationRegistry {
         }
 
         // Get validators for all interfaces (recursively)
-        collectInterfaceValidators(eClass, result);
+        // Use a Set to track visited classes to avoid processing the same class multiple times
+        Set<Class<?>> visited = new HashSet<>();
+        collectInterfaceValidators(eClass, result, visited);
 
-        return result;
+        return new ArrayList<>(result);
     }
 
     /**
      * Recursively collect validators for all interfaces implemented by a class.
+     * Uses a visited set to prevent processing the same interface multiple times.
      */
     private void collectInterfaceValidators(
         Class<?> clazz,
-        List<ValidatorDescriptor> result
+        Set<ValidatorDescriptor> result,
+        Set<Class<?>> visited
     ) {
-        if (clazz == null) {
+        if (clazz == null || visited.contains(clazz)) {
             return;
         }
+        visited.add(clazz);
 
         // Check direct interfaces
         for (Class<?> iface : clazz.getInterfaces()) {
@@ -239,12 +249,12 @@ public class ValidationRegistry {
                     validators.getOrDefault(iface, Collections.emptyList())
                 );
                 // Recursively check interfaces extended by this interface
-                collectInterfaceValidators(iface, result);
+                collectInterfaceValidators(iface, result, visited);
             }
         }
 
         // Also check interfaces from superclass
-        collectInterfaceValidators(clazz.getSuperclass(), result);
+        collectInterfaceValidators(clazz.getSuperclass(), result, visited);
     }
 
     /**

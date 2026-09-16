@@ -40,6 +40,7 @@ public class ValidatorDescriptor {
     private final Class<? extends EObject> contextType;
     private final Method guardMethod;
     private final List<String> satisfiesDependencies;
+    private final String resourceAlias;
     private ValidationRule cachedRule;
     private Guard cachedGuard;
 
@@ -53,6 +54,21 @@ public class ValidatorDescriptor {
         Method guardMethod,
         List<String> satisfiesDependencies
     ) {
+        this(instance, ruleMethod, name, message, severity, contextType, guardMethod,
+                satisfiesDependencies, "source");
+    }
+
+    public ValidatorDescriptor(
+        Object instance,
+        Method ruleMethod,
+        String name,
+        String message,
+        Severity severity,
+        Class<? extends EObject> contextType,
+        Method guardMethod,
+        List<String> satisfiesDependencies,
+        String resourceAlias
+    ) {
         this.instance = instance;
         this.ruleMethod = ruleMethod;
         this.name = name;
@@ -61,6 +77,7 @@ public class ValidatorDescriptor {
         this.contextType = contextType;
         this.guardMethod = guardMethod;
         this.satisfiesDependencies = satisfiesDependencies;
+        this.resourceAlias = resourceAlias != null ? resourceAlias : "source";
 
         ruleMethod.setAccessible(true);
         if (guardMethod != null) {
@@ -86,6 +103,15 @@ public class ValidatorDescriptor {
 
     public List<String> getSatisfiesDependencies() {
         return satisfiesDependencies;
+    }
+
+    /**
+     * Get the resource alias to read elements from for validation.
+     *
+     * @return the resource alias (defaults to "source")
+     */
+    public String getResourceAlias() {
+        return resourceAlias;
     }
 
     /**

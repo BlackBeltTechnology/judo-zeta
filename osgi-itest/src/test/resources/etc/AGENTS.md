@@ -1,0 +1,8 @@
+# osgi-itest/src/test/resources/etc — agent notes
+
+Karaf `etc/` overlay copied into the Pax-Exam container before boot. Files are ASF-licensed Karaf stock configs, edited locally.
+
+| File | Purpose |
+|---|---|
+| `org.ops4j.pax.logging.cfg` | Pax-Logging (log4j2) config for the Pax-Exam Karaf container. Sets `log4j2.rootLogger.level = DEBUG` and wires three appenders: `Console` (`PatternLayout`, gated by a `ThresholdFilter` at `${karaf.log.console:-INFO}` so DEBUG stays out of stdout), `RollingFile` (`RollingRandomAccessFile` to `${karaf.log}/karaf.log`, `SizeBasedTriggeringPolicy` 16MB, `append = true`), and `PaxOsgi` (`filter = *`). Shared pattern lives in `log4j2.pattern` and carries `bundle.id`/`bundle.name`/`bundle.version` MDC keys — that is how Zeta bundle-resolution failures get attributed. Every appender referenced in `log4j2.rootLogger.appenderRefs` must also appear in `log4j2.appenders` or Pax-Logging drops it silently. |
+| `org.ops4j.pax.url.mvn.cfg` | Pax-URL Aether config controlling how `mvn:` bundle URLs (the `mavenBundle(...)` refs in `ZetaLoadITest.config()`) resolve inside the container. Points `org.ops4j.pax.url.mvn.settings` at `${basedir}/../.maven.xml` and sets `useFallbackRepositories=false`, so `defaultRepositories` (system/kar/child system repos, all `@snapshots`) plus the explicit `repositories` list (central, Apache snapshots, ops4j Sonatype snapshots) are the whole resolution surface — an artifact absent from those fails the test rather than falling back. Timeouts: `timeout`/`socket.connectionTimeout` 5000 ms, `socket.readTimeout` 30000 ms, `connection.retryCount` 3. `certificateCheck=true`, so an untrusted TLS repo mirror breaks provisioning. |

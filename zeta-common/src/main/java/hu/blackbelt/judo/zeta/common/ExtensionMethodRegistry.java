@@ -27,6 +27,8 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import org.eclipse.emf.ecore.EObject;
 
+import static java.util.Optional.ofNullable;
+
 /**
  * Registry for extension methods with caching support.
  *
@@ -45,7 +47,12 @@ public class ExtensionMethodRegistry {
         Class<? extends EObject>,
         List<ExtensionMethodDescriptor>
     > extensions = new HashMap<>();
-    private final Map<CacheKey, Object> cache = new ConcurrentHashMap<>();
+
+    /**
+     * Cache for extension method results.
+     * Uses Optional to allow caching null return values (ConcurrentHashMap doesn't allow null).
+     */
+    private final Map<CacheKey, Optional<Object>> cache = new ConcurrentHashMap<>();
 
     /**
      * Register extension methods from a class.
@@ -157,9 +164,11 @@ public class ExtensionMethodRegistry {
 
         if (descriptor.isCached()) {
             CacheKey key = CacheKeyBuilder.build(target, methodName, args);
-            return (T) cache.computeIfAbsent(key, k ->
-                descriptor.invoke(target, args)
+            // Use Optional to cache null values (ConcurrentHashMap doesn't allow null)
+            Optional<Object> cached = cache.computeIfAbsent(key, k ->
+                ofNullable(descriptor.invoke(target, args))
             );
+            return (T) cached.orElse(null);
         }
 
         return (T) descriptor.invoke(target, args);
