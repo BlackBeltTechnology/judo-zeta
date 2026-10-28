@@ -26,4 +26,10 @@ public @interface Critique {
      * Warning message to display when the critique is violated.
      */
     String message() default "";
+
+    /**
+     * The resource alias to read elements from for validation.
+     * Defaults to "source".
+     */
+    String resourceAlias() default "source";
 }
