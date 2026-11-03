@@ -27,6 +27,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.resource.ResourceSet;
 
+import static java.util.Optional.ofNullable;
+
 /**
  * Runtime context for validation execution.
  *
@@ -54,7 +56,18 @@ public class ValidationContext {
     private final ResourceSet resourceSet;
     private final ExtensionMethodRegistry extensionRegistry;
     private final Map<CacheKey, SatisfiesState> satisfiesCache;
-    private final Map<String, Object> attributes;
+
+    /**
+     * Custom attributes map.
+     * Uses Optional to allow null values (ConcurrentHashMap doesn't allow null).
+     */
+    private final Map<String, Optional<Object>> attributes;
+
+    /**
+     * Registry mapping aliases to ResourceSets.
+     * "source" is registered by default.
+     */
+    private final Map<String, ResourceSet> resourceRegistry = new ConcurrentHashMap<>();
 
     /**
      * Thread-local current element for parallel validation support.
@@ -73,6 +86,9 @@ public class ValidationContext {
         this.extensionRegistry = extensionRegistry;
         this.satisfiesCache = new ConcurrentHashMap<>();
         this.attributes = new ConcurrentHashMap<>();
+
+        // Register default alias
+        resourceRegistry.put("source", resourceSet);
     }
 
     /**
@@ -241,7 +257,56 @@ public class ValidationContext {
      * @return collection of instances
      */
     public <T extends EObject> Collection<T> getAllInstances(Class<T> eClass) {
-        return modelProvider.getAllContents(resourceSet, eClass);
+        return all("source", eClass);
+    }
+
+    // ==================== Resource Alias Support ====================
+
+    /**
+     * Register a ResourceSet with an alias.
+     * This allows accessing multiple models during validation.
+     *
+     * @param alias the alias name (e.g., "mapping", "rules")
+     * @param resourceSet the ResourceSet to register
+     */
+    public void registerResource(String alias, ResourceSet resourceSet) {
+        if (alias == null) {
+            throw new IllegalArgumentException("Resource alias cannot be null");
+        }
+        if (resourceSet == null) {
+            throw new IllegalArgumentException("ResourceSet cannot be null for alias: " + alias);
+        }
+        resourceRegistry.put(alias, resourceSet);
+    }
+
+    /**
+     * Get a ResourceSet by its alias.
+     *
+     * @param alias the alias name
+     * @return the ResourceSet
+     * @throws IllegalArgumentException if alias is not registered
+     */
+    public ResourceSet getResource(String alias) {
+        ResourceSet rs = resourceRegistry.get(alias);
+        if (rs == null) {
+            throw new IllegalArgumentException(
+                    "Unknown resource alias: '" + alias + "'. " +
+                    "Available aliases: " + resourceRegistry.keySet()
+            );
+        }
+        return rs;
+    }
+
+    /**
+     * Get all instances of a type from an aliased resource.
+     *
+     * @param alias the resource alias
+     * @param type the element type
+     * @param <T> the element type
+     * @return collection of instances
+     */
+    public <T extends EObject> Collection<T> all(String alias, Class<T> type) {
+        return modelProvider.getAllContents(getResource(alias), type);
     }
 
     /**
@@ -271,10 +336,10 @@ public class ValidationContext {
      * Set a custom attribute (for use in pre/post hooks).
      *
      * @param key the attribute key
-     * @param value the attribute value
+     * @param value the attribute value (null is allowed)
      */
     public void setAttribute(String key, Object value) {
-        attributes.put(key, value);
+        attributes.put(key, ofNullable(value));
     }
 
     /**
@@ -285,7 +350,8 @@ public class ValidationContext {
      */
     @SuppressWarnings("unchecked")
     public <T> T getAttribute(String key) {
-        return (T) attributes.get(key);
+        Optional<Object> opt = attributes.get(key);
+        return opt != null ? (T) opt.orElse(null) : null;
     }
 
     /**

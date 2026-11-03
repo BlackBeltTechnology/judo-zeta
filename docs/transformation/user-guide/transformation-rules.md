@@ -27,6 +27,40 @@ public TransformFunction<SourceType, TargetType> methodName() {
 }
 ```
 
+## Source and Target Type Annotations
+
+### @Transform - Specifying Source Types
+
+The `@Transform` annotation declares the source type for a rule:
+
+```java
+@TransformRule(name = "Entity2Table")
+@Transform(type = EntityType.class)  // Source type
+@To(type = Table.class)              // Target type
+public TransformFunction<EntityType, Table> entity2Table() { ... }
+```
+
+**With Resource Alias** (for multi-model transformations):
+```java
+@Transform(alias = "asm", type = EntityType.class)
+```
+
+### @To - Specifying Target Types
+
+The `@To` annotation declares the target type:
+
+```java
+@TransformRule(name = "Entity2Table")
+@Transform(type = EntityType.class)
+@To(type = Table.class)
+public TransformFunction<EntityType, Table> entity2Table() { ... }
+```
+
+**With Resource Alias**:
+```java
+@To(alias = "rdbms", type = Table.class)
+```
+
 ## TransformFunction Return Types
 
 The `TransformFunction<S, T>` interface is parameterized:
@@ -54,28 +88,84 @@ public TransformFunction<EntityType, Void> processRelations() {
 
 ## Creating Target Elements
 
-Use `ctx.createTarget()` to create new elements in the target model:
+### ctx.createTarget() vs ctx.create()
 
+| Method | Adds to Resource | Use Case |
+|--------|------------------|----------|
+| `ctx.createTarget(Class)` | ✅ Yes | Standard element creation |
+| `ctx.create(Class)` | ❌ No | Manual placement or containment |
+
+**Standard Usage: createTarget()**
 ```java
 @TransformRule(name = "Entity2Table")
 public TransformFunction<EntityType, Table> entity2Table() {
     return (entity, ctx) -> {
-        // Creates element and adds to target ResourceSet
+        // Creates element AND adds to target ResourceSet
         Table table = ctx.createTarget(Table.class);
-        
-        // Set properties
         table.setName(entity.getName());
-        table.setSchema(entity.getNamespace().getName());
-        
         return table;
     };
 }
 ```
 
-**Important**: `createTarget()` requires the target EPackage to be set on the context:
+**Manual Placement: create()**
+```java
+@TransformRule(name = "Attribute2Column")
+public TransformFunction<Attribute, Column> attribute2Column() {
+    return (attr, ctx) -> {
+        // Creates element WITHOUT adding to Resource
+        // (will be contained by parent Table)
+        Column column = ctx.create(Column.class);
+        column.setName(attr.getName());
+        return column;
+    };
+}
+```
+
+**Important**: Both methods require the target EPackage to be set:
 
 ```java
 context.setTargetPackage(TargetPackage.eINSTANCE);
+```
+
+## Multi-Model Transformations
+
+Use resource aliases when working with multiple source or target models.
+
+### Register Resources
+
+```java
+// Register multiple resources with aliases
+context.registerResource("asm", asmResourceSet);
+context.registerResource("mapping", mappingResourceSet);
+context.registerResource("rdbms", targetResourceSet);
+```
+
+### Specify Aliases in Rules
+
+```java
+@TransformRule(name = "EntityMapping2Table")
+@Transform(alias = "asm", type = EntityType.class)
+@Transform(alias = "mapping", type = TypeMapping.class)
+@To(alias = "rdbms", type = Table.class)
+public MultiSourceTransformFunction<Table> entityMapping2Table() {
+    return (sources, ctx) -> {
+        EntityType entity = (EntityType) sources[0];
+        TypeMapping mapping = (TypeMapping) sources[1];
+
+        Table table = ctx.createTarget(Table.class);
+        table.setName(mapping.mapName(entity.getName()));
+        return table;
+    };
+}
+```
+
+### Query Elements by Alias
+
+```java
+// Get elements from specific alias
+Collection<EntityType> entities = ctx.all("asm", EntityType.class);
+Collection<TypeMapping> mappings = ctx.all("mapping", TypeMapping.class);
 ```
 
 ## Mapping Properties

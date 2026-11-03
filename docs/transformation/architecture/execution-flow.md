@@ -72,6 +72,14 @@ For each source element:
 - Results are cached after first execution
 - Subsequent calls return cached results
 
+**Inheritance State Isolation**: When `equivalent()` is called from within a transform function, the framework automatically:
+1. Saves the caller's inheritance state (pre-created target, inheritance execution flag)
+2. Resets to a clean state for the nested transformation
+3. Executes the nested rule with its own independent context
+4. Restores the caller's inheritance state after completion
+
+This ensures that `equivalent()` calls from within `@Extends` rules produce independent targets, not accidentally reusing the caller's pre-created target.
+
 ### Phase 4: Post-Execution
 
 1. Invoke all `@PostExecution` methods

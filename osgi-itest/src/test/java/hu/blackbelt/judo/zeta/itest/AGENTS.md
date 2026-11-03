@@ -1,0 +1,8 @@
+# osgi-itest/src/test/java/hu/blackbelt/judo/zeta/itest — agent notes
+
+Pax-Exam integration tests. Boot Zeta bundles inside real Apache Karaf container, assert OSGi wiring holds.
+
+| File | Purpose |
+|---|---|
+| `KarafFeatureProvider.java` | Builds Pax-Exam `Option[]` provisioning Apache Karaf 4.3.3 (`KARAF_GROUPID`/`APACHE_KARAF` zip, `versionAsInProject`) for Zeta OSGi tests. Exports `karafUrl()`, `karafConfig(Class)`, `configureVmOptions()`, `getFreePort()`, `getKarafPort()`, `getConfigFile()`, `testTargetDir(Class)`, `getOsgiService(...)`, `assertBundleStarted`, `findBundleByName`, `waitWebPage`, `sleepOrTimeout`, `explode`, `asCollection`. All members static — no instance needed. `getKarafPort()` reads system property `karafPort`, falls back to `getFreePort()`; `getFreePort()` throws `RuntimeException` when `ServerSocket(0)` cannot bind. Service lookups time out at `SERVICE_TIMEOUT` = 30000 ms. |
+| `ZetaLoadITest.java` | Pax-Exam smoke test proving the four Zeta bundles — `hu.blackbelt.judo.zeta.annotations`, `.common`, `.validation-core`, `.transformation-core` — resolve and start in Karaf. Exports `config()` (`@Configuration`, combines `karafConfig(getClass())` with the four `mavenBundle(...)` refs), `testModelValidation()` (`@Test`). Runs under `@RunWith(PaxExam.class)` with `@ExamReactorStrategy(PerClass.class)`; injects `BundleTrackerManager` and `BundleContext`, so failure to publish those services fails the container, not the assertion. `testModelValidation()` body is empty — the test asserts provisioning only; adding a bundle to Zeta's OSGi surface requires adding a `mavenBundle` entry here or it goes untested. |
