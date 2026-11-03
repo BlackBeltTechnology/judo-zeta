@@ -1,8 +1,4 @@
-<project
-    xmlns="http://maven.apache.org/POM/4.0.0"
-    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-    xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd"
->
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
 	<modelVersion>4.0.0</modelVersion>
 
     <groupId>hu.blackbelt.judo.zeta</groupId>
@@ -24,8 +20,7 @@
 	<scm>
 		<connection>scm:git:git@github.com:${project-repositoryId}.git</connection>
 		<!--suppress UnresolvedMavenProperty -->
-		<developerConnection
-        >scm:git:ssh://${git.username}@github.com:${project-repositoryId}.git
+		<developerConnection>scm:git:ssh://${git.username}@github.com:${project-repositoryId}.git
         </developerConnection>
 		<url>http://github.com/${project-repositoryId}</url>
 	</scm>
@@ -82,7 +77,7 @@
 
 		<surefire-version>3.5.1</surefire-version>
 
-		<judo-version-updater-maven-plugin-version>1.0.0.20251018_144638_43e5ded4_develop</judo-version-updater-maven-plugin-version>
+		<judo-version-updater-maven-plugin-version>1.0.0.20260311_102218_9249f043_develop</judo-version-updater-maven-plugin-version>
 
         <!-- Pax exam dependencies -->
 		<karaf-version>4.4.7</karaf-version>
@@ -90,8 +85,8 @@
 		<jackson-version>2.17.2</jackson-version>
 		<spring-version>6.2.7</spring-version>
 
-		<osgi-utils-version>1.1.1.20251022_091331_32e8ad08_develop</osgi-utils-version>
-		<karaf-features-version>2.0.2.20251022_061140_127091e3_develop</karaf-features-version>
+		<osgi-utils-version>1.1.1.20260312_044531_b5e27500_develop</osgi-utils-version>
+		<karaf-features-version>2.0.2.20260311_090833_f7f05880_develop</karaf-features-version>
 		<pax-exam-version>4.13.5</pax-exam-version>
 		<lombok-version>1.18.34</lombok-version>
 
@@ -499,13 +494,11 @@
 			<distributionManagement>
 				<snapshotRepository>
 					<id>dummy-distribution</id>
-					<url
-                    >file:///tmp/${project.groupId}-${project.artifactId}-${project.version}/maven-snapshot/</url>
+					<url>file:///tmp/${project.groupId}-${project.artifactId}-${project.version}/maven-snapshot/</url>
 				</snapshotRepository>
 				<repository>
 					<id>dummy-distribution</id>
-					<url
-                    >file:///tmp/${project.groupId}-${project.artifactId}-${project.version}/maven-release/</url>
+					<url>file:///tmp/${project.groupId}-${project.artifactId}-${project.version}/maven-release/</url>
 				</repository>
 			</distributionManagement>
 		</profile>
