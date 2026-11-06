@@ -6,6 +6,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+
+import org.eclipse.emf.ecore.resource.Resource;
+import org.eclipse.emf.ecore.resource.ResourceSet;
 /*-
  * #%L
  * Judo :: Zeta :: Validation Core
@@ -85,6 +88,31 @@ public class ValidationExecutor {
     }
 
     /**
+     * Validate all elements by collecting them from registered resources based on validator definitions.
+     *
+     * <p>This method automatically collects elements from the appropriate resource aliases
+     * as defined by the @Constraint/@Critique annotations on registered validators. For validators
+     * using the resourceAlias attribute, elements are collected from the specified alias.
+     * For backward compatibility, validators without explicit resourceAlias use the default "source" alias.</p>
+     *
+     * @return list of validation failures (empty if all passed)
+     */
+    public List<ValidationResult> validate() {
+        // Collect all elements based on validator definitions
+        Set<EObject> allElements = new LinkedHashSet<>();
+        
+        for (ValidatorDescriptor validator : registry.getAllValidators()) {
+            String resourceAlias = validator.getResourceAlias();
+            Class<? extends EObject> contextType = validator.getContextType();
+            
+            Collection<? extends EObject> elements = context.all(resourceAlias, contextType);
+            allElements.addAll(elements);
+        }
+        
+        return validate(allElements);
+    }
+
+    /**
      * Validate all elements in the collection.
      *
      * @param elements elements to validate
@@ -134,7 +162,7 @@ public class ValidationExecutor {
                     registry.getValidatorsFor(element.getClass());
 
                 for (ValidatorDescriptor validator : validators) {
-                    if (validator.appliesTo(element)) {
+                    if (validator.appliesTo(element) && isFromExpectedAlias(element, validator)) {
                         ValidationResult result = validator.validate(
                             element,
                             context
@@ -219,7 +247,7 @@ public class ValidationExecutor {
 
                 if (validators != null) {
                     for (ValidatorDescriptor validator : validators) {
-                        if (validator.appliesTo(element)) {
+                        if (validator.appliesTo(element) && isFromExpectedAlias(element, validator)) {
                             ValidationResult result = validator.validate(
                                 element,
                                 context
@@ -236,6 +264,42 @@ public class ValidationExecutor {
         }
 
         return results;
+    }
+
+    /**
+     * Check if the element comes from a resource that matches the validator's expected alias.
+     *
+     * <p>For validators with explicit resourceAlias, verifies the element is from the specified alias.
+     * For backward compatibility, validators using the default "source" alias accept elements from
+     * the source resource.</p>
+     *
+     * @param element the element to check
+     * @param validator the validator descriptor
+     * @return true if the element is from the expected resource alias
+     */
+    private boolean isFromExpectedAlias(EObject element, ValidatorDescriptor validator) {
+        String resourceAlias = validator.getResourceAlias();
+        
+        // Get the element's resource set
+        Resource elementResource = element.eResource();
+        if (elementResource == null) {
+            // Elements without a resource can only be validated if alias is "source" (default)
+            return "source".equals(resourceAlias);
+        }
+        
+        ResourceSet elementResourceSet = elementResource.getResourceSet();
+        if (elementResourceSet == null) {
+            return "source".equals(resourceAlias);
+        }
+        
+        // Get the expected resource set from the alias
+        ResourceSet aliasResourceSet = context.getResource(resourceAlias);
+        if (aliasResourceSet == null) {
+            // Unknown alias - fall back to accepting if it's the default
+            return "source".equals(resourceAlias);
+        }
+        
+        return aliasResourceSet.equals(elementResourceSet);
     }
 
     /**

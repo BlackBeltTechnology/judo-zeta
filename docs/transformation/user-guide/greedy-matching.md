@@ -112,6 +112,86 @@ public TransformFunction<Element, Target> validElement2Target() { ... }
 public TransformFunction<Element, Target> baseElement2BaseTarget() { ... }
 ```
 
+## Activity-Based Greedy (@ActivityBased)
+
+By default, `@Greedy @Lazy` rules process **all** matching elements during the lazy phase. The `@ActivityBased` annotation changes this behavior to only process elements that were explicitly activated via `equivalent()` calls.
+
+### Standard @Greedy @Lazy Behavior
+
+```java
+@TransformRule(name = "Type2Element")
+@Greedy
+@Lazy
+public TransformFunction<Type, Element> type2Element() { ... }
+// Processes ALL Type instances and subtypes during lazy phase
+```
+
+### Activity-Based Behavior
+
+```java
+@TransformRule(name = "Type2Element")
+@Greedy
+@Lazy
+@ActivityBased
+public TransformFunction<Type, Element> type2Element() { ... }
+// ONLY processes Type instances that were passed to ctx.equivalent()
+```
+
+### Activation Tracking
+
+When `@ActivityBased` is used:
+
+1. Element becomes "activated" when passed to `ctx.equivalent()`
+2. During lazy phase, only activated elements are transformed
+3. Orphan/unreferenced elements are skipped
+
+```java
+// In some eager rule
+@TransformRule(name = "Entity2Table")
+public TransformFunction<EntityType, Table> entity2Table() {
+    return (entity, ctx) -> {
+        Table table = ctx.createTarget(Table.class);
+
+        for (Attribute attr : entity.getAttributes()) {
+            // This ACTIVATES each attribute
+            Column col = ctx.equivalent(attr, Column.class);
+            table.getColumns().add(col);
+        }
+
+        return table;
+    };
+}
+
+// Activity-based rule - only processes activated attributes
+@TransformRule(name = "Attribute2Column")
+@Greedy
+@Lazy
+@ActivityBased
+public TransformFunction<Attribute, Column> attribute2Column() { ... }
+```
+
+### When to Use @ActivityBased
+
+| Scenario | Use @ActivityBased? |
+|----------|---------------------|
+| Skip orphan elements | ✅ Yes |
+| ETL compatibility | ✅ Yes |
+| Process all matching | ❌ No (use standard @Greedy @Lazy) |
+
+### ETL Compatibility Mode
+
+Instead of adding `@ActivityBased` to individual rules, you can enable it globally:
+
+```java
+TransformationExecutor executor = TransformationExecutor.builder()
+    .registry(registry)
+    .context(context)
+    .etlCompatibilityMode(true)  // All @Greedy @Lazy rules become activity-based
+    .build();
+```
+
+This matches Epsilon ETL's implicit filtering behavior where lazy rules only process elements reachable from eager transformations.
+
 ## EMF Type Checking
 
 Greedy matching uses EMF's `EClass.isSuperTypeOf()`:
