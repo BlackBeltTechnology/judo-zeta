@@ -98,6 +98,8 @@ public class ValidationExecutor {
      * @return list of validation failures (empty if all passed)
      */
     public List<ValidationResult> validate() {
+        // the model may have changed since an earlier run on this context
+        context.clearInstanceCache();
         // Collect all elements based on validator definitions
         Set<EObject> allElements = new LinkedHashSet<>();
         
@@ -109,7 +111,8 @@ public class ValidationExecutor {
             allElements.addAll(elements);
         }
         
-        return validate(allElements);
+        // the instance lists just read stay valid for the rules of this run
+        return validateElements(allElements);
     }
 
     /**
@@ -121,10 +124,21 @@ public class ValidationExecutor {
     public List<ValidationResult> validate(
         Collection<? extends EObject> elements
     ) {
+        context.clearInstanceCache();
+        return validateElements(elements);
+    }
+
+    private List<ValidationResult> validateElements(
+        Collection<? extends EObject> elements
+    ) {
         context.clearSatisfiesCache();
 
         // Invoke pre-validation hooks
         registry.invokePreValidationHooks(context);
+        if (registry.hasPreValidationHooks()) {
+            // a hook may change the model: the rules must not see instance lists read before it ran
+            context.clearInstanceCache();
+        }
 
         try {
             // Use parallel only if requested AND element count exceeds threshold
