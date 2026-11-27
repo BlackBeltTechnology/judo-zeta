@@ -70,6 +70,14 @@ public class ValidationContext {
     private final Map<String, ResourceSet> resourceRegistry = new ConcurrentHashMap<>();
 
     /**
+     * Instances per resource alias and type, filled on the first {@link #all(String, Class)} call. Rules call
+     * {@code all}/{@code getAllInstances} once per validated element; without the cache every call walked the whole
+     * resource set (O(elements × model size)). Cleared by {@link #clearInstanceCache()} (every
+     * {@code ValidationExecutor.validate} run) and per alias by {@link #registerResource(String, ResourceSet)}.
+     */
+    private final Map<String, Map<Class<?>, List<? extends EObject>>> instanceCache = new ConcurrentHashMap<>();
+
+    /**
      * Thread-local current element for parallel validation support.
      * Each thread has its own current element, avoiding race conditions.
      */
@@ -277,6 +285,15 @@ public class ValidationContext {
             throw new IllegalArgumentException("ResourceSet cannot be null for alias: " + alias);
         }
         resourceRegistry.put(alias, resourceSet);
+        instanceCache.remove(alias);
+    }
+
+    /**
+     * Drops the cached instance lists, so the next {@link #all(String, Class)} reads the resource sets again. Call it
+     * when the model changed since the last validation on this context.
+     */
+    public void clearInstanceCache() {
+        instanceCache.clear();
     }
 
     /**
@@ -305,8 +322,14 @@ public class ValidationContext {
      * @param <T> the element type
      * @return collection of instances
      */
+    @SuppressWarnings("unchecked")
     public <T extends EObject> Collection<T> all(String alias, Class<T> type) {
-        return modelProvider.getAllContents(getResource(alias), type);
+        ResourceSet resource = getResource(alias);
+        List<? extends EObject> instances = instanceCache
+                .computeIfAbsent(alias, a -> new ConcurrentHashMap<>())
+                .computeIfAbsent(type, t -> new ArrayList<>(modelProvider.getAllContents(resource, type)));
+        // a fresh, mutable copy as before: callers may modify the returned collection
+        return new ArrayList<>((List<T>) instances);
     }
 
     /**

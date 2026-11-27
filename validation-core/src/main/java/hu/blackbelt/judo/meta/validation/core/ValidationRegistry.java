@@ -275,6 +275,11 @@ public class ValidationRegistry {
             .collect(Collectors.toList());
     }
 
+    /** @return true when at least one {@code @PreExecution} hook is registered */
+    public boolean hasPreValidationHooks() {
+        return !preValidationHooks.isEmpty();
+    }
+
     /**
      * Invoke all pre-validation hooks.
      */
